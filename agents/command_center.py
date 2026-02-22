@@ -1,7 +1,6 @@
 """
-brAIn Command Center Agent v1.1
-Riceve comandi da Telegram, elabora con Claude, logga in Supabase.
-Ora con /problems e chat che consulta il database.
+brAIn Command Center Agent v1.3
+Con memoria conversazione e /problems, /solutions.
 """
 
 import os
@@ -16,15 +15,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 load_dotenv()
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
+
+# Memoria conversazione (ultime 10 coppie messaggio/risposta)
+chat_history = []
+MAX_HISTORY = 10
 
 SYSTEM_PROMPT = """Sei il Command Center di brAIn, un'organizzazione AI-native.
 Il tuo ruolo è assistere Mirco (il fondatore) nella gestione dell'organizzazione.
@@ -34,6 +32,7 @@ Sii diretto e conciso — zero filler.
 Una sola domanda per volta se devi chiedere qualcosa.
 
 Ti vengono forniti dati dal database di brAIn come contesto. Usali per dare risposte informate.
+Hai memoria della conversazione corrente — puoi fare riferimento a messaggi precedenti.
 """
 
 
@@ -58,7 +57,6 @@ def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
 
 
 def get_db_context():
-    """Recupera contesto dal database per arricchire le risposte"""
     context = ""
     try:
         problems = supabase.table("problems").select("title,score,urgency,status,domain").order("score", desc=True).limit(10).execute()
@@ -66,6 +64,24 @@ def get_db_context():
             context += "\n\nPROBLEMI IDENTIFICATI:\n"
             for p in problems.data:
                 context += f"- [{p['score']}] {p['title']} ({p['domain']}) - {p['urgency']} - {p['status']}\n"
+    except:
+        pass
+
+    try:
+        solutions = supabase.table("solutions").select("id,title,status,description,approach").order("id", desc=True).limit(10).execute()
+        scores = supabase.table("solution_scores").select("solution_id,overall_score,feasibility_score,impact_score,complexity,cost_estimate,time_to_market,notes").execute()
+        score_map = {s["solution_id"]: s for s in (scores.data or [])}
+
+        if solutions.data:
+            context += "\n\nSOLUZIONI GENERATE:\n"
+            for s in solutions.data:
+                sc = score_map.get(s["id"], {})
+                context += (
+                    f"- [{sc.get('overall_score', '?')}] {s['title']} - {s['status']}\n"
+                    f"  Descrizione: {s.get('description', '')[:150]}\n"
+                    f"  Approach: {s.get('approach', '')[:150]}\n"
+                    f"  Costo: {sc.get('cost_estimate', '?')} | TTM: {sc.get('time_to_market', '?')} | Revenue: {sc.get('notes', '?')}\n"
+                )
     except:
         pass
 
@@ -78,35 +94,40 @@ def get_db_context():
     except:
         pass
 
-    try:
-        capabilities = supabase.table("capability_log").select("tool_name,category,status").limit(10).execute()
-        if capabilities.data:
-            context += "\n\nTOOL SCOPERTI:\n"
-            for c in capabilities.data:
-                context += f"- {c['tool_name']} ({c['category']}) - {c['status']}\n"
-    except:
-        pass
-
     return context
 
 
 def ask_claude(user_message, model="claude-haiku-4-5-20251001"):
+    global chat_history
+
     start = time.time()
     try:
         db_context = get_db_context()
         full_system = SYSTEM_PROMPT + db_context
 
+        # Costruisci messaggi con storia
+        messages = []
+        for h in chat_history:
+            messages.append({"role": "user", "content": h["user"]})
+            messages.append({"role": "assistant", "content": h["assistant"]})
+        messages.append({"role": "user", "content": user_message})
+
         response = claude.messages.create(
             model=model,
             max_tokens=1024,
             system=full_system,
-            messages=[{"role": "user", "content": user_message}]
+            messages=messages,
         )
         duration = int((time.time() - start) * 1000)
         reply = response.content[0].text
         tokens_in = response.usage.input_tokens
         tokens_out = response.usage.output_tokens
         cost = (tokens_in * 1.0 + tokens_out * 5.0) / 1_000_000
+
+        # Salva in storia
+        chat_history.append({"user": user_message, "assistant": reply})
+        if len(chat_history) > MAX_HISTORY:
+            chat_history = chat_history[-MAX_HISTORY:]
 
         log_to_supabase(
             agent_id="command_center",
@@ -150,13 +171,13 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[CONFIG ERROR] {e}")
 
     await update.message.reply_text(
-        "brAIn Command Center attivo.\n"
-        f"Il tuo ID ({AUTHORIZED_USER_ID}) e' registrato.\n\n"
+        "brAIn Command Center v1.3 attivo.\n\n"
         "Comandi:\n"
-        "/status — stato dell'organizzazione\n"
+        "/status — stato organizzazione\n"
         "/problems — problemi identificati\n"
+        "/solutions — soluzioni generate\n"
         "/help — lista comandi\n\n"
-        "Oppure scrivi qualsiasi cosa e rispondo."
+        "Oppure scrivi qualsiasi cosa."
     )
     log_to_supabase("command_center", "start", f"user_id={AUTHORIZED_USER_ID}", "Bot avviato", "none")
 
@@ -197,16 +218,13 @@ async def cmd_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
         result = supabase.table("problems").select("title,score,urgency,domain,status").order("score", desc=True).limit(10).execute()
 
         if not result.data:
-            await update.message.reply_text("Nessun problema identificato. Lancia il World Scanner.")
+            await update.message.reply_text("Nessun problema identificato.")
             return
 
-        text = "Problemi identificati (ordinati per score):\n\n"
+        text = "Problemi identificati:\n\n"
         for i, p in enumerate(result.data, 1):
             emoji = "🔴" if p["urgency"] == "critical" else "🟠" if p["urgency"] == "high" else "🟡" if p["urgency"] == "medium" else "🟢"
-            status_icon = "✅" if p["status"] == "approved" else "⏳" if p["status"] == "new" else "❌"
-            text += f"{i}. {emoji} [{p['score']}] {p['title']}\n   {p['domain']} | {status_icon} {p['status']}\n\n"
-
-        text += "Rispondi con il numero per dettagli, o scrivi 'approva [numero]' per approvare."
+            text += f"{i}. {emoji} [{p['score']}] {p['title']}\n   {p['domain']} | {p['status']}\n\n"
 
     except Exception as e:
         text = f"Errore: {e}"
@@ -215,18 +233,58 @@ async def cmd_problems(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_to_supabase("command_center", "problems", "lista problemi", text[:200], "none")
 
 
+async def cmd_solutions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+
+    try:
+        solutions = supabase.table("solutions").select("id,title,status,problem_id").order("id").execute()
+        scores = supabase.table("solution_scores").select("solution_id,overall_score,feasibility_score,impact_score,complexity,cost_estimate,time_to_market").execute()
+        problems = supabase.table("problems").select("id,title").execute()
+
+        if not solutions.data:
+            await update.message.reply_text("Nessuna soluzione generata.")
+            return
+
+        score_map = {s["solution_id"]: s for s in (scores.data or [])}
+        problem_map = {p["id"]: p["title"] for p in (problems.data or [])}
+
+        sorted_sols = sorted(solutions.data, key=lambda s: score_map.get(s["id"], {}).get("overall_score", 0), reverse=True)
+
+        text = "Soluzioni (per score):\n\n"
+        for i, sol in enumerate(sorted_sols, 1):
+            sc = score_map.get(sol["id"], {})
+            prob_name = problem_map.get(sol["problem_id"], "?")[:30]
+            overall = sc.get("overall_score", 0)
+            complexity = sc.get("complexity", "?")
+            cost = sc.get("cost_estimate", "?")
+            ttm = sc.get("time_to_market", "?")
+
+            text += (
+                f"{i}. [{overall:.2f}] {sol['title']}\n"
+                f"   {prob_name}\n"
+                f"   {complexity} | {cost} | {ttm}\n\n"
+            )
+
+    except Exception as e:
+        text = f"Errore: {e}"
+
+    await update.message.reply_text(text)
+    log_to_supabase("command_center", "solutions", "lista soluzioni", text[:200], "none")
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
 
     help_text = (
-        "brAIn Command Center\n\n"
-        "/start — Registra e attiva il bot\n"
-        "/status — Stato dell'organizzazione\n"
-        "/problems — Lista problemi identificati\n"
+        "brAIn Command Center v1.3\n\n"
+        "/start — Registra e attiva\n"
+        "/status — Stato organizzazione\n"
+        "/problems — Problemi identificati\n"
+        "/solutions — Soluzioni generate\n"
         "/help — Questo messaggio\n\n"
-        "Scrivi qualsiasi messaggio per parlare con Claude.\n"
-        "Il bot consulta automaticamente il database per darti risposte informate."
+        "Chat libera con memoria della conversazione."
     )
     await update.message.reply_text(help_text)
 
@@ -263,14 +321,15 @@ def is_authorized(update: Update) -> bool:
 
 
 def main():
-    print("brAIn Command Center v1.1 avviato...")
-    print(f"   Connesso a Supabase: {SUPABASE_URL}")
+    print("brAIn Command Center v1.3 avviato...")
+    print(f"   Connesso a Supabase: {os.getenv('SUPABASE_URL')}")
 
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("problems", cmd_problems))
+    app.add_handler(CommandHandler("solutions", cmd_solutions))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
