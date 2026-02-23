@@ -1,0 +1,776 @@
+"""
+brAIn Command Center Unified v1.0
+Bot Telegram unificato — unico punto di contatto per Mirco.
+Modello: Haiku 4.5 (economico, veloce, sufficiente per dashboard).
+Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat.
+NON scrive codice, NON fa deploy, NON accede a GitHub.
+"""
+
+import os
+import json
+import re
+import time
+import logging
+import asyncio
+import threading
+import base64
+from datetime import datetime, timedelta
+from aiohttp import web
+from dotenv import load_dotenv
+import anthropic
+import requests as http_requests
+from supabase import create_client
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+PORT = int(os.environ.get("PORT", 8080))
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
+AGENTS_RUNNER_URL = os.environ.get("AGENTS_RUNNER_URL", "")
+
+claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+
+AUTHORIZED_USER_ID = None
+chat_history = []
+MAX_HISTORY = 10
+
+# ---- VOICE TRANSCRIPTION (Google Speech-to-Text) ----
+
+def transcribe_voice(audio_bytes):
+    try:
+        url = "https://speech.googleapis.com/v1/speech:recognize"
+        token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+        token_r = http_requests.get(token_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
+        if token_r.status_code != 200:
+            return None
+        access_token = token_r.json()["access_token"]
+        audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
+        payload = {
+            "config": {
+                "encoding": "OGG_OPUS",
+                "sampleRateHertz": 48000,
+                "languageCode": "it-IT",
+                "alternativeLanguageCodes": ["en-US"],
+                "model": "latest_long",
+                "enableAutomaticPunctuation": True,
+            },
+            "audio": {"content": audio_b64},
+        }
+        r = http_requests.post(
+            url,
+            headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        if r.status_code == 200:
+            result = r.json()
+            if "results" in result:
+                return " ".join(
+                    alt["transcript"]
+                    for res in result["results"]
+                    for alt in res.get("alternatives", [])[:1]
+                ).strip()
+        return None
+    except Exception as e:
+        logger.error(f"[VOICE] {e}")
+        return None
+
+
+# ---- SYSTEM PROMPT ----
+
+def build_system_prompt():
+    ctx = get_minimal_context()
+    return f"""Sei il Command Center di brAIn — unico punto di contatto per Mirco, il CEO.
+brAIn e' un organismo AI-native che scansiona problemi globali e costruisce soluzioni.
+
+COME PARLI:
+- SEMPRE in italiano, diretto, zero fuffa.
+- NON usare MAI Markdown: niente asterischi, grassetto, corsivo. Testo piano.
+- UNA sola domanda alla volta. Frasi corte.
+- Mai ripetere cose gia' dette.
+- Rispondi SUBITO con tutto in un unico messaggio.
+- NON chiedere conferme inutili. Se Mirco chiede "mostra problemi" tu li mostri.
+- Se Mirco risponde "si", "ok", "avanti" — procedi senza chiedere altro.
+
+HAI QUESTI TOOL per accedere ai dati. Usali SEMPRE per ottenere dati freschi, non inventare.
+
+FORMATO PROBLEMI (elevator — default, uno alla volta):
+[emoji] TITOLO (tradotto in italiano, max 8 parole)
+Score [barra visiva blocchi pieni/vuoti] | Settore | Urgenza
+Il dolore: una frase che fa sentire il problema
+Chi soffre: target specifico
+Mercato: dimensione/valore in numeri
+
+Emoji per score: >=0.6 cerchio rosso, 0.4-0.59 arancione, <0.4 giallo
+Barra: blocchi pieni e vuoti su 10 proporzionali allo score
+
+FORMATO SOLUZIONI (elevator — default, una alla volta):
+[emoji] TITOLO
+Score [barra] | Novita [barra] | Difendibilita [barra]
+Cosa fa: una frase
+Per chi: target
+Revenue: come guadagna
+Costo: burn mensile | TTM: tempo al mercato
+
+DEEP DIVE: solo quando Mirco chiede "approfondisci" o "dettagli".
+Max 15 righe. Per problemi: IL PROBLEMA, CHI SOFFRE, ESEMPIO REALE, PERCHE ORA, NUMERI CHIAVE.
+Per soluzioni: COSA FA, PERCHE FUNZIONA, COME GUADAGNA, COMPETITOR, PROSSIMO PASSO, RISCHI.
+
+FLUSSO PROBLEMI:
+- Quando Mirco chiede "problemi": usa query_supabase per prendere i top 5 con status=new, ordinati per weighted_score desc. Mostra il primo in formato elevator, poi "Vuoi vedere il prossimo?"
+- Se chiede "top 5" o "tutti": mostrali tutti insieme.
+- Se Mirco dice "approva" o "si vai": usa approve_problem con l'ID del problema appena mostrato.
+- Se dice "no", "rifiuta", "skip": usa reject_problem.
+- Se dice un numero: interpretalo come ID e approva/rifiuta in base al contesto.
+
+FLUSSO SOLUZIONI:
+- "soluzioni": usa query_supabase per prendere le soluzioni. Mostra una alla volta.
+- "seleziona" o "vai con questa": usa select_solution.
+
+STATO SISTEMA:
+- "come siamo messi?", "stato", "status": usa get_system_status. Riassumi in 3-5 righe.
+- "costi", "quanto spendiamo": usa get_cost_report.
+
+SCAN:
+- Se Mirco chiede di esplorare un tema: usa trigger_scan.
+
+FOTO:
+- Analizza in ottica brAIn: problemi visibili, opportunita, dati, trend.
+
+REGOLE FINALI:
+- Default: UN elemento alla volta. Dopo: "Vuoi vedere il prossimo?"
+- Tono: partner di startup studio che presenta dati a un investor. Professionale ma umano.
+
+{ctx}"""
+
+
+def get_minimal_context():
+    try:
+        p_count = supabase.table("problems").select("id", count="exact").execute()
+        p_new = supabase.table("problems").select("id", count="exact").eq("status", "new").execute()
+        p_approved = supabase.table("problems").select("id", count="exact").eq("status", "approved").execute()
+        s_count = supabase.table("solutions").select("id", count="exact").execute()
+        return (
+            f"\nSTATO ATTUALE: {p_count.count or 0} problemi "
+            f"({p_new.count or 0} nuovi, {p_approved.count or 0} approvati), "
+            f"{s_count.count or 0} soluzioni.\n"
+        )
+    except:
+        return ""
+
+
+# ---- TOOLS ----
+
+TOOLS = [
+    {
+        "name": "query_supabase",
+        "description": "Query SELECT su Supabase. Solo lettura. Usa per cercare dati specifici su problemi, soluzioni, costi, fonti, knowledge, agenti.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "Nome tabella"},
+                "select": {"type": "string", "description": "Colonne da selezionare (comma separated)"},
+                "filters": {"type": "string", "description": "Filtri: col=val, col.gte=val, col.lte=val separati da virgola"},
+                "order_by": {"type": "string"},
+                "order_desc": {"type": "boolean"},
+                "limit": {"type": "integer"},
+            },
+            "required": ["table", "select"],
+        },
+    },
+    {
+        "name": "get_system_status",
+        "description": "Stato completo: conteggi problemi/soluzioni, agenti attivi, errori recenti, costi 24h.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_cost_report",
+        "description": "Report costi per agente negli ultimi N giorni.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Giorni da analizzare (default 7)"},
+            },
+        },
+    },
+    {
+        "name": "approve_problem",
+        "description": "Approva un problema — cambia status a approved e notifica Solution Architect.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "problem_id": {"type": "integer", "description": "ID del problema"},
+            },
+            "required": ["problem_id"],
+        },
+    },
+    {
+        "name": "reject_problem",
+        "description": "Rifiuta un problema — cambia status a rejected.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "problem_id": {"type": "integer", "description": "ID del problema"},
+            },
+            "required": ["problem_id"],
+        },
+    },
+    {
+        "name": "select_solution",
+        "description": "Seleziona una soluzione per lancio — cambia status a selected.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "solution_id": {"type": "integer", "description": "ID della soluzione"},
+            },
+            "required": ["solution_id"],
+        },
+    },
+    {
+        "name": "trigger_scan",
+        "description": "Lancia scan mirato su un argomento specifico via agents-runner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Argomento/keywords da scansionare"},
+            },
+            "required": ["topic"],
+        },
+    },
+]
+
+
+def execute_tool(tool_name, tool_input):
+    try:
+        if tool_name == "query_supabase":
+            return supabase_query(tool_input)
+        elif tool_name == "get_system_status":
+            return get_system_status()
+        elif tool_name == "get_cost_report":
+            return get_cost_report(tool_input.get("days", 7))
+        elif tool_name == "approve_problem":
+            return approve_problem(tool_input["problem_id"])
+        elif tool_name == "reject_problem":
+            return reject_problem(tool_input["problem_id"])
+        elif tool_name == "select_solution":
+            return select_solution(tool_input["solution_id"])
+        elif tool_name == "trigger_scan":
+            return trigger_scan(tool_input["topic"])
+        else:
+            return f"Tool sconosciuto: {tool_name}"
+    except Exception as e:
+        return f"ERRORE {tool_name}: {e}"
+
+
+ALLOWED_TABLES = [
+    "problems", "solutions", "agent_logs", "org_knowledge", "scan_sources",
+    "capability_log", "org_config", "solution_scores", "agent_events",
+    "reevaluation_log", "authorization_matrix", "finance_metrics",
+]
+
+
+def supabase_query(params):
+    table = params["table"]
+    if table not in ALLOWED_TABLES:
+        return f"BLOCCATO: tabella '{table}' non accessibile."
+    try:
+        q = supabase.table(table).select(params["select"])
+        filters_str = params.get("filters", "")
+        if filters_str:
+            for f in filters_str.split(","):
+                f = f.strip()
+                if ".gte=" in f:
+                    col, val = f.split(".gte=")
+                    q = q.gte(col.strip(), val.strip())
+                elif ".lte=" in f:
+                    col, val = f.split(".lte=")
+                    q = q.lte(col.strip(), val.strip())
+                elif "=" in f:
+                    col, val = f.split("=", 1)
+                    q = q.eq(col.strip(), val.strip())
+        if params.get("order_by"):
+            q = q.order(params["order_by"], desc=params.get("order_desc", True))
+        q = q.limit(min(params.get("limit", 20), 50))
+        result = q.execute()
+        if result.data:
+            return json.dumps(result.data, indent=2, default=str, ensure_ascii=False)[:4000]
+        return "Nessun risultato."
+    except Exception as e:
+        return f"Errore query: {e}"
+
+
+def get_system_status():
+    try:
+        status = {}
+        problems = supabase.table("problems").select("id,status").execute()
+        solutions = supabase.table("solutions").select("id").execute()
+        status["problemi_totali"] = len(problems.data) if problems.data else 0
+        status["problemi_nuovi"] = len([p for p in (problems.data or []) if p.get("status") == "new"])
+        status["problemi_approvati"] = len([p for p in (problems.data or []) if p.get("status") == "approved"])
+        status["soluzioni_totali"] = len(solutions.data) if solutions.data else 0
+
+        logs = supabase.table("agent_logs").select("agent_id,action,status,created_at") \
+            .order("created_at", desc=True).limit(15).execute()
+        if logs.data:
+            agents = {}
+            for l in logs.data:
+                if l["agent_id"] not in agents:
+                    agents[l["agent_id"]] = {
+                        "ultima_azione": l["action"],
+                        "stato": l["status"],
+                        "quando": l["created_at"],
+                    }
+            status["agenti"] = agents
+
+        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+        costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
+        status["costi_24h_usd"] = round(
+            sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])), 4
+        )
+
+        errors = supabase.table("agent_logs").select("agent_id,error,created_at") \
+            .eq("status", "error").order("created_at", desc=True).limit(3).execute()
+        status["errori_recenti"] = errors.data or []
+
+        return json.dumps(status, indent=2, default=str, ensure_ascii=False)
+    except Exception as e:
+        return f"Errore: {e}"
+
+
+def get_cost_report(days=7):
+    try:
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        logs = supabase.table("agent_logs") \
+            .select("agent_id,cost_usd,tokens_input,tokens_output,model_used") \
+            .gte("created_at", since).limit(500).execute()
+        if not logs.data:
+            return f"Nessun dato ultimi {days} giorni."
+        by_agent = {}
+        total = 0
+        for l in logs.data:
+            aid = l["agent_id"]
+            cost = float(l.get("cost_usd", 0) or 0)
+            total += cost
+            if aid not in by_agent:
+                by_agent[aid] = {"usd": 0, "calls": 0}
+            by_agent[aid]["usd"] += cost
+            by_agent[aid]["calls"] += 1
+        for a in by_agent:
+            by_agent[a]["usd"] = round(by_agent[a]["usd"], 4)
+        return json.dumps(
+            {"giorni": days, "totale_usd": round(total, 4), "per_agente": by_agent},
+            indent=2, ensure_ascii=False,
+        )
+    except Exception as e:
+        return f"Errore: {e}"
+
+
+def approve_problem(problem_id):
+    try:
+        check = supabase.table("problems").select("id,title,status").eq("id", problem_id).execute()
+        if not check.data:
+            return f"Problema ID {problem_id} non trovato."
+        if check.data[0]["status"] == "approved":
+            return f"Problema ID {problem_id} gia' approvato."
+
+        supabase.table("problems").update({"status": "approved"}).eq("id", problem_id).execute()
+
+        # Notifica Solution Architect via agent_events
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "problem_approved",
+                "source_agent": "command_center",
+                "target_agent": "solution_architect",
+                "payload": json.dumps({"problem_id": problem_id}),
+                "priority": "high",
+                "status": "pending",
+            }).execute()
+        except:
+            pass
+
+        title = check.data[0]["title"]
+        return f"Problema '{title}' (ID {problem_id}) APPROVATO. Solution Architect notificato."
+    except Exception as e:
+        return f"Errore approvazione: {e}"
+
+
+def reject_problem(problem_id):
+    try:
+        check = supabase.table("problems").select("id,title,status").eq("id", problem_id).execute()
+        if not check.data:
+            return f"Problema ID {problem_id} non trovato."
+
+        supabase.table("problems").update({"status": "rejected"}).eq("id", problem_id).execute()
+        title = check.data[0]["title"]
+        return f"Problema '{title}' (ID {problem_id}) RIFIUTATO."
+    except Exception as e:
+        return f"Errore rifiuto: {e}"
+
+
+def select_solution(solution_id):
+    try:
+        check = supabase.table("solutions").select("id,title,status").eq("id", solution_id).execute()
+        if not check.data:
+            return f"Soluzione ID {solution_id} non trovata."
+        if check.data[0]["status"] == "selected":
+            return f"Soluzione ID {solution_id} gia' selezionata."
+
+        supabase.table("solutions").update({"status": "selected"}).eq("id", solution_id).execute()
+        title = check.data[0]["title"]
+        return f"Soluzione '{title}' (ID {solution_id}) SELEZIONATA per lancio."
+    except Exception as e:
+        return f"Errore selezione: {e}"
+
+
+def trigger_scan(topic):
+    if not AGENTS_RUNNER_URL:
+        return "AGENTS_RUNNER_URL non configurato. Scan non disponibile."
+    try:
+        r = http_requests.post(
+            f"{AGENTS_RUNNER_URL}/scanner/custom",
+            json={"topic": topic},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return f"Scan mirato avviato per: {topic}"
+        return f"Errore scan: HTTP {r.status_code}"
+    except Exception as e:
+        return f"Errore scan: {e}"
+
+
+# ---- LOGGING ----
+
+def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
+                     tokens_in=0, tokens_out=0, cost=0, duration_ms=0,
+                     status="success", error=None):
+    def _log():
+        try:
+            supabase.table("agent_logs").insert({
+                "agent_id": agent_id,
+                "action": action,
+                "layer": 0,
+                "input_summary": (input_summary or "")[:500],
+                "output_summary": (output_summary or "")[:500],
+                "model_used": model_used,
+                "tokens_input": tokens_in,
+                "tokens_output": tokens_out,
+                "cost_usd": cost,
+                "duration_ms": duration_ms,
+                "status": status,
+                "error": error,
+            }).execute()
+        except Exception as e:
+            logger.error(f"[LOG] {e}")
+    threading.Thread(target=_log, daemon=True).start()
+
+
+# ---- CLAUDE (Haiku 4.5 + tool_use) ----
+
+MODEL = "claude-haiku-4-5-20251001"
+COST_INPUT_PER_M = 1.0
+COST_OUTPUT_PER_M = 5.0
+MAX_TOOL_LOOPS = 5
+
+
+def ask_claude(user_message, is_photo=False, image_b64=None):
+    global chat_history
+    start = time.time()
+
+    try:
+        system = build_system_prompt()
+        messages = []
+        for h in chat_history:
+            messages.append({"role": "user", "content": h["user"]})
+            messages.append({"role": "assistant", "content": h["assistant"]})
+
+        if is_photo and image_b64:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
+                    },
+                    {"type": "text", "text": user_message},
+                ],
+            })
+        else:
+            messages.append({"role": "user", "content": user_message})
+
+        total_in = 0
+        total_out = 0
+        final = ""
+
+        for _ in range(MAX_TOOL_LOOPS):
+            resp = claude.messages.create(
+                model=MODEL,
+                max_tokens=2000,
+                system=system,
+                messages=messages,
+                tools=TOOLS,
+            )
+            total_in += resp.usage.input_tokens
+            total_out += resp.usage.output_tokens
+
+            if resp.stop_reason == "end_turn":
+                for b in resp.content:
+                    if hasattr(b, "text"):
+                        final += b.text
+                break
+            elif resp.stop_reason == "tool_use":
+                results = []
+                for b in resp.content:
+                    if b.type == "tool_use":
+                        logger.info(f"[TOOL] {b.name}({json.dumps(b.input, ensure_ascii=False)[:100]})")
+                        r = execute_tool(b.name, b.input)
+                        results.append({
+                            "type": "tool_result",
+                            "tool_use_id": b.id,
+                            "content": str(r)[:8000],
+                        })
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": results})
+            else:
+                for b in resp.content:
+                    if hasattr(b, "text"):
+                        final += b.text
+                break
+
+        dur = int((time.time() - start) * 1000)
+        cost = (total_in * COST_INPUT_PER_M + total_out * COST_OUTPUT_PER_M) / 1_000_000
+
+        chat_history.append({
+            "user": f"[FOTO] {user_message}" if is_photo else user_message,
+            "assistant": final[:2000],
+        })
+        if len(chat_history) > MAX_HISTORY:
+            chat_history = chat_history[-MAX_HISTORY:]
+
+        log_to_supabase(
+            "command_center", "chat", user_message[:300], final[:300],
+            MODEL, total_in, total_out, cost, dur,
+        )
+
+        return final or "Operazione completata."
+    except Exception as e:
+        dur = int((time.time() - start) * 1000)
+        log_to_supabase(
+            "command_center", "chat", user_message[:300], None,
+            MODEL, duration_ms=dur, status="error", error=str(e),
+        )
+        return f"Errore: {e}"
+
+
+def clean_reply(text):
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'__(.+?)__', r'\1', text)
+    text = re.sub(r'_(.+?)_', r'\1', text)
+    text = re.sub(r'```[\w]*\n?', '', text)
+    text = re.sub(r'`(.+?)`', r'\1', text)
+    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
+    return text.strip()
+
+
+# ---- TELEGRAM HANDLERS ----
+
+tg_app = None
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global AUTHORIZED_USER_ID
+    AUTHORIZED_USER_ID = update.effective_user.id
+    try:
+        supabase.table("org_config").upsert(
+            {"key": "telegram_user_id", "value": json.dumps(AUTHORIZED_USER_ID),
+             "description": "ID Telegram di Mirco"},
+            on_conflict="key",
+        ).execute()
+    except:
+        pass
+    await update.message.reply_text(
+        "brAIn Command Center Unified v1.0 attivo.\n"
+        "Haiku 4.5 — vocali, foto, dashboard.\n"
+        "Scrivimi quello che vuoi, niente comandi."
+    )
+    log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v1.0 unified", "none")
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    msg = update.message.text
+    if msg.strip().upper() == "STOP":
+        await update.message.reply_text("STOP ricevuto. Tutto fermo.")
+        return
+    await update.message.chat.send_action("typing")
+    reply = clean_reply(ask_claude(msg))
+    for i in range(0, len(reply), 4000):
+        await update.message.reply_text(reply[i:i + 4000])
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    await update.message.chat.send_action("typing")
+    photo = update.message.photo[-1]
+    f = await context.bot.get_file(photo.file_id)
+    img = await f.download_as_bytearray()
+    b64 = base64.b64encode(bytes(img)).decode("utf-8")
+    caption = update.message.caption or "Analizza questa immagine e dimmi cosa vedi in ottica brAIn."
+    reply = clean_reply(ask_claude(caption, True, b64))
+    for i in range(0, len(reply), 4000):
+        await update.message.reply_text(reply[i:i + 4000])
+
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    await update.message.chat.send_action("typing")
+    try:
+        f = await context.bot.get_file(update.message.voice.file_id)
+        audio = await f.download_as_bytearray()
+        text = transcribe_voice(bytes(audio))
+        if not text:
+            await update.message.reply_text("Non ho capito il vocale. Ripeti o scrivi?")
+            return
+        await update.message.reply_text(f'Ho capito: "{text}"')
+        await update.message.chat.send_action("typing")
+        reply = clean_reply(ask_claude(text))
+        for i in range(0, len(reply), 4000):
+            await update.message.reply_text(reply[i:i + 4000])
+    except Exception as e:
+        await update.message.reply_text(f"Errore vocale: {e}")
+
+
+async def handle_command_as_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update):
+        return
+    text = update.message.text.lower().strip()
+    remap = {
+        "/problems": "mostrami i problemi nuovi",
+        "/solutions": "mostrami le soluzioni",
+        "/status": "come sta il sistema?",
+        "/costs": "quanto stiamo spendendo?",
+        "/help": "cosa sai fare?",
+    }
+    user_message = remap.get(text, text.replace("/", ""))
+    await update.message.chat.send_action("typing")
+    reply = clean_reply(ask_claude(user_message))
+    for i in range(0, len(reply), 4000):
+        await update.message.reply_text(reply[i:i + 4000])
+
+
+def is_authorized(update):
+    global AUTHORIZED_USER_ID
+    if AUTHORIZED_USER_ID is None:
+        try:
+            r = supabase.table("org_config").select("value").eq("key", "telegram_user_id").execute()
+            if r.data:
+                AUTHORIZED_USER_ID = json.loads(r.data[0]["value"])
+        except:
+            pass
+    if AUTHORIZED_USER_ID is None:
+        return True
+    return update.effective_user.id == AUTHORIZED_USER_ID
+
+
+# ---- HTTP ENDPOINTS ----
+
+async def health_check(request):
+    return web.Response(text="brAIn Command Center Unified v1.0 OK", status=200)
+
+
+async def telegram_webhook(request):
+    try:
+        data = await request.json()
+        update = Update.de_json(data, tg_app.bot)
+        await tg_app.process_update(update)
+    except Exception as e:
+        logger.error(f"[WEBHOOK] {e}")
+    return web.Response(text="OK", status=200)
+
+
+async def handle_alert(request):
+    """Riceve alert da altri agenti (Finance Agent, etc.) e li inoltra a Mirco via Telegram."""
+    try:
+        data = await request.json()
+        message = data.get("message", "")
+        level = data.get("level", "info")
+        source = data.get("source", "unknown")
+
+        if not message:
+            return web.Response(text="Missing message", status=400)
+
+        prefix = {
+            "critical": "ALERT CRITICO",
+            "warning": "ATTENZIONE",
+            "info": "INFO",
+        }.get(level, "NOTIFICA")
+
+        text = f"[{prefix}] da {source}:\n{message}"
+
+        if AUTHORIZED_USER_ID and tg_app:
+            await tg_app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=text)
+            log_to_supabase(
+                "command_center", "alert_forwarded",
+                f"{source}: {message[:200]}", "inviato a Mirco", "none",
+            )
+            return web.Response(text="OK", status=200)
+        else:
+            logger.warning(f"[ALERT] Nessun destinatario. Alert: {text}")
+            return web.Response(text="No recipient configured", status=503)
+    except Exception as e:
+        logger.error(f"[ALERT] {e}")
+        return web.Response(text=str(e), status=500)
+
+
+# ---- MAIN ----
+
+async def main():
+    global tg_app
+
+    logger.info("brAIn Command Center Unified v1.0 — Haiku 4.5 + Voice + Photo + Tools")
+
+    tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
+    tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    tg_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command_as_message))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    await tg_app.initialize()
+    await tg_app.start()
+
+    if WEBHOOK_URL:
+        await tg_app.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook: {WEBHOOK_URL}")
+
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_post("/", telegram_webhook)
+    app.router.add_post("/alert", handle_alert)
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", PORT).start()
+
+    logger.info(f"Running on :{PORT}")
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        await tg_app.stop()
+        await tg_app.shutdown()
+        await runner.cleanup()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
