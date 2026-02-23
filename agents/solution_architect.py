@@ -1,6 +1,6 @@
 """
-brAIn Solution Architect Agent v1.2
-Layer 2 — Genera e valuta soluzioni per i problemi identificati.
+brAIn Solution Architect Agent v1.3
+Layer 2 — Genera soluzioni SOLO per i problemi approvati da Mirco.
 """
 
 import os
@@ -24,20 +24,28 @@ Vincoli:
 - Stack: Claude API, Supabase, Python, Cloud Run, Telegram
 - No-code o low-code preferito
 - Revenue entro 3 mesi
+- Marginalita alta e' la priorita assoluta
+
+Usa i dati qualitativi del problema (chi e' colpito, esempi, perche conta) per costruire soluzioni che rispondano davvero al bisogno.
+
+Per ogni soluzione specifica anche:
+- sector: macro-settore (es. food, health, finance)
+- sub_sector: sotto-livello specifico (es. food/delivery, finance/compliance)
 
 Rispondi SOLO con JSON:
-{"solutions":[{"title":"nome","description":"cosa fa","approach":"come si implementa","feasibility_score":0.8,"impact_score":0.7,"complexity":"low","time_to_market":"2 settimane","nocode_compatible":true,"cost_estimate":"50 euro/mese","revenue_model":"come genera soldi"}],"best_pick":"quale delle due e perche"}
+{"solutions":[{"title":"nome","description":"cosa fa","approach":"come si implementa","sector":"food","sub_sector":"food/waste","feasibility_score":0.8,"impact_score":0.7,"complexity":"low","time_to_market":"2 settimane","nocode_compatible":true,"cost_estimate":"50 euro/mese","revenue_model":"come genera soldi"}],"best_pick":"quale delle due e perche"}
 
-IMPORTANTE: complexity DEVE essere esattamente uno tra: low, medium, high. Niente altro.
+IMPORTANTE: complexity DEVE essere esattamente uno tra: low, medium, high.
 SOLO JSON."""
 
 
-def get_problems():
+def get_approved_problems():
+    """Recupera SOLO problemi approvati da Mirco"""
     try:
         result = supabase.table("problems") \
             .select("*") \
-            .order("score", desc=True) \
-            .limit(5) \
+            .eq("status", "approved") \
+            .order("weighted_score", desc=True) \
             .execute()
         return result.data
     except Exception as e:
@@ -71,7 +79,6 @@ def extract_json(text):
 
 
 def normalize_complexity(value):
-    """Normalizza complexity a low/medium/high"""
     v = str(value).lower().strip()
     if "low" in v:
         return "low"
@@ -83,11 +90,15 @@ def normalize_complexity(value):
 def generate_for_problem(problem):
     prompt_text = (
         f"Problema: {problem['title']}\n"
-        f"Descrizione: {problem['description']}\n"
-        f"Dominio: {problem['domain']}\n"
-        f"Urgenza: {problem['urgency']}\n"
-        f"Score: {problem['score']}\n"
-        f"Mercato: {problem.get('market_size_estimate', 'N/A')}"
+        f"Descrizione: {problem.get('description', '')}\n"
+        f"Settore: {problem.get('sector', problem.get('domain', ''))}\n"
+        f"Urgenza: {problem.get('urgency', '')}\n"
+        f"Score: {problem.get('weighted_score', problem.get('score', ''))}\n"
+        f"Mercato: {problem.get('top_markets', '')}\n"
+        f"Scope: {problem.get('geographic_scope', '')}\n\n"
+        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+        f"Esempio reale: {problem.get('real_world_example', '')}\n"
+        f"Perche conta: {problem.get('why_it_matters', '')}"
     )
 
     start = time.time()
@@ -125,7 +136,7 @@ def generate_for_problem(problem):
         return None
 
 
-def save_solutions(analysis_text, problem_id):
+def save_solutions(analysis_text, problem_id, problem_sector):
     data = extract_json(analysis_text)
     if data is None:
         print("   [ERROR] JSON non valido")
@@ -139,6 +150,8 @@ def save_solutions(analysis_text, problem_id):
                 "title": sol.get("title", "Senza titolo"),
                 "description": sol.get("description", ""),
                 "approach": sol.get("approach", ""),
+                "sector": sol.get("sector", problem_sector),
+                "sub_sector": sol.get("sub_sector", ""),
                 "status": "proposed",
                 "created_by": "solution_architect",
             }).execute()
@@ -163,7 +176,7 @@ def save_solutions(analysis_text, problem_id):
             }).execute()
 
             saved += 1
-            print(f"      [{overall:.2f}] {sol.get('title')}")
+            print(f"      [{overall:.2f}] {sol.get('title')} ({sol.get('sub_sector', '')})")
 
         except Exception as e:
             print(f"   [ERROR] Salvataggio: {e}")
@@ -176,30 +189,33 @@ def save_solutions(analysis_text, problem_id):
 
 
 def run():
-    print("Solution Architect avviato...")
+    print("Solution Architect v1.3 avviato...")
 
-    problems = get_problems()
+    problems = get_approved_problems()
+
     if not problems:
-        print("   Nessun problema trovato. Lancia prima il World Scanner.")
+        print("   Nessun problema approvato. Approva dei problemi dal bot Telegram prima.")
         return
 
-    print(f"   {len(problems)} problemi da elaborare\n")
+    print(f"   {len(problems)} problemi approvati da elaborare\n")
 
     total_saved = 0
     for i, problem in enumerate(problems, 1):
-        print(f"   [{i}/{len(problems)}] {problem['title']} (score: {problem['score']})")
-        
+        score = problem.get("weighted_score") or problem.get("score", 0)
+        sector = problem.get("sector", problem.get("domain", "?"))
+        print(f"   [{i}/{len(problems)}] {problem['title']} ({sector}, score: {score})")
+
         analysis = generate_for_problem(problem)
         if analysis:
-            saved = save_solutions(analysis, problem["id"])
+            saved = save_solutions(analysis, problem["id"], sector)
             total_saved += saved
         else:
             print("      Generazione fallita, passo al prossimo")
-        
+
         time.sleep(1)
 
-    print(f"\n   Totale: {total_saved} soluzioni salvate nel database")
-    print("Solution Architect completato.")
+    print(f"\n   Totale: {total_saved} soluzioni salvate")
+    print("Solution Architect v1.3 completato.")
 
 
 if __name__ == "__main__":
