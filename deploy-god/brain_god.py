@@ -352,7 +352,7 @@ def get_db_context():
 def ask_claude(user_message, is_photo=False, image_b64=None):
     global chat_history
     start = time.time()
-    model = "claude-sonnet-4-5-20250514"
+    model = "claude-sonnet-4-5-20250929"
     try:
         system = build_system_prompt()
         messages = []

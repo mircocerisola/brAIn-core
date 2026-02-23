@@ -1,7 +1,7 @@
 """
-brAIn Agents Runner v1.2
-Cloud Run service — agenti schedulati + scan on-demand + proattivita.
-Score normalization, query diversificate, scan custom via chat.
+brAIn Agents Runner v1.3
+Cloud Run service — agenti schedulati + scan on-demand + proattivita + finance.
+Score normalization, query diversificate, scan custom via chat, METABOLISM.
 """
 
 import os
@@ -1096,6 +1096,246 @@ def run_capability_scout():
 
 
 # ============================================================
+# FINANCE AGENT v1.0 — METABOLISM
+# ============================================================
+
+MONTHLY_BUDGET_EUR = 1000.0
+DEFAULT_USD_TO_EUR = 0.92
+DAILY_COST_ALERT_USD = 5.0
+BUDGET_ALERT_PCT = 70.0  # percentuale
+
+
+def finance_get_usd_to_eur():
+    try:
+        result = supabase.table("org_config").select("value").eq("key", "usd_to_eur_rate").execute()
+        if result.data:
+            return float(json.loads(result.data[0]["value"]))
+    except Exception:
+        pass
+    return DEFAULT_USD_TO_EUR
+
+
+def finance_get_daily_costs(date_str):
+    """Aggrega costi da agent_logs per un giorno specifico."""
+    day_start = f"{date_str}T00:00:00+00:00"
+    day_end = f"{date_str}T23:59:59+00:00"
+
+    try:
+        result = supabase.table("agent_logs") \
+            .select("agent_id, cost_usd, tokens_input, tokens_output, status") \
+            .gte("created_at", day_start) \
+            .lte("created_at", day_end) \
+            .execute()
+        logs = result.data or []
+    except Exception as e:
+        logger.error(f"[FINANCE] Lettura agent_logs: {e}")
+        return None
+
+    total_cost = 0.0
+    total_calls = 0
+    successful = 0
+    failed = 0
+    tokens_in = 0
+    tokens_out = 0
+    cost_by_agent = {}
+    calls_by_agent = {}
+
+    for log in logs:
+        agent = log.get("agent_id", "unknown")
+        cost = float(log.get("cost_usd", 0) or 0)
+        total_cost += cost
+        total_calls += 1
+        tokens_in += int(log.get("tokens_input", 0) or 0)
+        tokens_out += int(log.get("tokens_output", 0) or 0)
+
+        if log.get("status") == "success":
+            successful += 1
+        else:
+            failed += 1
+
+        cost_by_agent[agent] = cost_by_agent.get(agent, 0.0) + cost
+        calls_by_agent[agent] = calls_by_agent.get(agent, 0) + 1
+
+    cost_by_agent = {k: round(v, 6) for k, v in cost_by_agent.items()}
+
+    return {
+        "date": date_str,
+        "total_cost_usd": round(total_cost, 6),
+        "total_calls": total_calls,
+        "successful_calls": successful,
+        "failed_calls": failed,
+        "total_tokens_in": tokens_in,
+        "total_tokens_out": tokens_out,
+        "cost_by_agent": cost_by_agent,
+        "calls_by_agent": calls_by_agent,
+    }
+
+
+def finance_get_month_costs(year, month):
+    """Costi totali del mese corrente fino ad oggi."""
+    first_day = f"{year}-{month:02d}-01"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        result = supabase.table("agent_logs") \
+            .select("cost_usd") \
+            .gte("created_at", f"{first_day}T00:00:00+00:00") \
+            .lte("created_at", f"{today}T23:59:59+00:00") \
+            .execute()
+        logs = result.data or []
+    except Exception as e:
+        logger.error(f"[FINANCE] Lettura costi mese: {e}")
+        return 0.0
+    return sum(float(l.get("cost_usd", 0) or 0) for l in logs)
+
+
+def finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct, alerts, usd_to_eur):
+    """Salva metriche in finance_metrics (upsert su report_date)."""
+    row = {
+        "report_date": daily_data["date"],
+        "total_cost_usd": daily_data["total_cost_usd"],
+        "total_cost_eur": round(daily_data["total_cost_usd"] * usd_to_eur, 4),
+        "cost_by_agent": json.dumps(daily_data["cost_by_agent"]),
+        "calls_by_agent": json.dumps(daily_data["calls_by_agent"]),
+        "total_api_calls": daily_data["total_calls"],
+        "successful_calls": daily_data["successful_calls"],
+        "failed_calls": daily_data["failed_calls"],
+        "total_tokens_in": daily_data["total_tokens_in"],
+        "total_tokens_out": daily_data["total_tokens_out"],
+        "burn_rate_daily_usd": daily_data["total_cost_usd"],
+        "projected_monthly_usd": projection_usd,
+        "projected_monthly_eur": projection_eur,
+        "budget_eur": MONTHLY_BUDGET_EUR,
+        "budget_usage_pct": budget_pct,
+        "alerts_triggered": json.dumps(alerts),
+    }
+    try:
+        supabase.table("finance_metrics").insert(row).execute()
+        return True
+    except Exception as e:
+        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
+            try:
+                del row["report_date"]
+                supabase.table("finance_metrics").update(row).eq("report_date", daily_data["date"]).execute()
+                return True
+            except Exception as e2:
+                logger.error(f"[FINANCE] Update metrics: {e2}")
+        else:
+            logger.error(f"[FINANCE] Insert metrics: {e}")
+        return False
+
+
+def finance_build_report(daily_data, month_total_usd, projection_usd, projection_eur, budget_pct, usd_to_eur):
+    """Costruisce messaggio report giornaliero."""
+    cost_eur = round(daily_data["total_cost_usd"] * usd_to_eur, 4)
+    month_eur = round(month_total_usd * usd_to_eur, 2)
+
+    lines = [
+        f"REPORT COSTI {daily_data['date']}",
+        "",
+        f"Oggi: ${daily_data['total_cost_usd']:.4f} ({cost_eur:.4f} EUR)",
+        f"Chiamate API: {daily_data['total_calls']} ({daily_data['successful_calls']} ok, {daily_data['failed_calls']} errori)",
+        f"Token: {daily_data['total_tokens_in']:,} in / {daily_data['total_tokens_out']:,} out",
+        "",
+    ]
+
+    if daily_data["cost_by_agent"]:
+        lines.append("Per agente:")
+        sorted_agents = sorted(daily_data["cost_by_agent"].items(), key=lambda x: x[1], reverse=True)
+        for agent, agent_cost in sorted_agents:
+            calls = daily_data["calls_by_agent"].get(agent, 0)
+            lines.append(f"  {agent}: ${agent_cost:.4f} ({calls} chiamate)")
+        lines.append("")
+
+    lines.extend([
+        f"Mese corrente: ${month_total_usd:.4f} ({month_eur:.2f} EUR)",
+        f"Proiezione fine mese: ${projection_usd:.2f} ({projection_eur:.2f} EUR)",
+        f"Budget: {MONTHLY_BUDGET_EUR:.0f} EUR | Uso: {budget_pct:.1f}%",
+    ])
+
+    filled = int(budget_pct / 5)
+    bar = "[" + "#" * min(filled, 20) + "." * max(0, 20 - filled) + "]"
+    lines.append(bar)
+
+    return "\n".join(lines)
+
+
+def run_finance_agent(target_date=None):
+    """Esegue il Finance Agent. Default: report su ieri."""
+    logger.info("Finance Agent v1.0 starting...")
+
+    now = datetime.now(timezone.utc)
+    if target_date:
+        date_str = target_date
+    else:
+        yesterday = now - timedelta(days=1)
+        date_str = yesterday.strftime("%Y-%m-%d")
+
+    usd_to_eur = finance_get_usd_to_eur()
+
+    # 1. Aggrega costi giornalieri
+    daily_data = finance_get_daily_costs(date_str)
+    if daily_data is None:
+        return {"status": "error", "error": "agent_logs read failed"}
+
+    # 2. Costi mese + proiezione
+    year = now.year
+    month = now.month
+    month_total_usd = finance_get_month_costs(year, month)
+
+    days_elapsed = now.day
+    if month in (1, 3, 5, 7, 8, 10, 12):
+        days_in_month = 31
+    elif month == 2:
+        days_in_month = 29 if year % 4 == 0 else 28
+    else:
+        days_in_month = 30
+
+    if days_elapsed > 0:
+        projection_usd = round((month_total_usd / days_elapsed) * days_in_month, 4)
+    else:
+        projection_usd = 0.0
+    projection_eur = round(projection_usd * usd_to_eur, 4)
+    budget_pct = round((projection_eur / MONTHLY_BUDGET_EUR) * 100, 2) if MONTHLY_BUDGET_EUR > 0 else 0
+
+    # 3. Check alert
+    alerts = []
+    if daily_data["total_cost_usd"] > DAILY_COST_ALERT_USD:
+        alerts.append({"type": "daily_cost_high", "message": f"Costo giornaliero ${daily_data['total_cost_usd']:.4f} supera soglia ${DAILY_COST_ALERT_USD}", "severity": "high"})
+    if budget_pct > BUDGET_ALERT_PCT:
+        alerts.append({"type": "budget_projection_high", "message": f"Proiezione {projection_eur:.2f} EUR supera {BUDGET_ALERT_PCT:.0f}% del budget ({MONTHLY_BUDGET_EUR:.0f} EUR)", "severity": "high"})
+    if budget_pct > 90:
+        alerts.append({"type": "budget_critical", "message": f"Proiezione al {budget_pct:.1f}% del budget! Rischio sforamento.", "severity": "critical"})
+
+    # 4. Salva metriche
+    finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct, alerts, usd_to_eur)
+
+    # 5. Report Telegram
+    report = finance_build_report(daily_data, month_total_usd, projection_usd, projection_eur, budget_pct, usd_to_eur)
+    notify_telegram(report)
+
+    # 6. Alert separati
+    for alert in alerts:
+        severity = "CRITICO" if alert["severity"] == "critical" else "ALERT"
+        notify_telegram(f"{severity} METABOLISM\n\n{alert['message']}")
+
+    # 7. Log azione
+    log_to_supabase("finance_agent", "daily_report", 6,
+        f"Report {date_str}", f"Cost: ${daily_data['total_cost_usd']:.4f}, Projection: {projection_eur:.2f} EUR ({budget_pct:.1f}%)",
+        "none", 0, 0, 0, 0)
+
+    logger.info(f"Finance Agent completato: ${daily_data['total_cost_usd']:.4f} today, {budget_pct:.1f}% budget")
+    return {
+        "status": "completed",
+        "date": date_str,
+        "daily_cost_usd": daily_data["total_cost_usd"],
+        "month_total_usd": month_total_usd,
+        "projection_eur": projection_eur,
+        "budget_pct": budget_pct,
+        "alerts": len(alerts),
+    }
+
+
+# ============================================================
 # EVENT PROCESSOR
 # ============================================================
 
@@ -1168,6 +1408,15 @@ async def run_scout_endpoint(request):
     result = run_capability_scout()
     return web.json_response(result)
 
+async def run_finance_endpoint(request):
+    try:
+        data = await request.json()
+        target_date = data.get("date")
+    except Exception:
+        target_date = None
+    result = run_finance_agent(target_date=target_date)
+    return web.json_response(result)
+
 async def run_events_endpoint(request):
     result = process_events()
     return web.json_response(result)
@@ -1178,12 +1427,13 @@ async def run_all_endpoint(request):
     results["architect"] = run_solution_architect()
     results["knowledge"] = run_knowledge_keeper()
     results["scout"] = run_capability_scout()
+    results["finance"] = run_finance_agent()
     results["events"] = process_events()
     return web.json_response(results)
 
 
 async def main():
-    logger.info("brAIn Agents Runner v1.2 starting...")
+    logger.info("brAIn Agents Runner v1.3 starting...")
 
     app = web.Application()
     app.router.add_get("/", health_check)
@@ -1192,6 +1442,7 @@ async def main():
     app.router.add_post("/architect", run_architect_endpoint)
     app.router.add_post("/knowledge", run_knowledge_endpoint)
     app.router.add_post("/scout", run_scout_endpoint)
+    app.router.add_post("/finance", run_finance_endpoint)
     app.router.add_post("/events", run_events_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
