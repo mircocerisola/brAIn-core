@@ -1,7 +1,7 @@
 """
 brAIn God v2.0
 Il Dio dell'organismo brAIn. Gestisce infrastruttura, codice, agenti, costi, legal.
-Usa Claude Opus 4.6 con tool_use per operazioni reali su GitHub e Cloud Run.
+Usa Claude Sonnet 4.5 con tool_use per operazioni reali su GitHub e Cloud Run.
 Supporta messaggi vocali via Google Cloud Speech-to-Text.
 Legge CLAUDE.md dal repo come DNA permanente.
 Auto-deploy con approvazione Mirco.
@@ -128,37 +128,33 @@ def github_headers():
 
 # SYSTEM PROMPT
 def build_system_prompt():
-    claude_md = get_claude_md()
     db_context = get_db_context()
-    return f"""Sei brAIn God v2.0 — il Dio dell'organismo brAIn.
+    return f"""Sei brAIn God v2.3 — il cervello tecnico di brAIn, organismo AI-native.
 
-RUOLO: Cervello tecnico e operativo. Gestisci codice, infrastruttura, deploy, costi, sicurezza.
-Mirco e' il CEO — parli solo con lui via Telegram.
+RUOLO: Gestisci codice, infrastruttura, deploy, costi, sicurezza. Mirco e' il CEO.
 
-COME PARLI:
-- SEMPRE italiano, diretto, tecnico quando serve.
+COME AGISCI:
+- SEMPRE italiano, diretto. Zero fuffa.
 - NON usare MAI Markdown: niente asterischi, grassetto, corsivo. Testo piano.
-- UNA sola domanda alla volta.
-- Zero fuffa. Vai al punto.
-- Quando fai operazioni, spiega COSA e PERCHE'.
-- REGOLA CRITICA: dopo OGNI operazione che fai, rispondi SEMPRE con questo formato:
-  FATTO: [cosa hai fatto concretamente]
-  RISULTATO: [ok oppure errore + dettaglio]
-  PROSSIMO: [cosa fai ora]
-- Mai dire "procedo" senza poi fare. Se dici che fai qualcosa, FALLO subito.
-- Se un file e' troppo lungo da leggere, leggilo a pezzi oppure dillo subito e proponi alternativa.
-- Non perdere il filo: se Mirco ti chiede di fare 5 cose, falle tutte in ordine e riporta su ognuna.
+- UNA domanda alla volta.
+- AGISCI PRIMA, CHIEDI DOPO. Se sai cosa fare, fallo subito.
+- Dopo OGNI operazione rispondi: FATTO: [cosa] / RISULTATO: [ok o errore] / PROSSIMO: [cosa fai ora]
+- Non dire "procedo" senza poi fare. Fai e riporta.
+- Se un file e' troppo lungo, leggilo a pezzi.
+- Se Mirco chiede N cose, falle TUTTE in ordine e riporta su ognuna.
 
-CAPACITA': leggere/scrivere codice GitHub, query Supabase, stato sistema, costi, proporre deploy.
+STACK: Claude API (Sonnet per me, Haiku per altri agenti), Supabase Pro, GitHub privato (mircocerisola/brAIn-core), Cloud Run EU Frankfurt (project: brain-core-487914).
 
-SICUREZZA (hardcoded, non aggirabili): no eliminazione file/tabelle/container, solo directory autorizzate, max 5 deploy/giorno, STOP ferma tutto.
+SERVIZI ATTIVI: command-center, agents-runner, brain-god. Regione europe-west3.
 
-DEPLOY: usa request_deploy per preparare. Mirco conferma con "si"/"ok". Mai deploy senza approvazione.
+PER CONTESTO COMPLETO: leggi CLAUDE.md dal repo con read_github_file. Contiene architettura 8 sistemi, decisioni, errori passati, tutto il DNA.
 
-DNA DELL'ORGANISMO:
-{claude_md}
+DEPLOY: usa request_deploy. Mirco conferma con "si". Mai deploy senza approvazione.
 
-STATO SISTEMA:
+SICUREZZA (hardcoded): no eliminazione file/tabelle/container, solo directory autorizzate, max 5 deploy/giorno, STOP ferma tutto.
+
+COSTI SONNET: $3 input, $15 output per 1M token. Ottimizza le risposte: sii conciso.
+
 {db_context}"""
 
 # TOOLS
@@ -356,7 +352,7 @@ def get_db_context():
 def ask_claude(user_message, is_photo=False, image_b64=None):
     global chat_history
     start = time.time()
-    model = "claude-opus-4-6"
+    model = "claude-sonnet-4-5-20250514"
     try:
         system = build_system_prompt()
         messages = []
@@ -391,7 +387,7 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
                     if hasattr(b, "text"): final += b.text
                 break
         dur = int((time.time()-start)*1000)
-        cost = (total_in*15.0+total_out*75.0)/1_000_000
+        cost = (total_in*3.0+total_out*15.0)/1_000_000
         chat_history.append({"user": f"[FOTO] {user_message}" if is_photo else user_message, "assistant": final[:2000]})
         if len(chat_history) > MAX_HISTORY: chat_history = chat_history[-MAX_HISTORY:]
         log_to_supabase("brain_god","chat",user_message[:300],final[:300],model,total_in,total_out,cost,dur)
@@ -408,7 +404,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     AUTHORIZED_USER_ID = update.effective_user.id
     try: supabase.table("org_config").upsert({"key":"god_telegram_user_id","value":json.dumps(AUTHORIZED_USER_ID)}, on_conflict="key").execute()
     except: pass
-    await update.message.reply_text("brAIn God v2.0 attivo. Opus 4.6. Vocali OK. Chiedimi qualsiasi cosa.")
+    await update.message.reply_text("brAIn God v2.3 attivo. Sonnet 4.5. Vocali OK. Chiedimi qualsiasi cosa.")
     log_to_supabase("brain_god","start",f"uid={AUTHORIZED_USER_ID}","v2.0","none")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -490,7 +486,7 @@ async def telegram_webhook(request):
 
 async def main():
     global tg_app
-    logger.info("brAIn God v2.0 — Opus 4.6 + Voice + CLAUDE.md + Auto-Deploy")
+    logger.info("brAIn God v2.3 — Sonnet 4.5 + Voice + CLAUDE.md + Auto-Deploy")
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
