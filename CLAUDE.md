@@ -24,7 +24,7 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 - brAIn Bot: interfaccia CEO-business via Telegram. Problemi, soluzioni, approvazioni.
 - brAIn God (TU): interfaccia CEO-infrastruttura via Telegram. Codice, deploy, costi, monitoring.
 - Router: classifica input e smista all'agente giusto.
-- Modello: Haiku per brAIn Bot, Sonnet per brAIn God.
+- Modello: Haiku per brAIn Bot, Opus 4.6 per brAIn God.
 
 ### SENSES (Sistema Sensoriale)
 - World Scanner v2.2: scansione problemi globali, 40+ fonti con auto-ranking, 7 parametri pesati, deduplicazione, dati qualitativi (chi soffre, storie, perche' conta), settori + geolocalizzazione.
@@ -76,7 +76,7 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ## STACK TECNOLOGICO (Confermato e definitivo)
 
-- Claude API: Haiku per brAIn Bot (80%), Sonnet per brAIn God e Code Agent (20%).
+- Claude API: Haiku per brAIn Bot (80%), Opus 4.6 per brAIn God e Code Agent (20%).
 - Perplexity API Sonar: ricerca web per World Scanner e Solution Architect.
 - Supabase Pro: PostgreSQL + pgvector + RLS attivo su tutte le tabelle. 22+ tabelle.
 - Telegram: 2 bot separati (brAIn = business, brAIn God = infrastruttura).

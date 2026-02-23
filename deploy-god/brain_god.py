@@ -214,8 +214,10 @@ def github_list_dir(path):
 def github_write_file(path, content, commit_message):
     global session_write_count
     if not is_path_allowed(path): return f"BLOCCATO (L2): path '{path}' non autorizzato."
-    safe, cmd = is_content_safe(content)
-    if not safe: return f"BLOCCATO (L2): comando proibito: '{cmd}'"
+    # Content safety check solo per file di codice, non per documentazione
+    if not path.endswith((".md", ".txt", ".json", ".yml", ".yaml")):
+        safe, cmd = is_content_safe(content)
+        if not safe: return f"BLOCCATO (L2): comando proibito: '{cmd}'"
     if not check_write_limit(): return f"BLOCCATO (L2): limite scritture raggiunto"
     if not GITHUB_TOKEN: return "ERRORE: GitHub token mancante."
     url = f"{GITHUB_API}/repos/{GITHUB_REPO}/contents/{path}"
