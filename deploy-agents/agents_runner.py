@@ -1,7 +1,7 @@
 """
-brAIn Agents Runner v1.3
-Cloud Run service — agenti schedulati + scan on-demand + proattivita + finance.
-Score normalization, query diversificate, scan custom via chat, METABOLISM.
+brAIn Agents Runner v1.4
+Cloud Run service — agenti schedulati + scan on-demand + proattivita + finance + feasibility.
+Score normalization, query diversificate, scan custom via chat, METABOLISM, THINKING.
 """
 
 import os
@@ -1336,6 +1336,283 @@ def run_finance_agent(target_date=None):
 
 
 # ============================================================
+# FEASIBILITY ENGINE v1.0 — THINKING
+# ============================================================
+
+FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
+Valuti la fattibilita' economica e tecnica di soluzioni AI.
+
+VINCOLI DELL'ORGANIZZAZIONE:
+- 1 persona, 20h/settimana, competenza tecnica minima
+- Budget: 1000 EUR/mese totale, primo progetto sotto 200 EUR/mese
+- Stack: Claude API (Haiku/Sonnet), Supabase (PostgreSQL + pgvector), Python, Google Cloud Run, Telegram Bot
+- Obiettivo: revenue entro 3 mesi, marginalita' alta priorita' assoluta
+- Puo' usare API/servizi esterni purche' nel budget
+
+Hai la SOLUZIONE da valutare e una RICERCA COMPETITIVA sul mercato.
+
+Per la soluzione, calcola:
+
+1. COSTO MVP (in EUR):
+   - dev_hours: ore di sviluppo stimate per MVP funzionante
+   - dev_cost_eur: dev_hours * 50 EUR/ora (costo opportunita')
+   - api_monthly_eur: costo mensile API (Claude, Perplexity, altri)
+   - hosting_monthly_eur: costo mensile hosting (Cloud Run, Supabase, domini)
+   - other_monthly_eur: altri costi ricorrenti (email, pagamenti, ecc.)
+   - total_mvp_cost_eur: costo una-tantum per costruire MVP
+   - total_monthly_cost_eur: costi operativi mensili
+
+2. TEMPO SVILUPPO:
+   - weeks_to_mvp: settimane per MVP (considerando 20h/settimana)
+   - weeks_to_revenue: settimane stimate per primo euro di revenue
+
+3. REVENUE MENSILE (3 scenari, a 6 mesi dal lancio):
+   - pessimistic_monthly_eur: scenario pessimista (pochi clienti, prezzo basso)
+   - realistic_monthly_eur: scenario realistico
+   - optimistic_monthly_eur: scenario ottimista (trazione buona)
+   - pricing_model: come si fa pagare (subscription, pay-per-use, freemium+premium, ecc.)
+   - price_point_eur: prezzo per cliente/mese
+
+4. MARGINALITA':
+   - monthly_margin_pessimistic: revenue pessimista - costi mensili
+   - monthly_margin_realistic: revenue realistico - costi mensili
+   - monthly_margin_optimistic: revenue ottimista - costi mensili
+   - margin_percentage_realistic: (margine realistico / revenue realistico) * 100
+   - breakeven_months: mesi per recuperare costo MVP (scenario realistico)
+
+5. COMPETITION SCORE (0.0-1.0, dove 0=mercato deserto, 1=mercato saturo):
+   - competition_score: quanto e' affollato il mercato
+   - direct_competitors: numero di competitor diretti
+   - indirect_competitors: numero di alternative indirette
+   - our_advantage: perche' possiamo competere nonostante i limiti
+
+6. GO/NO-GO:
+   - recommendation: "GO", "CONDITIONAL_GO", o "NO_GO"
+   - confidence: 0.0-1.0 quanto sei sicuro della raccomandazione
+   - reasoning: motivazione in 2-3 frasi
+   - conditions: se CONDITIONAL_GO, cosa deve succedere prima di procedere
+   - biggest_risk: rischio principale
+   - biggest_opportunity: opportunita' principale
+
+REGOLE:
+- Sii REALISTICO, non ottimista. Meglio sottostimare revenue e sovrastimare costi.
+- Se il mercato e' saturo e non abbiamo un vantaggio chiaro, di' NO_GO.
+- Se i costi superano il budget (200 EUR/mese per primo progetto), segnalalo.
+- Considera che l'operatore ha competenza tecnica MINIMA — tempi di sviluppo piu' lunghi.
+
+Rispondi SOLO con JSON:
+{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""}}
+SOLO JSON."""
+
+
+def feasibility_calculate_score(analysis):
+    """Calcola score composito 0-1 dai risultati dell'analisi."""
+    if not analysis:
+        return 0.0
+
+    scores = []
+
+    # 1. Marginalita' realistica (peso 0.30)
+    margin = analysis.get("margin", {})
+    margin_pct = float(margin.get("margin_percentage_realistic", 0))
+    margin_score = min(1.0, max(0.0, margin_pct / 80))
+    scores.append(margin_score * 0.30)
+
+    # 2. Tempo al revenue (peso 0.20)
+    timeline = analysis.get("timeline", {})
+    weeks_to_rev = float(timeline.get("weeks_to_revenue", 52))
+    time_score = max(0.0, 1.0 - (weeks_to_rev / 24))
+    scores.append(time_score * 0.20)
+
+    # 3. Costi mensili entro budget (peso 0.20)
+    costs = analysis.get("mvp_cost", {})
+    monthly_cost = float(costs.get("total_monthly_cost_eur", 1000))
+    cost_score = max(0.0, 1.0 - (monthly_cost / 200))
+    scores.append(cost_score * 0.20)
+
+    # 4. Competition bassa (peso 0.15)
+    competition = analysis.get("competition", {})
+    comp = float(competition.get("competition_score", 0.5))
+    comp_score = 1.0 - comp
+    scores.append(comp_score * 0.15)
+
+    # 5. Confidence della raccomandazione (peso 0.15)
+    rec = analysis.get("recommendation", {})
+    confidence = float(rec.get("confidence", 0.5))
+    decision = rec.get("decision", "NO_GO")
+    decision_mult = 1.0 if decision == "GO" else 0.7 if decision == "CONDITIONAL_GO" else 0.3
+    rec_score = confidence * decision_mult
+    scores.append(rec_score * 0.15)
+
+    total = sum(scores)
+    return round(min(1.0, max(0.0, total)), 4)
+
+
+def run_feasibility_engine(solution_id=None):
+    """Valuta fattibilita' economica e tecnica delle soluzioni proposte."""
+    logger.info("Feasibility Engine v1.0 starting...")
+
+    try:
+        query = supabase.table("solutions").select(
+            "*, problems(title, description, sector, who_is_affected, why_it_matters, weighted_score)"
+        )
+        if solution_id:
+            query = query.eq("id", solution_id)
+        else:
+            query = query.eq("status", "proposed").is_("feasibility_details", "null")
+        result = query.order("created_at", desc=True).limit(20).execute()
+        solutions = result.data or []
+    except Exception as e:
+        logger.error(f"[FE] Recupero soluzioni: {e}")
+        return {"status": "error", "error": str(e)}
+
+    if not solutions:
+        return {"status": "no_solutions", "evaluated": 0}
+
+    evaluated = 0
+    go_solutions = []
+    conditional_solutions = []
+
+    for sol in solutions:
+        title = sol.get("title", "Senza titolo")
+        sector = sol.get("sector", "")
+        logger.info(f"[FE] Valutazione: {title[:60]}")
+
+        problem = sol.get("problems", {}) or {}
+
+        # Score dal Solution Architect
+        try:
+            scores_result = supabase.table("solution_scores").select("*").eq("solution_id", sol["id"]).execute()
+            scores = scores_result.data[0] if scores_result.data else {}
+        except Exception:
+            scores = {}
+
+        # Ricerca competitiva via Perplexity
+        competition_research = search_perplexity(
+            f"{title} competitors alternatives market size pricing {sector}"
+        )
+        time.sleep(1)
+
+        # Prepara contesto
+        approach = sol.get("approach", "")
+        if isinstance(approach, str):
+            try:
+                approach_data = json.loads(approach)
+                approach_text = json.dumps(approach_data, indent=2, ensure_ascii=False)
+            except Exception:
+                approach_text = approach
+        else:
+            approach_text = json.dumps(approach, indent=2, ensure_ascii=False)
+
+        context = (
+            f"SOLUZIONE: {title}\n"
+            f"Descrizione: {sol.get('description', '')}\n"
+            f"Approccio: {approach_text}\n"
+            f"Settore: {sector} / {sol.get('sub_sector', '')}\n\n"
+            f"PROBLEMA ORIGINALE: {problem.get('title', '')}\n"
+            f"Descrizione problema: {problem.get('description', '')}\n"
+            f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+            f"Perche' conta: {problem.get('why_it_matters', '')}\n"
+            f"Score problema: {problem.get('weighted_score', '')}\n\n"
+            f"SCORE SOLUTION ARCHITECT:\n"
+            f"Feasibility: {scores.get('feasibility_score', 'N/A')}\n"
+            f"Impact: {scores.get('impact_score', 'N/A')}\n"
+            f"Complexity: {scores.get('complexity', 'N/A')}\n"
+            f"Time to market: {scores.get('time_to_market', 'N/A')}\n"
+            f"Cost estimate SA: {scores.get('cost_estimate', 'N/A')}\n"
+            f"Notes: {scores.get('notes', '')}\n"
+        )
+        if competition_research:
+            context += f"\nRICERCA COMPETITIVA:\n{competition_research}\n"
+
+        # Analisi Haiku
+        start = time.time()
+        try:
+            response = claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=2048,
+                system=FEASIBILITY_ENGINE_PROMPT,
+                messages=[{"role": "user", "content": f"Valuta questa soluzione. SOLO JSON:\n\n{context}"}]
+            )
+            duration = int((time.time() - start) * 1000)
+            reply = response.content[0].text
+
+            log_to_supabase("feasibility_engine", "analyze_feasibility", 2,
+                f"Feasibility: {title[:100]}", reply[:500],
+                "claude-haiku-4-5-20251001",
+                response.usage.input_tokens, response.usage.output_tokens,
+                (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
+                duration)
+
+            analysis = extract_json(reply)
+        except Exception as e:
+            logger.error(f"[FE ANALYSIS ERROR] {e}")
+            analysis = None
+
+        if not analysis:
+            logger.warning(f"[FE] Analisi fallita per {title[:60]}")
+            continue
+
+        # Calcola score composito
+        feasibility_score = feasibility_calculate_score(analysis)
+
+        # Salva su DB
+        try:
+            supabase.table("solutions").update({
+                "feasibility_score": feasibility_score,
+                "feasibility_details": json.dumps(analysis, ensure_ascii=False),
+            }).eq("id", sol["id"]).execute()
+            evaluated += 1
+        except Exception as e:
+            logger.error(f"[FE SAVE ERROR] {e}")
+            continue
+
+        decision = analysis.get("recommendation", {}).get("decision", "NO_GO")
+        if decision == "GO":
+            go_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis})
+        elif decision == "CONDITIONAL_GO":
+            conditional_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis})
+
+        logger.info(f"[FE] {title[:40]}: {feasibility_score:.2f} | {decision}")
+        time.sleep(1)
+
+    # Notifica Telegram
+    if go_solutions or conditional_solutions:
+        msg = f"FEASIBILITY ENGINE - {evaluated} soluzioni valutate\n\n"
+        if go_solutions:
+            msg += "GO:\n"
+            for s in sorted(go_solutions, key=lambda x: x["score"], reverse=True):
+                a = s["analysis"]
+                rev = a.get("revenue", {}).get("realistic_monthly_eur", 0)
+                cost = a.get("mvp_cost", {}).get("total_monthly_cost_eur", 0)
+                weeks = a.get("timeline", {}).get("weeks_to_mvp", "?")
+                msg += f"  [{s['score']:.2f}] {s['title']}\n"
+                msg += f"    Revenue: {rev} EUR/mese, Costi: {cost} EUR/mese, MVP: {weeks} sett.\n"
+        if conditional_solutions:
+            msg += "\nCONDITIONAL GO:\n"
+            for s in sorted(conditional_solutions, key=lambda x: x["score"], reverse=True):
+                cond = s["analysis"].get("recommendation", {}).get("conditions", "")
+                msg += f"  [{s['score']:.2f}] {s['title']}\n"
+                msg += f"    Condizione: {cond[:100]}\n"
+        notify_telegram(msg)
+
+    # Evento proattivo: se ci sono GO, segnala al futuro Project Builder
+    if go_solutions:
+        best = sorted(go_solutions, key=lambda x: x["score"], reverse=True)[0]
+        emit_event("feasibility_engine", "solution_go", "project_builder",
+            {"title": best["title"], "score": best["score"]}, "high")
+
+    logger.info(f"Feasibility Engine completato: {evaluated} valutate, {len(go_solutions)} GO, {len(conditional_solutions)} conditional")
+    return {
+        "status": "completed",
+        "evaluated": evaluated,
+        "go": len(go_solutions),
+        "conditional_go": len(conditional_solutions),
+        "no_go": evaluated - len(go_solutions) - len(conditional_solutions),
+    }
+
+
+# ============================================================
 # EVENT PROCESSOR
 # ============================================================
 
@@ -1360,6 +1637,10 @@ def process_events():
 
             elif event_type == "problem_approved":
                 run_solution_architect(problem_id=payload.get("problem_id"))
+                mark_event_done(event["id"])
+
+            elif event_type == "solution_go" and target == "project_builder":
+                # Futuro: qui si attivera' il Project Builder
                 mark_event_done(event["id"])
 
             else:
@@ -1417,6 +1698,15 @@ async def run_finance_endpoint(request):
     result = run_finance_agent(target_date=target_date)
     return web.json_response(result)
 
+async def run_feasibility_endpoint(request):
+    try:
+        data = await request.json()
+        solution_id = data.get("solution_id")
+    except Exception:
+        solution_id = None
+    result = run_feasibility_engine(solution_id=solution_id)
+    return web.json_response(result)
+
 async def run_events_endpoint(request):
     result = process_events()
     return web.json_response(result)
@@ -1425,6 +1715,7 @@ async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
     results["architect"] = run_solution_architect()
+    results["feasibility"] = run_feasibility_engine()
     results["knowledge"] = run_knowledge_keeper()
     results["scout"] = run_capability_scout()
     results["finance"] = run_finance_agent()
@@ -1433,7 +1724,7 @@ async def run_all_endpoint(request):
 
 
 async def main():
-    logger.info("brAIn Agents Runner v1.3 starting...")
+    logger.info("brAIn Agents Runner v1.4 starting...")
 
     app = web.Application()
     app.router.add_get("/", health_check)
@@ -1443,6 +1734,7 @@ async def main():
     app.router.add_post("/knowledge", run_knowledge_endpoint)
     app.router.add_post("/scout", run_scout_endpoint)
     app.router.add_post("/finance", run_finance_endpoint)
+    app.router.add_post("/feasibility", run_feasibility_endpoint)
     app.router.add_post("/events", run_events_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
