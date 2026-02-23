@@ -43,7 +43,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
 chat_history = []
-MAX_HISTORY = 8
+MAX_HISTORY = 12
 pending_deploy = None
 
 # GUARDRAILS HARDCODED (L2)
@@ -141,6 +141,13 @@ COME PARLI:
 - UNA sola domanda alla volta.
 - Zero fuffa. Vai al punto.
 - Quando fai operazioni, spiega COSA e PERCHE'.
+- REGOLA CRITICA: dopo OGNI operazione che fai, rispondi SEMPRE con questo formato:
+  FATTO: [cosa hai fatto concretamente]
+  RISULTATO: [ok oppure errore + dettaglio]
+  PROSSIMO: [cosa fai ora]
+- Mai dire "procedo" senza poi fare. Se dici che fai qualcosa, FALLO subito.
+- Se un file e' troppo lungo da leggere, leggilo a pezzi oppure dillo subito e proponi alternativa.
+- Non perdere il filo: se Mirco ti chiede di fare 5 cose, falle tutte in ordine e riporta su ognuna.
 
 CAPACITA': leggere/scrivere codice GitHub, query Supabase, stato sistema, costi, proporre deploy.
 
@@ -362,7 +369,7 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
             return "STOP ricevuto. Tutto fermo."
         total_in = 0; total_out = 0; final = ""
         for _ in range(8):
-            resp = claude.messages.create(model=model, max_tokens=4000, system=system, messages=messages, tools=TOOLS)
+            resp = claude.messages.create(model=model, max_tokens=8000, system=system, messages=messages, tools=TOOLS)
             total_in += resp.usage.input_tokens; total_out += resp.usage.output_tokens
             if resp.stop_reason == "end_turn":
                 for b in resp.content:
@@ -374,7 +381,7 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
                     if b.type == "tool_use":
                         logger.info(f"[TOOL] {b.name}")
                         r = execute_tool(b.name, b.input)
-                        results.append({"type": "tool_result", "tool_use_id": b.id, "content": str(r)[:4000]})
+                        results.append({"type": "tool_result", "tool_use_id": b.id, "content": str(r)[:15000]})
                 messages.append({"role": "assistant", "content": resp.content})
                 messages.append({"role": "user", "content": results})
             else:
@@ -383,7 +390,7 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
                 break
         dur = int((time.time()-start)*1000)
         cost = (total_in*15.0+total_out*75.0)/1_000_000
-        chat_history.append({"user": f"[FOTO] {user_message}" if is_photo else user_message, "assistant": final[:500]})
+        chat_history.append({"user": f"[FOTO] {user_message}" if is_photo else user_message, "assistant": final[:2000]})
         if len(chat_history) > MAX_HISTORY: chat_history = chat_history[-MAX_HISTORY:]
         log_to_supabase("brain_god","chat",user_message[:300],final[:300],model,total_in,total_out,cost,dur)
         return final or "Operazione completata."
