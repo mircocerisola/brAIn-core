@@ -1,7 +1,7 @@
 """
-brAIn Agents Runner v1.4
-Cloud Run service — agenti schedulati + scan on-demand + proattivita + finance + feasibility.
-Score normalization, query diversificate, scan custom via chat, METABOLISM, THINKING.
+brAIn Agents Runner v1.5
+Cloud Run service — agenti schedulati + scan on-demand + pipeline automatica + finance + feasibility.
+Pipeline continua: scan → soluzioni → feasibility, tutto automatico. Notifica solo a fine pipeline.
 """
 
 import os
@@ -174,6 +174,8 @@ SCANNER_WEIGHTS = {
     "competition_gap": 0.15, "ai_solvability": 0.15, "time_to_market": 0.10,
     "recurring_potential": 0.05,
 }
+
+MIN_SCORE_THRESHOLD = 0.65
 
 SCANNER_SECTORS = [
     "food", "health", "finance", "education", "legal",
@@ -350,7 +352,7 @@ def run_scan(queries):
 
     total_saved = 0
     all_scores = []
-    high_score_problems = []
+    saved_problem_ids = []
 
     # Analisi batch
     batch_size = 4
@@ -411,6 +413,11 @@ def run_scan(queries):
                     sector = bp["_sector"]
                     fp = bp["_fp"]
                     weighted = bp["_weighted"]
+
+                    if weighted < MIN_SCORE_THRESHOLD:
+                        logger.info(f"[SKIP] Score basso ({weighted:.3f}): {title}")
+                        continue
+
                     urgency_text = scanner_normalize_urgency(prob.get("urgency", 0.5))
 
                     source_id = None
@@ -425,7 +432,7 @@ def run_scan(queries):
                         top_markets = json.loads(top_markets)
 
                     try:
-                        supabase.table("problems").insert({
+                        insert_result = supabase.table("problems").insert({
                             "title": title,
                             "description": prob.get("description", ""),
                             "domain": sector, "sector": sector,
@@ -449,11 +456,8 @@ def run_scan(queries):
                         total_saved += 1
                         all_scores.append(weighted)
                         existing_fps.add(fp)
-
-                        if weighted >= 0.85:
-                            high_score_problems.append({"title": title, "score": weighted, "sector": sector})
-                            emit_event("world_scanner", "high_score_problem", "solution_architect",
-                                {"title": title, "score": weighted, "sector": sector}, "high")
+                        if insert_result.data:
+                            saved_problem_ids.append(insert_result.data[0]["id"])
 
                     except Exception as e:
                         if "idx_problems_fingerprint" not in str(e):
@@ -498,19 +502,133 @@ def run_scan(queries):
             except:
                 pass
 
-    # Notifiche proattive
-    if high_score_problems:
-        msg = f"Ho trovato {len(high_score_problems)} problemi con score alto:\n\n"
-        for p in high_score_problems:
-            msg += f"- [{p['score']:.2f}] {p['title']} ({p['sector']})\n"
-        msg += "\nVuoi che te li approfondisca?"
-        notify_telegram(msg)
-
     if total_saved >= 3:
         emit_event("world_scanner", "batch_scan_complete", "knowledge_keeper",
             {"problems_saved": total_saved, "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0}, "normal")
 
-    return {"status": "completed", "saved": total_saved, "high_score": len(high_score_problems)}
+    return {"status": "completed", "saved": total_saved, "saved_ids": saved_problem_ids}
+
+
+def run_auto_pipeline(saved_problem_ids):
+    """Pipeline automatica: nuovi problemi → SA (3 fasi) → FE → notifica riepilogo."""
+    if not saved_problem_ids:
+        return
+
+    logger.info(f"[PIPELINE] Avvio automatico per {len(saved_problem_ids)} problemi")
+    log_to_supabase("pipeline", "auto_pipeline_start", 0,
+        f"{len(saved_problem_ids)} problemi", None, "none")
+
+    pipeline_start = time.time()
+    total_solutions = 0
+    new_solution_ids = []
+    problems_processed = []
+
+    # FASE 1: Solution Architect per ogni problema
+    for pid in saved_problem_ids:
+        try:
+            prob_result = supabase.table("problems").select("*").eq("id", pid).execute()
+            if not prob_result.data:
+                continue
+            problem = prob_result.data[0]
+
+            logger.info(f"[PIPELINE] SA per '{problem['title'][:50]}'")
+
+            # SA Fase 1: Ricerca competitiva
+            dossier = research_problem(problem)
+            if not dossier:
+                dossier = {"existing_solutions": [], "market_gaps": ["nessun dato"],
+                    "failed_attempts": [], "expert_insights": [],
+                    "market_size_estimate": "sconosciuto", "key_finding": "ricerca non disponibile"}
+
+            # SA Fase 2: Generazione soluzioni senza vincoli
+            solutions_data = generate_solutions_unconstrained(problem, dossier)
+            if not solutions_data or not solutions_data.get("solutions"):
+                logger.warning(f"[PIPELINE] Nessuna soluzione per {problem['title'][:50]}")
+                continue
+
+            ranking_rationale = solutions_data.get("ranking_rationale", "")
+
+            # SA Fase 3: Fattibilita SA
+            feasibility_data = assess_feasibility(problem, solutions_data)
+            if not feasibility_data:
+                feasibility_data = {"assessments": [], "best_feasible": "", "best_overall": ""}
+
+            feas_map = {}
+            for a in feasibility_data.get("assessments", []):
+                feas_map[a.get("solution_title", "")] = a
+
+            problem_solutions = 0
+            for sol in solutions_data.get("solutions", []):
+                title = sol.get("title", "")
+                assessment = feas_map.get(title, {
+                    "feasibility_score": 0.5, "complexity": "medium",
+                    "time_to_mvp": "sconosciuto", "cost_estimate": "sconosciuto",
+                    "tech_stack_fit": 0.5, "biggest_risk": "non valutato",
+                    "recommended_mvp": "non valutato", "nocode_compatible": True,
+                })
+
+                sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
+                if sol_id:
+                    total_solutions += 1
+                    problem_solutions += 1
+                    new_solution_ids.append(sol_id)
+
+            problems_processed.append({
+                "title": problem["title"],
+                "score": problem.get("weighted_score", 0),
+                "solutions": problem_solutions,
+            })
+
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"[PIPELINE] SA error pid={pid}: {e}")
+
+    # FASE 2: Feasibility Engine per ogni soluzione
+    go_count = 0
+    conditional_count = 0
+    no_go_count = 0
+    go_solutions = []
+
+    for sid in new_solution_ids:
+        try:
+            result = run_feasibility_engine(solution_id=sid, notify=False)
+            if result:
+                go_count += result.get("go", 0)
+                conditional_count += result.get("conditional_go", 0)
+                no_go_count += result.get("no_go", 0)
+                if result.get("go", 0) > 0:
+                    # Recupera titolo soluzione
+                    try:
+                        sol_data = supabase.table("solutions").select("title,feasibility_score").eq("id", sid).execute()
+                        if sol_data.data:
+                            go_solutions.append(sol_data.data[0])
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"[PIPELINE] FE error sid={sid}: {e}")
+
+    pipeline_duration = int(time.time() - pipeline_start)
+
+    # RIEPILOGO FINALE — unica notifica
+    msg = f"PIPELINE COMPLETATA ({pipeline_duration}s)\n\n"
+    msg += f"Problemi analizzati: {len(problems_processed)}\n"
+    for pp in problems_processed:
+        msg += f"  [{pp['score']:.2f}] {pp['title'][:40]} → {pp['solutions']} soluzioni\n"
+    msg += f"\nSoluzioni generate: {total_solutions}\n"
+    msg += f"Feasibility: {go_count} GO, {conditional_count} conditional, {no_go_count} no-go\n"
+    if go_solutions:
+        msg += "\nMigliori GO:\n"
+        for gs in sorted(go_solutions, key=lambda x: x.get("feasibility_score", 0), reverse=True)[:3]:
+            msg += f"  [{gs.get('feasibility_score', 0):.2f}] {gs['title']}\n"
+    msg += "\nChiedimi i dettagli sul Command Center!"
+    notify_telegram(msg)
+
+    log_to_supabase("pipeline", "auto_pipeline_complete", 0,
+        f"{len(saved_problem_ids)} problemi → {total_solutions} soluzioni",
+        f"GO:{go_count} COND:{conditional_count} NO:{no_go_count}",
+        "none", 0, 0, 0, pipeline_duration * 1000)
+
+    logger.info(f"[PIPELINE] Completata: {total_solutions} soluzioni, {go_count} GO")
 
 
 def run_world_scanner():
@@ -524,6 +642,14 @@ def run_world_scanner():
     queries = get_standard_queries(sources)
     result = run_scan(queries)
     logger.info(f"World Scanner completato: {result}")
+
+    # Pipeline automatica in background
+    saved_ids = result.get("saved_ids", [])
+    if saved_ids:
+        import threading
+        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
+        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
+
     return result
 
 
@@ -538,13 +664,17 @@ def run_custom_scan(topic):
     ]
 
     result = run_scan(queries)
-
-    if result.get("saved", 0) > 0:
-        notify_telegram(f"Scan su '{topic}' completato: {result['saved']} problemi trovati. Chiedimi di vederli!")
-    else:
-        notify_telegram(f"Scan su '{topic}' completato ma non ho trovato problemi nuovi. Vuoi che provi con un angolo diverso?")
-
     logger.info(f"Custom scan completato: {result}")
+
+    # Pipeline automatica in background
+    saved_ids = result.get("saved_ids", [])
+    if saved_ids:
+        import threading
+        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
+        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
+    elif result.get("saved", 0) == 0:
+        notify_telegram(f"Scan su '{topic}' completato ma non ho trovato problemi nuovi.")
+
     return result
 
 
@@ -1448,7 +1578,7 @@ def feasibility_calculate_score(analysis):
     return round(min(1.0, max(0.0, total)), 4)
 
 
-def run_feasibility_engine(solution_id=None):
+def run_feasibility_engine(solution_id=None, notify=True):
     """Valuta fattibilita' economica e tecnica delle soluzioni proposte."""
     logger.info("Feasibility Engine v1.0 starting...")
 
@@ -1576,8 +1706,8 @@ def run_feasibility_engine(solution_id=None):
         logger.info(f"[FE] {title[:40]}: {feasibility_score:.2f} | {decision}")
         time.sleep(1)
 
-    # Notifica Telegram
-    if go_solutions or conditional_solutions:
+    # Notifica Telegram (solo se non silenziato dalla pipeline)
+    if notify and (go_solutions or conditional_solutions):
         msg = f"FEASIBILITY ENGINE - {evaluated} soluzioni valutate\n\n"
         if go_solutions:
             msg += "GO:\n"
@@ -1711,11 +1841,24 @@ async def run_events_endpoint(request):
     result = process_events()
     return web.json_response(result)
 
+async def run_pipeline_endpoint(request):
+    """Pipeline completa sincrona: scan → SA → FE."""
+    try:
+        sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
+        sources = sources.data or []
+    except:
+        sources = []
+    queries = get_standard_queries(sources)
+    scan_result = run_scan(queries)
+    saved_ids = scan_result.get("saved_ids", [])
+    if saved_ids:
+        run_auto_pipeline(saved_ids)
+    return web.json_response({"scan": scan_result, "pipeline": f"{len(saved_ids)} problemi processati"})
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
-    results["architect"] = run_solution_architect()
-    results["feasibility"] = run_feasibility_engine()
+    # Pipeline automatica parte in background dal scanner
     results["knowledge"] = run_knowledge_keeper()
     results["scout"] = run_capability_scout()
     results["finance"] = run_finance_agent()
@@ -1724,7 +1867,7 @@ async def run_all_endpoint(request):
 
 
 async def main():
-    logger.info("brAIn Agents Runner v1.4 starting...")
+    logger.info("brAIn Agents Runner v1.5 starting...")
 
     app = web.Application()
     app.router.add_get("/", health_check)
@@ -1735,6 +1878,7 @@ async def main():
     app.router.add_post("/scout", run_scout_endpoint)
     app.router.add_post("/finance", run_finance_endpoint)
     app.router.add_post("/feasibility", run_feasibility_endpoint)
+    app.router.add_post("/pipeline", run_pipeline_endpoint)
     app.router.add_post("/events", run_events_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 

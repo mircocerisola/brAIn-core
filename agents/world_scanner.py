@@ -1,6 +1,7 @@
 """
-brAIn World Scanner Agent v2.1
+brAIn World Scanner Agent v2.2
 Layer 1 — Scansiona il web per identificare problemi globali risolvibili.
+Soglia minima score: 0.65 per salvare problemi.
 """
 
 import os
@@ -28,6 +29,8 @@ WEIGHTS = {
     "time_to_market": 0.10,
     "recurring_potential": 0.05,
 }
+
+MIN_SCORE_THRESHOLD = 0.65
 
 SECTORS = [
     "food", "health", "finance", "education", "legal",
@@ -279,6 +282,10 @@ def save_problems(analysis_text, existing_fps, source_map):
             continue
 
         weighted = calculate_weighted_score(prob)
+
+        if weighted < MIN_SCORE_THRESHOLD:
+            print(f"   [SKIP] Score basso ({weighted:.3f}): {title}")
+            continue
 
         source_id = None
         source_name = prob.get("source_name", "")

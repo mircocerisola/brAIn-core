@@ -1,9 +1,9 @@
 """
-brAIn Command Center Unified v1.0
+brAIn Command Center Unified v2.1
 Bot Telegram unificato — unico punto di contatto per Mirco.
 Modello: Haiku 4.5 (economico, veloce, sufficiente per dashboard).
-Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat.
-NON scrive codice, NON fa deploy, NON accede a GitHub.
+Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat, /code.
+/code: scrive codice nel repo via Claude Sonnet + GitHub API.
 """
 
 import os
@@ -37,6 +37,38 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 AUTHORIZED_USER_ID = None
 chat_history = []
 MAX_HISTORY = 10
+
+# ---- CODE AGENT ----
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = "mircocerisola/brAIn-core"
+GITHUB_API = "https://api.github.com"
+CODE_AGENT_MODEL = "claude-sonnet-4-5-20250514"
+
+pending_deploys = {}  # chat_id -> {"files": [...], "summary": ..., "timestamp": ...}
+
+CODE_AGENT_PROMPT = """Sei il Code Agent di brAIn. Scrivi codice Python per il progetto brAIn.
+
+STRUTTURA REPO:
+- agents/: agenti Python (world_scanner.py, solution_architect.py, feasibility_engine.py, etc.)
+- deploy/: command_center_unified.py + Dockerfile per bot Telegram
+- deploy-agents/: agents_runner.py + Dockerfile per agenti schedulati
+- deploy-god/: brain_god.py per brAIn God
+- config/: configurazione
+- CLAUDE.md: DNA dell'organismo
+
+STACK: Python 3.11, Claude API (anthropic), Supabase (supabase-py), aiohttp, requests, python-telegram-bot.
+Cloud Run EU Frankfurt, Dockerfile slim.
+
+REGOLE:
+- Scrivi codice Python completo e funzionante, non frammenti
+- Rispetta lo stile del codice esistente (logging, supabase client, error handling)
+- Non eliminare funzionalita' esistenti
+- Usa le stesse librerie gia' presenti
+- Ogni file deve essere completo — se modifichi un file esistente, includi TUTTO il contenuto
+
+Per ogni file da creare o modificare, rispondi con JSON:
+{"files":[{"path":"agents/nome_file.py","content":"contenuto completo del file","action":"create o update"}],"summary":"cosa hai fatto in 2 frasi"}
+SOLO JSON."""
 
 # ---- VOICE TRANSCRIPTION (Google Speech-to-Text) ----
 
@@ -576,6 +608,299 @@ def clean_reply(text):
     return text.strip()
 
 
+# ---- GITHUB API + CODE AGENT ----
+
+def github_api(method, endpoint, data=None):
+    """Helper per chiamate GitHub API."""
+    if not GITHUB_TOKEN:
+        return None
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"{GITHUB_API}/repos/{GITHUB_REPO}{endpoint}"
+    try:
+        if method == "GET":
+            r = http_requests.get(url, headers=headers, timeout=30)
+        elif method == "PUT":
+            r = http_requests.put(url, headers=headers, json=data, timeout=30)
+        elif method == "POST":
+            r = http_requests.post(url, headers=headers, json=data, timeout=30)
+        else:
+            return None
+        if r.status_code in (200, 201):
+            return r.json()
+        logger.warning(f"[GITHUB] {method} {endpoint} → {r.status_code}")
+        return None
+    except Exception as e:
+        logger.error(f"[GITHUB] {e}")
+        return None
+
+
+def github_get_file(path):
+    """Recupera contenuto e SHA di un file da GitHub."""
+    result = github_api("GET", f"/contents/{path}")
+    if result and "content" in result:
+        content = base64.b64decode(result["content"]).decode("utf-8")
+        return content, result["sha"]
+    return None, None
+
+
+def github_commit_files(files, message):
+    """Committa uno o piu' file su GitHub via Contents API."""
+    committed = []
+    for f in files:
+        path = f["path"]
+        content = f["content"]
+        content_b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+        existing = github_api("GET", f"/contents/{path}")
+        data = {"message": message, "content": content_b64}
+        if existing and "sha" in existing:
+            data["sha"] = existing["sha"]
+
+        result = github_api("PUT", f"/contents/{path}", data)
+        if not result:
+            return False, f"Errore commit {path}"
+        committed.append(path)
+    return True, committed
+
+
+def _send_telegram_sync(chat_id, text):
+    """Invia messaggio Telegram (sync, per thread background)."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"[TG SYNC] {e}")
+
+
+def _run_code_agent_sync(chat_id, prompt):
+    """Genera codice con Claude Sonnet e committa su GitHub."""
+    try:
+        # 1. Struttura repo
+        tree = github_api("GET", "/git/trees/main?recursive=1")
+        if not tree:
+            _send_telegram_sync(chat_id, "Errore: non riesco a leggere il repo GitHub.")
+            return
+
+        py_files = [f["path"] for f in tree.get("tree", [])
+                     if f["type"] == "blob" and f["path"].endswith(".py")]
+        file_list = "\n".join(py_files)
+
+        # 2. Leggi file rilevanti per contesto (max 5, max 3000 char ciascuno)
+        context_files = []
+        key_dirs = ["agents/", "deploy/", "deploy-agents/", "deploy-god/"]
+        for fp in py_files:
+            if any(fp.startswith(d) for d in key_dirs) and len(context_files) < 5:
+                content, _ = github_get_file(fp)
+                if content:
+                    context_files.append(f"--- {fp} ---\n{content[:3000]}")
+
+        context_text = "\n\n".join(context_files)
+
+        # 3. Chiama Claude Sonnet
+        start = time.time()
+        response = claude.messages.create(
+            model=CODE_AGENT_MODEL,
+            max_tokens=8192,
+            system=CODE_AGENT_PROMPT,
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"FILE NEL REPO:\n{file_list}\n\n"
+                    f"CODICE ESISTENTE (estratti):\n{context_text}\n\n"
+                    f"RICHIESTA DI MIRCO: {prompt}\n\n"
+                    f"Scrivi il codice. SOLO JSON."
+                ),
+            }],
+        )
+        duration = int((time.time() - start) * 1000)
+        reply = response.content[0].text
+
+        cost = (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000
+        log_to_supabase("code_agent", "generate_code", prompt[:300], reply[:300],
+            CODE_AGENT_MODEL, response.usage.input_tokens, response.usage.output_tokens,
+            cost, duration)
+
+        # 4. Parsing risposta
+        data = extract_json_from_text(reply)
+        if not data or not data.get("files"):
+            _send_telegram_sync(chat_id, f"Code Agent non ha generato codice valido.\n\nRisposta: {reply[:500]}")
+            return
+
+        # 5. Commit su GitHub
+        files = data["files"]
+        summary = data.get("summary", "Code Agent: modifiche automatiche")
+
+        success, result = github_commit_files(files, f"[Code Agent] {summary}")
+
+        if success:
+            file_names = ", ".join([f["path"] for f in files])
+            pending_deploys[chat_id] = {
+                "files": [f["path"] for f in files],
+                "summary": summary,
+                "timestamp": time.time(),
+            }
+            _send_telegram_sync(chat_id,
+                f"Codice scritto e committato su GitHub.\n\n"
+                f"File: {file_names}\n"
+                f"Cosa: {summary}\n\n"
+                f"Vuoi che buildo e deployo?")
+        else:
+            _send_telegram_sync(chat_id, f"Errore nel commit: {result}")
+
+    except Exception as e:
+        logger.error(f"[CODE AGENT] {e}")
+        _send_telegram_sync(chat_id, f"Errore Code Agent: {e}")
+
+
+def extract_json_from_text(text):
+    """Estrai JSON da testo (anche con markdown)."""
+    text = text.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(text)
+    except:
+        pass
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except:
+                    return None
+    return None
+
+
+def _get_cloud_access_token():
+    """Ottieni access token dal metadata server GCE."""
+    try:
+        r = http_requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            headers={"Metadata-Flavor": "Google"},
+            timeout=5,
+        )
+        if r.status_code == 200:
+            return r.json()["access_token"]
+    except:
+        pass
+    return None
+
+
+def _determine_services_to_deploy(files):
+    """Determina quali servizi Cloud Run devono essere deployati in base ai file modificati."""
+    services = []
+    for f in files:
+        if f.startswith("deploy-agents/") or f.startswith("agents/"):
+            if "agents-runner" not in services:
+                services.append("agents-runner")
+        if f.startswith("deploy/") and "command_center" in f:
+            if "command-center" not in services:
+                services.append("command-center")
+        if f.startswith("deploy-god/"):
+            if "brain-god" not in services:
+                services.append("brain-god")
+    return services
+
+
+def _trigger_build_deploy_sync(chat_id, deploy_info):
+    """Triggera build e deploy via Cloud Build API."""
+    files = deploy_info.get("files", [])
+    services = _determine_services_to_deploy(files)
+
+    if not services:
+        _send_telegram_sync(chat_id, "Nessun servizio da deployare per i file modificati.")
+        return
+
+    token = _get_cloud_access_token()
+    if not token:
+        _send_telegram_sync(chat_id,
+            f"Non ho accesso al Cloud Build. Servizi da deployare: {', '.join(services)}\n"
+            f"Usa brAIn God per il deploy.")
+        return
+
+    project_id = "brain-core-487914"
+    region = "europe-west3"
+
+    for service in services:
+        if service == "agents-runner":
+            dockerfile_dir = "deploy-agents"
+        elif service == "command-center":
+            dockerfile_dir = "deploy"
+        elif service == "brain-god":
+            dockerfile_dir = "deploy-god"
+        else:
+            continue
+
+        image = f"{region}-docker.pkg.dev/{project_id}/brain-repo/{service}:latest"
+
+        build_config = {
+            "source": {
+                "repoSource": {
+                    "projectId": project_id,
+                    "repoName": "github_mircocerisola_brain-core",
+                    "branchName": "main",
+                }
+            },
+            "steps": [
+                {
+                    "name": "gcr.io/cloud-builders/docker",
+                    "args": ["build", "-t", image, "."],
+                    "dir": dockerfile_dir,
+                },
+                {
+                    "name": "gcr.io/cloud-builders/docker",
+                    "args": ["push", image],
+                },
+                {
+                    "name": "gcr.io/google.com/cloudsdktool/cloud-sdk",
+                    "entrypoint": "gcloud",
+                    "args": [
+                        "run", "deploy", service,
+                        "--image", image,
+                        "--region", region,
+                        "--platform", "managed",
+                        "--quiet",
+                    ],
+                },
+            ],
+        }
+
+        try:
+            r = http_requests.post(
+                f"https://cloudbuild.googleapis.com/v1/projects/{project_id}/builds",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json=build_config,
+                timeout=30,
+            )
+            if r.status_code in (200, 201):
+                build_data = r.json()
+                build_id = build_data.get("metadata", {}).get("build", {}).get("id", "?")
+                _send_telegram_sync(chat_id, f"Build avviata per {service} (ID: {build_id[:8]})")
+            else:
+                _send_telegram_sync(chat_id,
+                    f"Errore build {service}: HTTP {r.status_code}\n"
+                    f"Usa brAIn God per deploy manuale.")
+        except Exception as e:
+            _send_telegram_sync(chat_id, f"Errore build {service}: {e}")
+
+
 # ---- TELEGRAM HANDLERS ----
 
 tg_app = None
@@ -593,20 +918,57 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     await update.message.reply_text(
-        "brAIn Command Center Unified v1.0 attivo.\n"
-        "Haiku 4.5 — vocali, foto, dashboard.\n"
-        "Scrivimi quello che vuoi, niente comandi."
+        "brAIn Command Center Unified v2.1 attivo.\n"
+        "Haiku 4.5 — vocali, foto, dashboard, /code.\n"
+        "Scrivimi quello che vuoi, o usa /code per scrivere codice."
     )
     log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v1.0 unified", "none")
+
+
+async def handle_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler per /code <istruzioni> — Code Agent via Claude Sonnet + GitHub."""
+    if not is_authorized(update):
+        return
+    prompt = update.message.text.replace("/code", "", 1).strip()
+    if not prompt:
+        await update.message.reply_text(
+            "Scrivi /code seguito dalle istruzioni.\n"
+            "Esempio: /code aggiungi un endpoint /health che ritorna lo stato degli agenti")
+        return
+    if not GITHUB_TOKEN:
+        await update.message.reply_text("GITHUB_TOKEN non configurato. Contatta brAIn God.")
+        return
+
+    await update.message.reply_text(f"Ci lavoro con Sonnet: {prompt[:100]}...")
+    chat_id = update.effective_chat.id
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _run_code_agent_sync, chat_id, prompt)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     msg = update.message.text
+    chat_id = update.effective_chat.id
+
     if msg.strip().upper() == "STOP":
         await update.message.reply_text("STOP ricevuto. Tutto fermo.")
         return
+
+    # Check pending deploy
+    if chat_id in pending_deploys:
+        lower_msg = msg.strip().lower()
+        if lower_msg in ("si", "sì", "ok", "vai", "yes", "deploy", "builda", "deploya"):
+            deploy_info = pending_deploys.pop(chat_id)
+            await update.message.reply_text("Avvio build e deploy...")
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, _trigger_build_deploy_sync, chat_id, deploy_info)
+            return
+        elif lower_msg in ("no", "annulla", "stop", "cancel"):
+            pending_deploys.pop(chat_id)
+            await update.message.reply_text("Deploy annullato. Il codice resta su GitHub.")
+            return
+
     await update.message.chat.send_action("typing")
     reply = clean_reply(ask_claude(msg))
     for i in range(0, len(reply), 4000):
@@ -656,7 +1018,7 @@ async def handle_command_as_message(update: Update, context: ContextTypes.DEFAUL
         "/solutions": "mostrami le soluzioni",
         "/status": "come sta il sistema?",
         "/costs": "quanto stiamo spendendo?",
-        "/help": "cosa sai fare?",
+        "/help": "cosa sai fare? Includi che il comando /code permette di scrivere codice nel repo.",
     }
     user_message = remap.get(text, text.replace("/", ""))
     await update.message.chat.send_action("typing")
@@ -682,7 +1044,7 @@ def is_authorized(update):
 # ---- HTTP ENDPOINTS ----
 
 async def health_check(request):
-    return web.Response(text="brAIn Command Center Unified v1.0 OK", status=200)
+    return web.Response(text="brAIn Command Center Unified v2.1 OK", status=200)
 
 
 async def telegram_webhook(request):
@@ -734,10 +1096,11 @@ async def handle_alert(request):
 async def main():
     global tg_app
 
-    logger.info("brAIn Command Center Unified v1.0 — Haiku 4.5 + Voice + Photo + Tools")
+    logger.info("brAIn Command Center Unified v2.1 — Haiku 4.5 + Voice + Photo + Tools + /code")
 
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
+    tg_app.add_handler(CommandHandler("code", handle_code_command))
     tg_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     tg_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command_as_message))
