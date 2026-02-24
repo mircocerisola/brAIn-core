@@ -1,9 +1,10 @@
 """
-brAIn Command Center Unified v2.2
+brAIn Command Center Unified v2.3
 Bot Telegram unificato — unico punto di contatto per Mirco.
 Modello: Haiku 4.5 (economico, veloce, sufficiente per dashboard).
 Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat, /code.
 /code: scrive codice nel repo via Claude Sonnet + GitHub API.
+v2.3: notifiche intelligenti, formato score decimale, self-improvement feedback.
 """
 
 import os
@@ -37,6 +38,15 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 AUTHORIZED_USER_ID = None
 chat_history = []
 MAX_HISTORY = 10
+
+# ---- NOTIFICHE INTELLIGENTI ----
+# Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
+# Vengono inviate raggruppate dopo 2 minuti di silenzio. Solo CRITICAL interrompono.
+_last_mirco_message_time = 0.0  # timestamp ultimo messaggio di Mirco
+_notification_queue = []  # lista di messaggi in coda
+_notification_lock = threading.Lock()
+MIRCO_ACTIVE_WINDOW = 90  # secondi
+NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 
 # ---- CODE AGENT ----
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -131,18 +141,15 @@ COME PARLI:
 HAI QUESTI TOOL per accedere ai dati. Usali SEMPRE per ottenere dati freschi, non inventare.
 
 FORMATO PROBLEMI (elevator — default, uno alla volta):
-[emoji] TITOLO (tradotto in italiano, max 8 parole)
-Score [barra visiva blocchi pieni/vuoti] | Settore | Urgenza
+TITOLO (tradotto in italiano, max 8 parole)
+Score: 0.72 | Settore | Urgenza
 Il dolore: una frase che fa sentire il problema
 Chi soffre: target specifico
 Mercato: dimensione/valore in numeri
 
-Emoji per score: >=0.6 cerchio rosso, 0.4-0.59 arancione, <0.4 giallo
-Barra: blocchi pieni e vuoti su 10 proporzionali allo score
-
 FORMATO SOLUZIONI (elevator — default, una alla volta):
-[emoji] TITOLO
-Score [barra] | Novita [barra] | Difendibilita [barra]
+TITOLO
+Score: 0.68 | BOS: 0.74 REVIEW
 Cosa fa: una frase
 Per chi: target
 Revenue: come guadagna
@@ -403,13 +410,16 @@ def get_cost_report(days=7):
 
 def approve_problem(problem_id):
     try:
-        check = supabase.table("problems").select("id,title,status").eq("id", problem_id).execute()
+        check = supabase.table("problems").select("id,title,status,sector").eq("id", problem_id).execute()
         if not check.data:
             return f"Problema ID {problem_id} non trovato."
         if check.data[0]["status"] == "approved":
             return f"Problema ID {problem_id} gia' approvato."
 
         supabase.table("problems").update({"status": "approved"}).eq("id", problem_id).execute()
+
+        title = check.data[0]["title"]
+        sector = check.data[0].get("sector", "")
 
         # Notifica Solution Architect via agent_events
         try:
@@ -424,7 +434,22 @@ def approve_problem(problem_id):
         except:
             pass
 
-        title = check.data[0]["title"]
+        # Self-improvement: salva preferenza
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "mirco_feedback",
+                "source_agent": "command_center",
+                "payload": json.dumps({
+                    "type": "problem", "action": "approved",
+                    "item_id": str(problem_id), "sector": sector,
+                    "reason": f"Approvato: {title[:100]}",
+                }),
+                "priority": "normal",
+                "status": "pending",
+            }).execute()
+        except:
+            pass
+
         return f"Problema '{title}' (ID {problem_id}) APPROVATO. Solution Architect notificato."
     except Exception as e:
         return f"Errore approvazione: {e}"
@@ -432,12 +457,30 @@ def approve_problem(problem_id):
 
 def reject_problem(problem_id):
     try:
-        check = supabase.table("problems").select("id,title,status").eq("id", problem_id).execute()
+        check = supabase.table("problems").select("id,title,status,sector").eq("id", problem_id).execute()
         if not check.data:
             return f"Problema ID {problem_id} non trovato."
 
         supabase.table("problems").update({"status": "rejected"}).eq("id", problem_id).execute()
         title = check.data[0]["title"]
+        sector = check.data[0].get("sector", "")
+
+        # Self-improvement: salva preferenza rifiuto
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "mirco_feedback",
+                "source_agent": "command_center",
+                "payload": json.dumps({
+                    "type": "problem", "action": "rejected",
+                    "item_id": str(problem_id), "sector": sector,
+                    "reason": f"Rifiutato: {title[:100]}",
+                }),
+                "priority": "normal",
+                "status": "pending",
+            }).execute()
+        except:
+            pass
+
         return f"Problema '{title}' (ID {problem_id}) RIFIUTATO."
     except Exception as e:
         return f"Errore rifiuto: {e}"
@@ -445,7 +488,7 @@ def reject_problem(problem_id):
 
 def select_solution(solution_id):
     try:
-        check = supabase.table("solutions").select("id,title,status").eq("id", solution_id).execute()
+        check = supabase.table("solutions").select("id,title,status,sector").eq("id", solution_id).execute()
         if not check.data:
             return f"Soluzione ID {solution_id} non trovata."
         if check.data[0]["status"] == "selected":
@@ -453,6 +496,24 @@ def select_solution(solution_id):
 
         supabase.table("solutions").update({"status": "selected"}).eq("id", solution_id).execute()
         title = check.data[0]["title"]
+        sector = check.data[0].get("sector", "")
+
+        # Self-improvement: salva preferenza
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "mirco_feedback",
+                "source_agent": "command_center",
+                "payload": json.dumps({
+                    "type": "solution", "action": "selected",
+                    "item_id": str(solution_id), "sector": sector,
+                    "reason": f"Selezionata: {title[:100]}",
+                }),
+                "priority": "normal",
+                "status": "pending",
+            }).execute()
+        except:
+            pass
+
         return f"Soluzione '{title}' (ID {solution_id}) SELEZIONATA per lancio."
     except Exception as e:
         return f"Errore selezione: {e}"
@@ -606,6 +667,70 @@ def clean_reply(text):
     text = re.sub(r'`(.+?)`', r'\1', text)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     return text.strip()
+
+
+def is_mirco_active():
+    """True se Mirco ha mandato un messaggio negli ultimi 90 secondi."""
+    return (time.time() - _last_mirco_message_time) < MIRCO_ACTIVE_WINDOW
+
+
+def queue_or_send_notification(message, is_critical=False):
+    """Se Mirco e' attivo, mette in coda. Se CRITICAL, invia subito."""
+    if is_critical or not is_mirco_active():
+        _send_notification_now(message)
+    else:
+        with _notification_lock:
+            _notification_queue.append(message)
+
+
+def _send_notification_now(message):
+    """Invia notifica Telegram immediatamente."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = AUTHORIZED_USER_ID
+    if not token or not chat_id:
+        return
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": message},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"[NOTIFY] {e}")
+
+
+def flush_notification_queue():
+    """Invia tutte le notifiche in coda come messaggio unico."""
+    with _notification_lock:
+        if not _notification_queue:
+            return
+        messages = list(_notification_queue)
+        _notification_queue.clear()
+
+    if len(messages) == 1:
+        _send_notification_now(messages[0])
+    else:
+        combined = f"NOTIFICHE ({len(messages)})\n\n" + "\n---\n".join(messages)
+        # Tronca se troppo lungo
+        if len(combined) > 4000:
+            combined = combined[:3990] + "\n..."
+        _send_notification_now(combined)
+
+
+def _notification_flusher_loop():
+    """Thread background che controlla e invia la coda ogni 30 secondi."""
+    while True:
+        time.sleep(30)
+        try:
+            silence = time.time() - _last_mirco_message_time
+            if silence >= NOTIFICATION_BATCH_DELAY and _notification_queue:
+                flush_notification_queue()
+        except:
+            pass
+
+
+# Avvia flusher in background
+threading.Thread(target=_notification_flusher_loop, daemon=True).start()
 
 
 # ---- GITHUB API + CODE AGENT ----
@@ -918,9 +1043,9 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     await update.message.reply_text(
-        "brAIn Command Center Unified v2.2 attivo.\n"
+        "brAIn Command Center v2.3 attivo.\n"
         "Haiku 4.5 — vocali, foto, dashboard, /code.\n"
-        "Scrivimi quello che vuoi, o usa /code per scrivere codice."
+        "Notifiche intelligenti attive. Scrivimi quello che vuoi."
     )
     log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v1.0 unified", "none")
 
@@ -946,10 +1071,14 @@ async def handle_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global _last_mirco_message_time
     if not is_authorized(update):
         return
     msg = update.message.text
     chat_id = update.effective_chat.id
+
+    # Traccia ultimo messaggio per notifiche intelligenti
+    _last_mirco_message_time = time.time()
 
     if msg.strip().upper() == "STOP":
         await update.message.reply_text("STOP ricevuto. Tutto fermo.")
@@ -1044,7 +1173,7 @@ def is_authorized(update):
 # ---- HTTP ENDPOINTS ----
 
 async def health_check(request):
-    return web.Response(text="brAIn Command Center Unified v2.2 OK", status=200)
+    return web.Response(text="brAIn Command Center Unified v2.3 OK", status=200)
 
 
 async def telegram_webhook(request):
@@ -1058,7 +1187,7 @@ async def telegram_webhook(request):
 
 
 async def handle_alert(request):
-    """Riceve alert da altri agenti (Finance Agent, etc.) e li inoltra a Mirco via Telegram."""
+    """Riceve alert da altri agenti. Notifiche intelligenti: CRITICAL subito, altri in coda."""
     try:
         data = await request.json()
         message = data.get("message", "")
@@ -1076,16 +1205,14 @@ async def handle_alert(request):
 
         text = f"[{prefix}] da {source}:\n{message}"
 
-        if AUTHORIZED_USER_ID and tg_app:
-            await tg_app.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=text)
-            log_to_supabase(
-                "command_center", "alert_forwarded",
-                f"{source}: {message[:200]}", "inviato a Mirco", "none",
-            )
-            return web.Response(text="OK", status=200)
-        else:
-            logger.warning(f"[ALERT] Nessun destinatario. Alert: {text}")
-            return web.Response(text="No recipient configured", status=503)
+        is_critical = (level == "critical")
+        queue_or_send_notification(text, is_critical=is_critical)
+
+        log_to_supabase(
+            "command_center", "alert_forwarded",
+            f"{source}: {message[:200]}", f"{'immediate' if is_critical else 'queued'}", "none",
+        )
+        return web.Response(text="OK", status=200)
     except Exception as e:
         logger.error(f"[ALERT] {e}")
         return web.Response(text=str(e), status=500)
@@ -1096,7 +1223,7 @@ async def handle_alert(request):
 async def main():
     global tg_app
 
-    logger.info("brAIn Command Center Unified v2.2 — Haiku 4.5 + Voice + Photo + Tools + /code")
+    logger.info("brAIn Command Center Unified v2.3 — Haiku 4.5 + Smart Notifications + Self-Improvement")
 
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))

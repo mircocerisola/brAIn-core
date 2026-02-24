@@ -1,7 +1,8 @@
 """
-brAIn Agents Runner v1.5
-Cloud Run service — agenti schedulati + scan on-demand + pipeline automatica + finance + feasibility.
-Pipeline continua: scan → soluzioni → feasibility, tutto automatico. Notifica solo a fine pipeline.
+brAIn Agents Runner v2.0
+Cloud Run service — sistema event-driven proattivo.
+Event bus in Supabase, cicli autonomi con variazione, BOS integrato, self-improvement.
+Pipeline: scan -> SA (3 fasi + BOS SQ) -> FE (+ BOS Feas) -> BOS -> verdict -> notifica.
 """
 
 import os
@@ -166,7 +167,46 @@ def search_perplexity(query):
 
 
 # ============================================================
-# WORLD SCANNER v2.2
+# PARTE 9: SELF-IMPROVEMENT — Preferenze di Mirco
+# ============================================================
+
+def get_mirco_preferences():
+    """Legge preferenze da org_knowledge per calibrare scan e soluzioni."""
+    try:
+        result = supabase.table("org_knowledge").select("title, content, category").eq("category", "preference").order("created_at", desc=True).limit(30).execute()
+        if not result.data:
+            return ""
+        lines = []
+        for r in result.data:
+            lines.append(f"- {r['title']}: {r['content']}")
+        return "\n".join(lines)
+    except:
+        return ""
+
+
+def get_sector_preference_modifier():
+    """Calcola modifier per settore basato su approvazioni/rifiuti di Mirco."""
+    try:
+        approved = supabase.table("problems").select("sector").eq("status", "approved").execute()
+        rejected = supabase.table("problems").select("sector").eq("status", "rejected").execute()
+
+        sector_scores = {}
+        for p in (approved.data or []):
+            s = p.get("sector", "")
+            if s:
+                sector_scores[s] = sector_scores.get(s, 0) + 1
+        for p in (rejected.data or []):
+            s = p.get("sector", "")
+            if s:
+                sector_scores[s] = sector_scores.get(s, 0) - 1.5
+
+        return sector_scores
+    except:
+        return {}
+
+
+# ============================================================
+# WORLD SCANNER v2.3 — Cicli autonomi con variazione
 # ============================================================
 
 SCANNER_WEIGHTS = {
@@ -199,19 +239,17 @@ Per ogni problema identificato (massimo 3), fornisci:
 
 REGOLA CRITICA SUGLI SCORE: Devi usare TUTTA la scala da 0.0 a 1.0. NON dare score tutti simili.
 Usa questi riferimenti precisi:
-- 0.0-0.2 = molto basso (es. market_size: problema di nicchia <10K persone; time_to_market: servono anni)
-- 0.2-0.4 = basso (es. willingness_to_pay: pagherebbero poco; competition_gap: esistono gia buone soluzioni)
-- 0.4-0.6 = medio (es. urgency: fastidioso ma non critico; ai_solvability: AI aiuta ma non risolve tutto)
-- 0.6-0.8 = alto (es. market_size: milioni di persone; recurring_potential: settimanale)
-- 0.8-1.0 = molto alto (es. urgency: emergenza; competition_gap: zero soluzioni; time_to_market: 1 settimana)
+- 0.0-0.2 = molto basso
+- 0.2-0.4 = basso
+- 0.4-0.6 = medio
+- 0.6-0.8 = alto
+- 0.8-1.0 = molto alto
 
-Ogni problema DEVE avere almeno 2 score sotto 0.4 e almeno 1 score sotto 0.3. Se un problema sembra perfetto su tutto, stai sbagliando — cerca i punti deboli reali.
-
-Se identifichi 3 problemi, il loro score medio pesato NON deve essere lo stesso — differenzia: uno forte, uno medio, uno debole.
+Ogni problema DEVE avere almeno 2 score sotto 0.4 e almeno 1 score sotto 0.3.
 
 2. DATI QUALITATIVI:
-   - who_is_affected: chi soffre? Sii specifico (eta, ruolo, contesto)
-   - real_world_example: storia concreta di qualcuno che vive questo problema
+   - who_is_affected: chi soffre? Sii specifico
+   - real_world_example: storia concreta
    - why_it_matters: perche ci tiene a risolverlo
 
 3. CLASSIFICAZIONE:
@@ -221,11 +259,120 @@ Se identifichi 3 problemi, il loro score medio pesato NON deve essere lo stesso 
 
 NON riproporre problemi generici. Cerca problemi specifici con gap reale.
 
-REGOLA SULLA DIVERSITA DEI SETTORI: i problemi che identifichi devono riguardare settori DIVERSI. Se la query parla di food, trova problemi di food. Se parla di health, trova problemi di health. NON trasformare tutto in un problema di AI o tecnologia — cerca i problemi UMANI concreti del settore specifico.
+REGOLA DIVERSITA SETTORI: i problemi devono riguardare settori DIVERSI.
+
+{preferences_block}
 
 Rispondi SOLO con JSON:
-{"problems":[{"title":"titolo","description":"descrizione","who_is_affected":"chi","real_world_example":"storia","why_it_matters":"perche","sector":"food","geographic_scope":"global","top_markets":["US","UK"],"market_size":0.8,"willingness_to_pay":0.3,"urgency":0.6,"competition_gap":0.8,"ai_solvability":0.9,"time_to_market":0.4,"recurring_potential":0.2,"source_name":"fonte","source_url":"url"}],"new_sources":[{"name":"nome","url":"url","category":"tipo","sectors":["settore"]}]}
+{{"problems":[{{"title":"titolo","description":"descrizione","who_is_affected":"chi","real_world_example":"storia","why_it_matters":"perche","sector":"food","geographic_scope":"global","top_markets":["US","UK"],"market_size":0.8,"willingness_to_pay":0.3,"urgency":0.6,"competition_gap":0.8,"ai_solvability":0.9,"time_to_market":0.4,"recurring_potential":0.2,"source_name":"fonte","source_url":"url"}}],"new_sources":[{{"name":"nome","url":"url","category":"tipo","sectors":["settore"]}}]}}
 SOLO JSON."""
+
+
+def get_scan_strategy():
+    """Determina quale strategia usare basata su ora e giorno (rotazione 6 cicli)."""
+    now = datetime.now(timezone.utc)
+    # Ogni 4 ore = 6 cicli al giorno. Combiniamo giorno e ciclo per variazione.
+    cycle_in_day = now.hour // 4  # 0-5
+    day_offset = now.timetuple().tm_yday % 6
+    strategy_index = (cycle_in_day + day_offset) % 6
+
+    strategies = [
+        "top_sources",        # Ciclo 1: scan fonti top ranked
+        "low_ranked_gems",    # Ciclo 2: esplora fonti a basso ranking
+        "sector_deep_dive",   # Ciclo 3: deep dive settore con meno problemi
+        "correlated_problems",# Ciclo 4: problemi correlati ad approvati
+        "emerging_trends",    # Ciclo 5: trend emergenti e futuri
+        "source_refresh",     # Ciclo 6: rivaluta fonti, cerca nuove
+    ]
+    return strategies[strategy_index], strategy_index
+
+
+def build_strategy_queries(strategy):
+    """Costruisce query diverse per ogni strategia."""
+
+    if strategy == "top_sources":
+        try:
+            sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
+            sources = sources.data or []
+        except:
+            sources = []
+        return get_standard_queries(sources), "top_sources"
+
+    elif strategy == "low_ranked_gems":
+        try:
+            sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score").limit(10).execute()
+            sources = sources.data or []
+        except:
+            sources = []
+        queries = []
+        for s in sources:
+            sectors = s.get("sectors", [])
+            if isinstance(sectors, str):
+                sectors = json.loads(sectors)
+            for sector in sectors[:1]:
+                queries.append((sector, f"underserved problems {sector} niche opportunities nobody solving"))
+        queries.append(("cross", "overlooked everyday problems nobody talks about"))
+        return queries, "low_ranked_gems"
+
+    elif strategy == "sector_deep_dive":
+        # Trova settore con meno problemi
+        try:
+            counts = {}
+            for sector in SCANNER_SECTORS:
+                result = supabase.table("problems").select("id", count="exact").eq("sector", sector).execute()
+                counts[sector] = result.count or 0
+            target_sector = min(counts, key=counts.get)
+        except:
+            target_sector = "sustainability"
+
+        queries = [
+            (target_sector, f"{target_sector} biggest problems consumers businesses face 2026"),
+            (target_sector, f"{target_sector} pain points complaints forums reddit 2026"),
+            (target_sector, f"{target_sector} market gaps underserved needs nobody solving"),
+            (target_sector, f"{target_sector} startups failed why lessons learned"),
+        ]
+        return queries, f"deep_dive_{target_sector}"
+
+    elif strategy == "correlated_problems":
+        try:
+            approved = supabase.table("problems").select("title, sector, description").eq("status", "approved").order("weighted_score", desc=True).limit(5).execute()
+            approved = approved.data or []
+        except:
+            approved = []
+
+        queries = []
+        for p in approved[:3]:
+            queries.append((p.get("sector", "cross"), f"problems related to {p['title'][:60]} adjacent needs"))
+            queries.append((p.get("sector", "cross"), f"people who struggle with {p['title'][:40]} also need"))
+        if not queries:
+            queries = [("cross", "most frustrating daily problems people pay to solve")]
+        return queries, "correlated_problems"
+
+    elif strategy == "emerging_trends":
+        queries = [
+            ("cross", "emerging problems from AI automation 2026 new pain points"),
+            ("cross", "problems that will get worse next 2 years"),
+            ("cross", "new regulations creating compliance problems businesses 2026"),
+            ("cross", "generational shift problems Gen Z millennials face differently"),
+            ("cross", "remote work hybrid problems companies still haven't solved"),
+        ]
+        return queries, "emerging_trends"
+
+    elif strategy == "source_refresh":
+        queries = [
+            ("cross", "best sources for market research consumer problems 2026"),
+            ("cross", "best subreddits forums for identifying business opportunities"),
+            ("cross", "academic research consumer pain points underserved markets"),
+        ]
+        return queries, "source_refresh"
+
+    # Fallback
+    try:
+        sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
+        sources = sources.data or []
+    except:
+        sources = []
+    return get_standard_queries(sources), "standard"
 
 
 def scanner_make_fingerprint(title, sector):
@@ -264,16 +411,12 @@ def scanner_calculate_weighted_score(problem):
 
 
 def normalize_batch_scores(problems_data):
-    """Forza distribuzione ampia degli score in un batch."""
     if len(problems_data) < 2:
         return problems_data
-
     problems_data.sort(key=lambda x: x["_weighted"], reverse=True)
     n = len(problems_data)
-
     best_score = min(problems_data[0]["_weighted"], 0.92)
     worst_score = max(best_score - (n * 0.12), 0.25)
-
     if n == 1:
         problems_data[0]["_weighted"] = best_score
     elif n == 2:
@@ -284,12 +427,10 @@ def normalize_batch_scores(problems_data):
         for i, p in enumerate(problems_data):
             p["_weighted"] = round(best_score - (i * step), 4)
             p["_weighted"] = max(0.15, min(1.0, p["_weighted"]))
-
     return problems_data
 
 
 def get_standard_queries(sources):
-    """Query diversificate per settore — zero bias tech/AI"""
     all_sectors = set()
     for s in sources:
         sectors = s.get("sectors", [])
@@ -319,12 +460,11 @@ def get_standard_queries(sources):
     queries.append(("cross", "most frustrating everyday problems people pay to solve"))
     queries.append(("cross", "biggest complaints small business owners daily operations"))
     queries.append(("cross", "underserved customer needs no good solution exists"))
-
     return queries
 
 
 def run_scan(queries):
-    """Core scan logic — usato sia per scan standard che custom"""
+    """Core scan logic."""
     try:
         sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
         sources = sources.data or []
@@ -339,7 +479,23 @@ def run_scan(queries):
 
     source_map = {s["name"]: s["id"] for s in sources}
 
-    # Ricerca
+    # Preferenze per il prompt
+    preferences = get_mirco_preferences()
+    sector_mods = get_sector_preference_modifier()
+
+    preferences_block = ""
+    if preferences:
+        preferences_block = f"PREFERENZE DI MIRCO (calibra la ricerca di conseguenza):\n{preferences}\n"
+    if sector_mods:
+        favored = [s for s, v in sector_mods.items() if v > 0]
+        disfavored = [s for s, v in sector_mods.items() if v < -1]
+        if favored:
+            preferences_block += f"Settori preferiti: {', '.join(favored)}\n"
+        if disfavored:
+            preferences_block += f"Settori poco interessanti: {', '.join(disfavored)} — riduci priorita\n"
+
+    analysis_prompt = SCANNER_ANALYSIS_PROMPT.replace("{preferences_block}", preferences_block)
+
     search_results = []
     for sector, query in queries:
         result = search_perplexity(query)
@@ -354,7 +510,6 @@ def run_scan(queries):
     all_scores = []
     saved_problem_ids = []
 
-    # Analisi batch
     batch_size = 4
     for i in range(0, len(search_results), batch_size):
         batch = search_results[i:i + batch_size]
@@ -368,7 +523,7 @@ def run_scan(queries):
             response = claude.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=4096,
-                system=SCANNER_ANALYSIS_PROMPT,
+                system=analysis_prompt,
                 messages=[{"role": "user", "content": f"Analizza e identifica problemi. SOLO JSON:\n\n{combined}"}]
             )
             duration = int((time.time() - start) * 1000)
@@ -396,6 +551,13 @@ def run_scan(queries):
 
                     weighted = scanner_calculate_weighted_score(prob)
 
+                    # Sector preference modifier
+                    mod = sector_mods.get(sector, 0)
+                    if mod > 2:
+                        weighted = round(weighted * 1.05, 4)
+                    elif mod < -2:
+                        weighted = round(weighted * 0.90, 4)
+
                     low_count = sum(1 for param in SCANNER_WEIGHTS if prob.get(param, 0.5) < 0.5 and isinstance(prob.get(param, 0.5), (int, float)))
                     if low_count == 0:
                         weighted = round(weighted * 0.8, 4)
@@ -415,7 +577,6 @@ def run_scan(queries):
                     weighted = bp["_weighted"]
 
                     if weighted < MIN_SCORE_THRESHOLD:
-                        logger.info(f"[SKIP] Score basso ({weighted:.3f}): {title}")
                         continue
 
                     urgency_text = scanner_normalize_urgency(prob.get("urgency", 0.5))
@@ -502,19 +663,828 @@ def run_scan(queries):
             except:
                 pass
 
+    # Emetti eventi
+    if total_saved > 0:
+        emit_event("world_scanner", "scan_completed", None,
+            {"problems_saved": total_saved, "problem_ids": saved_problem_ids,
+             "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
+        # Notifica problemi trovati
+        high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= 0.65]
+        if high_score_ids:
+            emit_event("world_scanner", "problems_found", "command_center",
+                {"problem_ids": high_score_ids, "count": len(high_score_ids)})
+
     if total_saved >= 3:
         emit_event("world_scanner", "batch_scan_complete", "knowledge_keeper",
-            {"problems_saved": total_saved, "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0}, "normal")
+            {"problems_saved": total_saved, "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
 
     return {"status": "completed", "saved": total_saved, "saved_ids": saved_problem_ids}
 
 
+def run_world_scanner():
+    """Scan con strategia variabile automatica."""
+    strategy, idx = get_scan_strategy()
+    logger.info(f"World Scanner v2.3 starting — strategy: {strategy} (cycle {idx})")
+
+    log_to_supabase("world_scanner", f"scan_strategy_{strategy}", 1,
+        f"Strategia: {strategy}", None, "none")
+
+    queries, strategy_label = build_strategy_queries(strategy)
+    result = run_scan(queries)
+    logger.info(f"World Scanner completato ({strategy_label}): {result}")
+
+    # Pipeline automatica in background
+    saved_ids = result.get("saved_ids", [])
+    if saved_ids:
+        import threading
+        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
+        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
+
+    return result
+
+
+def run_custom_scan(topic):
+    logger.info(f"World Scanner custom scan: {topic}")
+    queries = [
+        ("custom", f"{topic} biggest problems pain points"),
+        ("custom", f"{topic} unsolved needs market gap"),
+        ("custom", f"{topic} consumers complaints frustrations"),
+    ]
+    result = run_scan(queries)
+    saved_ids = result.get("saved_ids", [])
+    if saved_ids:
+        import threading
+        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
+    elif result.get("saved", 0) == 0:
+        notify_telegram(f"Scan su '{topic}' completato ma non ho trovato problemi nuovi.")
+    return result
+
+
+# ============================================================
+# SOLUTION ARCHITECT v2.0 — 3 fasi + BOS SQ
+# ============================================================
+
+RESEARCH_PROMPT = """Sei un analista di mercato esperto. Dati i risultati di ricerca sul web, crea un DOSSIER COMPETITIVO per il problema dato.
+
+Il dossier deve includere:
+1. SOLUZIONI ESISTENTI: chi gia' risolve questo problema? Nome, cosa fa, prezzo, punti deboli.
+2. GAP DI MERCATO: cosa manca nelle soluzioni attuali?
+3. TENTATIVI FALLITI: qualcuno ha provato e fallito? Perche'?
+4. INSIGHT ESPERTI: cosa dicono ricercatori, analisti, utenti su Reddit/forum?
+5. DIMENSIONE OPPORTUNITA: quanto vale questo mercato?
+
+Rispondi SOLO con JSON:
+{"existing_solutions":[{"name":"nome","what_it_does":"cosa fa","price":"costo","weaknesses":"punti deboli","market_share":"stima"}],"market_gaps":["gap1","gap2"],"failed_attempts":[{"who":"chi","why_failed":"perche"}],"expert_insights":["insight1","insight2"],"market_size_estimate":"stima valore mercato","key_finding":"la scoperta piu' importante in una frase"}
+SOLO JSON."""
+
+GENERATION_PROMPT = """Sei un innovation strategist di livello mondiale. Combini il meglio di:
+- Opportunity Solution Tree (Teresa Torres)
+- Blue Ocean Strategy
+- Jobs-to-be-Done
+- Lean Canvas
+
+Hai un DOSSIER COMPETITIVO e un PROBLEMA. Genera 3 soluzioni ordinate per potenziale.
+
+REGOLE CRITICHE:
+- NON proporre soluzioni che gia' esistono e funzionano bene
+- Cerca gli SPAZI VUOTI
+- Pensa a soluzioni con vantaggio difendibile
+- Sii SPECIFICO
+
+Per ogni soluzione fornisci:
+- title, description, value_proposition, target_segment, job_to_be_done
+- revenue_model, monthly_revenue_potential, monthly_burn_rate
+- competitive_moat, novelty_score (0-1), opportunity_score (0-1), defensibility_score (0-1)
+
+BOS SOLUTION QUALITY SCORES (0.0-1.0 per ognuno):
+- uniqueness: unicita rispetto a soluzioni esistenti (peso 25%)
+- moat_potential: vantaggio difendibile (peso 20%)
+- value_multiplier: valore/prezzo, 10x = 1.0 (peso 20%)
+- simplicity: semplicita per il cliente (peso 10%)
+- revenue_clarity: chiarezza modello revenue (peso 15%)
+- ai_nativeness: quanto e' nativamente AI (peso 10%)
+
+{preferences_block}
+
+Rispondi SOLO con JSON:
+{{"solutions":[{{"title":"","description":"","value_proposition":"","target_segment":"","job_to_be_done":"","revenue_model":"","monthly_revenue_potential":"","monthly_burn_rate":"","competitive_moat":"","novelty_score":0.7,"opportunity_score":0.8,"defensibility_score":0.6,"uniqueness":0.7,"moat_potential":0.6,"value_multiplier":0.8,"simplicity":0.7,"revenue_clarity":0.8,"ai_nativeness":0.9}}],"ranking_rationale":"perche' hai messo la prima in cima"}}
+SOLO JSON."""
+
+SA_FEASIBILITY_PROMPT = """Sei un CTO pragmatico. Valuta la fattibilita' di ogni soluzione dati questi VINCOLI:
+
+VINCOLI ATTUALI:
+- 1 persona, 20h/settimana, competenza tecnica minima
+- Budget: 1000 euro/mese totale, primo progetto sotto 200 euro/mese
+- Stack: Claude API, Supabase, Python, Google Cloud Run, Telegram Bot
+- Obiettivo: revenue entro 3 mesi
+
+Per ogni soluzione valuta:
+- feasibility_score: 0.0-1.0
+- complexity: low/medium/high
+- time_to_mvp, cost_estimate, tech_stack_fit (0-1)
+- biggest_risk, recommended_mvp, nocode_compatible (bool)
+
+Rispondi SOLO con JSON:
+{"assessments":[{"solution_title":"","feasibility_score":0.7,"complexity":"medium","time_to_mvp":"3 settimane","cost_estimate":"80 euro/mese","tech_stack_fit":0.8,"biggest_risk":"rischio","recommended_mvp":"cosa costruire","nocode_compatible":true}],"best_feasible":"quale e perche","best_overall":"quale in assoluto"}
+SOLO JSON."""
+
+
+def research_problem(problem):
+    logger.info(f"[SA] Fase 1: Ricerca per '{problem['title'][:60]}'")
+    title = problem["title"]
+    sector = problem.get("sector", "")
+
+    search_queries = [
+        f"{title} existing solutions competitors market",
+        f"{title} startup failed attempts lessons learned",
+        f"{title} reddit forum user complaints workarounds",
+        f"{title} market size revenue opportunity {sector}",
+    ]
+
+    search_results = []
+    for q in search_queries:
+        result = search_perplexity(q)
+        if result:
+            search_results.append(result)
+        time.sleep(1)
+
+    if not search_results:
+        return None
+
+    combined_research = "\n\n---\n\n".join(search_results)
+    problem_context = (
+        f"PROBLEMA: {title}\n"
+        f"Descrizione: {problem.get('description', '')}\n"
+        f"Settore: {sector}\n"
+        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+        f"Perche conta: {problem.get('why_it_matters', '')}"
+    )
+
+    start = time.time()
+    try:
+        response = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=3000,
+            system=RESEARCH_PROMPT,
+            messages=[{"role": "user", "content": f"{problem_context}\n\nRISULTATI RICERCA:\n{combined_research}\n\nCrea il dossier. SOLO JSON."}]
+        )
+        duration = int((time.time() - start) * 1000)
+        reply = response.content[0].text
+
+        log_to_supabase("solution_architect", "research", 2,
+            f"Ricerca: {title[:100]}", reply[:500],
+            "claude-haiku-4-5-20251001",
+            response.usage.input_tokens, response.usage.output_tokens,
+            (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
+            duration)
+
+        return extract_json(reply)
+    except Exception as e:
+        logger.error(f"[SA RESEARCH ERROR] {e}")
+        return None
+
+
+def generate_solutions_unconstrained(problem, dossier):
+    logger.info(f"[SA] Fase 2: Generazione per '{problem['title'][:60]}'")
+
+    preferences = get_mirco_preferences()
+    preferences_block = ""
+    if preferences:
+        preferences_block = f"PREFERENZE DI MIRCO (calibra le soluzioni):\n{preferences}\n"
+
+    gen_prompt = GENERATION_PROMPT.replace("{preferences_block}", preferences_block)
+
+    problem_context = (
+        f"PROBLEMA: {problem['title']}\n"
+        f"Descrizione: {problem.get('description', '')}\n"
+        f"Settore: {problem.get('sector', '')}\n"
+        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+        f"Esempio reale: {problem.get('real_world_example', '')}\n"
+        f"Perche conta: {problem.get('why_it_matters', '')}\n"
+        f"Score problema: {problem.get('weighted_score', '')}"
+    )
+
+    dossier_text = json.dumps(dossier, indent=2, ensure_ascii=False)
+
+    start = time.time()
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5-20250514",
+            max_tokens=4000,
+            system=gen_prompt,
+            messages=[{"role": "user", "content": f"{problem_context}\n\nDOSSIER COMPETITIVO:\n{dossier_text}\n\nGenera 3 soluzioni. SOLO JSON."}]
+        )
+        duration = int((time.time() - start) * 1000)
+        reply = response.content[0].text
+
+        log_to_supabase("solution_architect", "generate_unconstrained", 2,
+            f"Soluzioni per: {problem['title'][:100]}", reply[:500],
+            "claude-sonnet-4-5-20250514",
+            response.usage.input_tokens, response.usage.output_tokens,
+            (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000,
+            duration)
+
+        return extract_json(reply)
+    except Exception as e:
+        logger.error(f"[SA GENERATE ERROR] {e}")
+        return None
+
+
+def assess_feasibility(problem, solutions_data):
+    logger.info(f"[SA] Fase 3: Fattibilita per '{problem['title'][:60]}'")
+    solutions_text = json.dumps(solutions_data.get("solutions", []), indent=2, ensure_ascii=False)
+
+    start = time.time()
+    try:
+        response = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=2000,
+            system=SA_FEASIBILITY_PROMPT,
+            messages=[{"role": "user", "content": f"PROBLEMA: {problem['title']}\n\nSOLUZIONI:\n{solutions_text}\n\nValuta fattibilita. SOLO JSON."}]
+        )
+        duration = int((time.time() - start) * 1000)
+        reply = response.content[0].text
+
+        log_to_supabase("solution_architect", "assess_feasibility", 2,
+            f"Fattibilita: {problem['title'][:100]}", reply[:500],
+            "claude-haiku-4-5-20251001",
+            response.usage.input_tokens, response.usage.output_tokens,
+            (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
+            duration)
+
+        return extract_json(reply)
+    except Exception as e:
+        logger.error(f"[SA FEASIBILITY ERROR] {e}")
+        return None
+
+
+def save_solution_v2(problem_id, sol, assessment, ranking_rationale, dossier):
+    try:
+        complexity = str(assessment.get("complexity", "medium")).lower().strip()
+        if "low" in complexity:
+            complexity = "low"
+        elif "high" in complexity:
+            complexity = "high"
+        else:
+            complexity = "medium"
+
+        sol_result = supabase.table("solutions").insert({
+            "problem_id": problem_id,
+            "title": sol.get("title", "Senza titolo"),
+            "description": sol.get("description", ""),
+            "approach": json.dumps({
+                "value_proposition": sol.get("value_proposition", ""),
+                "target_segment": sol.get("target_segment", ""),
+                "job_to_be_done": sol.get("job_to_be_done", ""),
+                "revenue_model": sol.get("revenue_model", ""),
+                "competitive_moat": sol.get("competitive_moat", ""),
+                "recommended_mvp": assessment.get("recommended_mvp", ""),
+                "monthly_revenue_potential": sol.get("monthly_revenue_potential", ""),
+                "monthly_burn_rate": sol.get("monthly_burn_rate", ""),
+                "biggest_risk": assessment.get("biggest_risk", ""),
+                "market_gaps": dossier.get("market_gaps", []),
+                "existing_competitors": [s.get("name", "") for s in dossier.get("existing_solutions", [])],
+                "ranking_rationale": ranking_rationale,
+            }, ensure_ascii=False),
+            "sector": sol.get("sector", ""),
+            "sub_sector": sol.get("sub_sector", ""),
+            "status": "proposed",
+            "created_by": "solution_architect_v2",
+        }).execute()
+
+        sol_id = sol_result.data[0]["id"]
+
+        novelty = float(sol.get("novelty_score", 0.5))
+        opportunity = float(sol.get("opportunity_score", 0.5))
+        defensibility = float(sol.get("defensibility_score", 0.5))
+        feasibility = float(assessment.get("feasibility_score", 0.5))
+        tech_fit = float(assessment.get("tech_stack_fit", 0.5))
+
+        impact = round((novelty + opportunity + defensibility) / 3, 4)
+        overall = round((impact + feasibility) / 2, 4)
+
+        supabase.table("solution_scores").insert({
+            "solution_id": sol_id,
+            "feasibility_score": feasibility,
+            "impact_score": impact,
+            "cost_estimate": str(assessment.get("cost_estimate", "unknown")),
+            "complexity": complexity,
+            "time_to_market": str(assessment.get("time_to_mvp", "unknown")),
+            "nocode_compatible": bool(assessment.get("nocode_compatible", True)),
+            "overall_score": overall,
+            "notes": json.dumps({
+                "novelty": novelty,
+                "opportunity": opportunity,
+                "defensibility": defensibility,
+                "tech_stack_fit": tech_fit,
+                "revenue_model": sol.get("revenue_model", ""),
+                "monthly_revenue_potential": sol.get("monthly_revenue_potential", ""),
+                "monthly_burn_rate": sol.get("monthly_burn_rate", ""),
+                "uniqueness": float(sol.get("uniqueness", 0.5)),
+                "moat_potential": float(sol.get("moat_potential", 0.5)),
+                "value_multiplier": float(sol.get("value_multiplier", 0.5)),
+                "simplicity": float(sol.get("simplicity", 0.5)),
+                "revenue_clarity": float(sol.get("revenue_clarity", 0.5)),
+                "ai_nativeness": float(sol.get("ai_nativeness", 0.5)),
+            }, ensure_ascii=False),
+            "scored_by": "solution_architect_v2",
+        }).execute()
+
+        return sol_id, overall
+
+    except Exception as e:
+        logger.error(f"[SAVE SOL V2 ERROR] {e}")
+        return None, 0
+
+
+def run_solution_architect(problem_id=None):
+    logger.info("Solution Architect v2.0 starting (3 fasi)...")
+
+    try:
+        query = supabase.table("problems").select("*").eq("status", "approved").order("weighted_score", desc=True)
+        if problem_id:
+            query = query.eq("id", problem_id)
+        problems = query.execute()
+        problems = problems.data or []
+    except:
+        problems = []
+
+    if not problems:
+        return {"status": "no_problems", "saved": 0}
+
+    try:
+        existing = supabase.table("solutions").select("problem_id").execute()
+        existing_ids = {s["problem_id"] for s in (existing.data or [])}
+    except:
+        existing_ids = set()
+
+    if not problem_id:
+        problems = [p for p in problems if p["id"] not in existing_ids]
+    if not problems:
+        return {"status": "all_solved", "saved": 0}
+
+    total_saved = 0
+    new_solution_ids = []
+
+    for problem in problems:
+        dossier = research_problem(problem)
+        if not dossier:
+            dossier = {"existing_solutions": [], "market_gaps": ["nessun dato"], "failed_attempts": [], "expert_insights": [], "market_size_estimate": "sconosciuto", "key_finding": "ricerca non disponibile"}
+
+        solutions_data = generate_solutions_unconstrained(problem, dossier)
+        if not solutions_data or not solutions_data.get("solutions"):
+            continue
+
+        ranking_rationale = solutions_data.get("ranking_rationale", "")
+
+        feasibility_data = assess_feasibility(problem, solutions_data)
+        if not feasibility_data:
+            feasibility_data = {"assessments": [], "best_feasible": "", "best_overall": ""}
+
+        feas_map = {}
+        for a in feasibility_data.get("assessments", []):
+            feas_map[a.get("solution_title", "")] = a
+
+        for sol in solutions_data.get("solutions", []):
+            title = sol.get("title", "")
+            assessment = feas_map.get(title, {
+                "feasibility_score": 0.5, "complexity": "medium",
+                "time_to_mvp": "sconosciuto", "cost_estimate": "sconosciuto",
+                "tech_stack_fit": 0.5, "biggest_risk": "non valutato",
+                "recommended_mvp": "non valutato", "nocode_compatible": True,
+            })
+
+            sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
+            if sol_id:
+                total_saved += 1
+                new_solution_ids.append(sol_id)
+
+        # Emit event
+        if new_solution_ids:
+            emit_event("solution_architect", "solutions_generated", "feasibility_engine",
+                {"solution_ids": new_solution_ids, "problem_id": str(problem["id"])})
+
+        time.sleep(2)
+
+    logger.info(f"Solution Architect v2.0 completato: {total_saved} soluzioni")
+    return {"status": "completed", "saved": total_saved, "solution_ids": new_solution_ids}
+
+
+# ============================================================
+# FEASIBILITY ENGINE v1.1 — con BOS Feasibility
+# ============================================================
+
+FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
+Valuti la fattibilita' economica e tecnica di soluzioni AI.
+
+VINCOLI:
+- 1 persona, 20h/settimana, competenza tecnica minima
+- Budget: 1000 EUR/mese totale, primo progetto sotto 200 EUR/mese
+- Stack: Claude API, Supabase, Python, Google Cloud Run, Telegram Bot
+- Obiettivo: revenue entro 3 mesi, marginalita' alta
+
+Per la soluzione, calcola:
+
+1. COSTO MVP: dev_hours, dev_cost_eur, api_monthly_eur, hosting_monthly_eur, other_monthly_eur, total_mvp_cost_eur, total_monthly_cost_eur
+2. TEMPO: weeks_to_mvp, weeks_to_revenue
+3. REVENUE (3 scenari 6 mesi): pessimistic_monthly_eur, realistic_monthly_eur, optimistic_monthly_eur, pricing_model, price_point_eur
+4. MARGINALITA: monthly_margin_pessimistic/realistic/optimistic, margin_percentage_realistic, breakeven_months
+5. COMPETITION: competition_score (0-1), direct_competitors, indirect_competitors, our_advantage
+6. GO/NO-GO: decision (GO/CONDITIONAL_GO/NO_GO), confidence (0-1), reasoning, conditions, biggest_risk, biggest_opportunity
+
+7. BOS FEASIBILITY SCORES (0.0-1.0 per ogni parametro):
+   - margin_potential (25%): margine >70% = 1.0, <20% = 0.0
+   - ai_buildability (20%): completamente AI-driven = 1.0
+   - time_to_market_score (15%): 1 settimana = 1.0, 6+ mesi = 0.0
+   - mvp_cost_score (15%): sotto 50 EUR/mese = 1.0, sopra 300 = 0.0
+   - recurring_revenue (10%): subscription forte = 1.0, one-shot = 0.0
+   - market_access (10%): canale diretto/organico = 1.0, enterprise sales = 0.0
+   - scalability (5%): auto-scaling = 1.0, richiede team = 0.0
+
+Sii REALISTICO.
+
+Rispondi SOLO con JSON:
+{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"margin_potential":0.0,"ai_buildability":0.0,"time_to_market_score":0.0,"mvp_cost_score":0.0,"recurring_revenue":0.0,"market_access":0.0,"scalability":0.0}}
+SOLO JSON."""
+
+
+def feasibility_calculate_score(analysis):
+    if not analysis:
+        return 0.0
+    scores = []
+    margin = analysis.get("margin", {})
+    margin_pct = float(margin.get("margin_percentage_realistic", 0))
+    scores.append(min(1.0, max(0.0, margin_pct / 80)) * 0.30)
+
+    timeline = analysis.get("timeline", {})
+    weeks_to_rev = float(timeline.get("weeks_to_revenue", 52))
+    scores.append(max(0.0, 1.0 - (weeks_to_rev / 24)) * 0.20)
+
+    costs = analysis.get("mvp_cost", {})
+    monthly_cost = float(costs.get("total_monthly_cost_eur", 1000))
+    scores.append(max(0.0, 1.0 - (monthly_cost / 200)) * 0.20)
+
+    competition = analysis.get("competition", {})
+    comp = float(competition.get("competition_score", 0.5))
+    scores.append((1.0 - comp) * 0.15)
+
+    rec = analysis.get("recommendation", {})
+    confidence = float(rec.get("confidence", 0.5))
+    decision = rec.get("decision", "NO_GO")
+    decision_mult = 1.0 if decision == "GO" else 0.7 if decision == "CONDITIONAL_GO" else 0.3
+    scores.append((confidence * decision_mult) * 0.15)
+
+    return round(min(1.0, max(0.0, sum(scores))), 4)
+
+
+def run_feasibility_engine(solution_id=None, notify=True):
+    logger.info("Feasibility Engine v1.1 starting...")
+
+    try:
+        query = supabase.table("solutions").select(
+            "*, problems(title, description, sector, who_is_affected, why_it_matters, weighted_score)"
+        )
+        if solution_id:
+            query = query.eq("id", solution_id)
+        else:
+            query = query.eq("status", "proposed").is_("feasibility_details", "null")
+        result = query.order("created_at", desc=True).limit(20).execute()
+        solutions = result.data or []
+    except Exception as e:
+        logger.error(f"[FE] Recupero soluzioni: {e}")
+        return {"status": "error", "error": str(e)}
+
+    if not solutions:
+        return {"status": "no_solutions", "evaluated": 0}
+
+    evaluated = 0
+    go_solutions = []
+    conditional_solutions = []
+
+    for sol in solutions:
+        title = sol.get("title", "Senza titolo")
+        sector = sol.get("sector", "")
+        logger.info(f"[FE] Valutazione: {title[:60]}")
+
+        problem = sol.get("problems", {}) or {}
+
+        try:
+            scores_result = supabase.table("solution_scores").select("*").eq("solution_id", sol["id"]).execute()
+            scores = scores_result.data[0] if scores_result.data else {}
+        except:
+            scores = {}
+
+        competition_research = search_perplexity(
+            f"{title} competitors alternatives market size pricing {sector}"
+        )
+        time.sleep(1)
+
+        approach = sol.get("approach", "")
+        if isinstance(approach, str):
+            try:
+                approach_data = json.loads(approach)
+                approach_text = json.dumps(approach_data, indent=2, ensure_ascii=False)
+            except:
+                approach_text = approach
+        else:
+            approach_text = json.dumps(approach, indent=2, ensure_ascii=False)
+
+        context = (
+            f"SOLUZIONE: {title}\n"
+            f"Descrizione: {sol.get('description', '')}\n"
+            f"Approccio: {approach_text}\n"
+            f"Settore: {sector} / {sol.get('sub_sector', '')}\n\n"
+            f"PROBLEMA: {problem.get('title', '')}\n"
+            f"Descrizione: {problem.get('description', '')}\n"
+            f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+            f"Score problema: {problem.get('weighted_score', '')}\n\n"
+            f"SCORE SA: Feasibility={scores.get('feasibility_score', 'N/A')} Impact={scores.get('impact_score', 'N/A')} Complexity={scores.get('complexity', 'N/A')}\n"
+        )
+        if competition_research:
+            context += f"\nRICERCA COMPETITIVA:\n{competition_research}\n"
+
+        start = time.time()
+        try:
+            response = claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=2048,
+                system=FEASIBILITY_ENGINE_PROMPT,
+                messages=[{"role": "user", "content": f"Valuta. SOLO JSON:\n\n{context}"}]
+            )
+            duration = int((time.time() - start) * 1000)
+            reply = response.content[0].text
+
+            log_to_supabase("feasibility_engine", "analyze_feasibility", 2,
+                f"Feasibility: {title[:100]}", reply[:500],
+                "claude-haiku-4-5-20251001",
+                response.usage.input_tokens, response.usage.output_tokens,
+                (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
+                duration)
+
+            analysis = extract_json(reply)
+        except Exception as e:
+            logger.error(f"[FE ANALYSIS ERROR] {e}")
+            analysis = None
+
+        if not analysis:
+            continue
+
+        feasibility_score = feasibility_calculate_score(analysis)
+
+        try:
+            supabase.table("solutions").update({
+                "feasibility_score": feasibility_score,
+                "feasibility_details": json.dumps(analysis, ensure_ascii=False),
+            }).eq("id", sol["id"]).execute()
+            evaluated += 1
+        except Exception as e:
+            logger.error(f"[FE SAVE ERROR] {e}")
+            continue
+
+        decision = analysis.get("recommendation", {}).get("decision", "NO_GO")
+        if decision == "GO":
+            go_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis, "sol_id": sol["id"]})
+        elif decision == "CONDITIONAL_GO":
+            conditional_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis, "sol_id": sol["id"]})
+
+        # Emit feasibility_completed event
+        emit_event("feasibility_engine", "feasibility_completed", None,
+            {"solution_id": str(sol["id"]), "score": feasibility_score, "decision": decision})
+
+        # Calcola BOS
+        bos_result = calculate_bos(sol["id"])
+        if bos_result:
+            logger.info(f"[FE] {title[:40]}: FE={feasibility_score:.2f} | {decision} | BOS={bos_result['bos_score']:.2f} {bos_result['verdict']}")
+
+            # Emit bos_calculated event
+            emit_event("feasibility_engine", "bos_calculated", None,
+                {"solution_id": str(sol["id"]), "bos_score": bos_result["bos_score"], "verdict": bos_result["verdict"]})
+
+            # Auto-cascade basata su verdict
+            if bos_result["verdict"] == "AUTO-GO":
+                emit_event("bos_engine", "auto_go", "project_builder",
+                    {"solution_id": str(sol["id"]), "title": title, "bos": bos_result["bos_score"]}, "high")
+            elif bos_result["verdict"] == "REVIEW":
+                emit_event("bos_engine", "review_request", "command_center",
+                    {"solution_id": str(sol["id"]), "title": title, "bos": bos_result["bos_score"]}, "high")
+            else:
+                emit_event("bos_engine", "archive", None,
+                    {"solution_id": str(sol["id"]), "title": title, "bos": bos_result["bos_score"]})
+
+        if notify and bos_result and bos_result["verdict"] in ("AUTO-GO", "REVIEW"):
+            card = format_bos_card(title, bos_result)
+            notify_telegram(card)
+
+        time.sleep(1)
+
+    if go_solutions:
+        best = sorted(go_solutions, key=lambda x: x["score"], reverse=True)[0]
+        emit_event("feasibility_engine", "solution_go", "project_builder",
+            {"title": best["title"], "score": best["score"]}, "high")
+
+    logger.info(f"Feasibility Engine completato: {evaluated} valutate, {len(go_solutions)} GO")
+    return {
+        "status": "completed",
+        "evaluated": evaluated,
+        "go": len(go_solutions),
+        "conditional_go": len(conditional_solutions),
+        "no_go": evaluated - len(go_solutions) - len(conditional_solutions),
+    }
+
+
+# ============================================================
+# BOS — brAIn Opportunity Score
+# ============================================================
+
+BOS_SQ_WEIGHTS = {
+    "uniqueness": 0.25, "moat_potential": 0.20, "value_multiplier": 0.20,
+    "simplicity": 0.10, "revenue_clarity": 0.15, "ai_nativeness": 0.10,
+}
+
+BOS_FEAS_WEIGHTS = {
+    "margin_potential": 0.25, "ai_buildability": 0.20, "time_to_market_score": 0.15,
+    "mvp_cost_score": 0.15, "recurring_revenue": 0.10, "market_access": 0.10,
+    "scalability": 0.05,
+}
+
+BOS_PARAM_NAMES = {
+    "problem_quality": "Qualita problema",
+    "sq_uniqueness": "Unicita", "sq_moat_potential": "Difendibilita",
+    "sq_value_multiplier": "Valore/prezzo", "sq_simplicity": "Semplicita",
+    "sq_revenue_clarity": "Chiarezza revenue", "sq_ai_nativeness": "AI-nativa",
+    "fe_margin_potential": "Potenziale margine", "fe_ai_buildability": "Costruibile con AI",
+    "fe_time_to_market_score": "Velocita lancio", "fe_mvp_cost_score": "Costo MVP",
+    "fe_recurring_revenue": "Revenue ricorrente", "fe_market_access": "Accesso mercato",
+    "fe_scalability": "Scalabilita",
+}
+
+
+def calculate_bos(solution_id):
+    """BOS = Problem Quality (30%) + Solution Quality (30%) + Feasibility (40%)"""
+    try:
+        sol_result = supabase.table("solutions").select(
+            "*, problems(weighted_score, title)"
+        ).eq("id", solution_id).execute()
+        if not sol_result.data:
+            return None
+        sol = sol_result.data[0]
+
+        scores_result = supabase.table("solution_scores").select("*").eq("solution_id", solution_id).execute()
+        scores = scores_result.data[0] if scores_result.data else {}
+    except Exception as e:
+        logger.error(f"[BOS] Recupero dati: {e}")
+        return None
+
+    problem = sol.get("problems", {}) or {}
+
+    problem_quality = min(1.0, max(0.0, float(problem.get("weighted_score", 0) or 0)))
+
+    notes = scores.get("notes", "{}")
+    if isinstance(notes, str):
+        try:
+            notes_data = json.loads(notes)
+        except:
+            notes_data = {}
+    else:
+        notes_data = notes or {}
+
+    solution_quality = 0.0
+    sq_details = {}
+    for param, weight in BOS_SQ_WEIGHTS.items():
+        value = min(1.0, max(0.0, float(notes_data.get(param, 0.5))))
+        sq_details[param] = round(value, 4)
+        solution_quality += value * weight
+
+    feasibility_details_raw = sol.get("feasibility_details", "{}")
+    if isinstance(feasibility_details_raw, str):
+        try:
+            fe_data = json.loads(feasibility_details_raw)
+        except:
+            fe_data = {}
+    else:
+        fe_data = feasibility_details_raw or {}
+
+    bos_feas = fe_data.get("bos_feasibility", {})
+
+    feasibility_score = 0.0
+    feas_details = {}
+    for param, weight in BOS_FEAS_WEIGHTS.items():
+        value = min(1.0, max(0.0, float(bos_feas.get(param, 0.5))))
+        feas_details[param] = round(value, 4)
+        feasibility_score += value * weight
+
+    bos = round(problem_quality * 0.30 + solution_quality * 0.30 + feasibility_score * 0.40, 4)
+    bos = min(1.0, max(0.0, bos))
+
+    if bos >= 0.75:
+        verdict = "AUTO-GO"
+    elif bos >= 0.55:
+        verdict = "REVIEW"
+    else:
+        verdict = "ARCHIVE"
+
+    all_params = {"problem_quality": problem_quality}
+    for k, v in sq_details.items():
+        all_params[f"sq_{k}"] = v
+    for k, v in feas_details.items():
+        all_params[f"fe_{k}"] = v
+
+    sorted_params = sorted(all_params.items(), key=lambda x: x[1], reverse=True)
+    top_strengths = [{"param": k, "value": round(v, 2)} for k, v in sorted_params[:3]]
+    top_risks = [{"param": k, "value": round(v, 2)} for k, v in sorted_params[-2:]]
+
+    bos_details = {
+        "bos_score": bos, "verdict": verdict,
+        "problem_quality": round(problem_quality, 4),
+        "solution_quality": round(solution_quality, 4),
+        "feasibility_score": round(feasibility_score, 4),
+        "sq_details": sq_details, "feas_details": feas_details,
+        "top_strengths": top_strengths, "top_risks": top_risks,
+    }
+
+    try:
+        supabase.table("solutions").update({
+            "bos_score": bos,
+            "bos_details": json.dumps(bos_details, ensure_ascii=False),
+        }).eq("id", solution_id).execute()
+    except Exception as e:
+        logger.error(f"[BOS] Salvataggio: {e}")
+
+    logger.info(f"[BOS] {sol.get('title', '?')[:40]}: {bos:.2f} {verdict}")
+    return bos_details
+
+
+def format_bos_card(solution_title, bos_details):
+    """Card BOS compatta — formato decimale leggibile su mobile."""
+    bos = bos_details["bos_score"]
+    verdict = bos_details["verdict"]
+    pq = bos_details["problem_quality"]
+    sq = bos_details["solution_quality"]
+    fe = bos_details["feasibility_score"]
+
+    lines = [
+        f"BOS: {solution_title}",
+        "",
+        f"Score: {bos:.2f} | {verdict}",
+        "",
+        f"Problem:     {pq:.2f} (x0.30)",
+        f"Solution:    {sq:.2f} (x0.30)",
+        f"Feasibility: {fe:.2f} (x0.40)",
+        "",
+        "FORZE:",
+    ]
+
+    for s in bos_details["top_strengths"]:
+        name = BOS_PARAM_NAMES.get(s["param"], s["param"])
+        lines.append(f"  + {name}: {s['value']:.2f}")
+
+    lines.append("")
+    lines.append("RISCHI:")
+    for r in bos_details["top_risks"]:
+        name = BOS_PARAM_NAMES.get(r["param"], r["param"])
+        lines.append(f"  - {name}: {r['value']:.2f}")
+
+    return "\n".join(lines)
+
+
+def run_bos_endpoint_logic(solution_id=None):
+    if solution_id:
+        result = calculate_bos(solution_id)
+        if result:
+            sol_result = supabase.table("solutions").select("title").eq("id", solution_id).execute()
+            title = sol_result.data[0]["title"] if sol_result.data else "?"
+            card = format_bos_card(title, result)
+            notify_telegram(card)
+            return {"status": "completed", "bos": result}
+        return {"status": "error", "error": "calcolo fallito"}
+
+    try:
+        sols = supabase.table("solutions").select("id, title").not_.is_("feasibility_details", "null").is_("bos_score", "null").limit(50).execute()
+        solutions = sols.data or []
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    calculated = 0
+    for sol in solutions:
+        result = calculate_bos(sol["id"])
+        if result:
+            calculated += 1
+            if result["verdict"] in ("AUTO-GO", "REVIEW"):
+                card = format_bos_card(sol["title"], result)
+                notify_telegram(card)
+
+    return {"status": "completed", "calculated": calculated}
+
+
+# ============================================================
+# PIPELINE AUTOMATICA
+# ============================================================
+
 def run_auto_pipeline(saved_problem_ids):
-    """Pipeline automatica: nuovi problemi → SA (3 fasi) → FE → notifica riepilogo."""
     if not saved_problem_ids:
         return
 
-    logger.info(f"[PIPELINE] Avvio automatico per {len(saved_problem_ids)} problemi")
+    logger.info(f"[PIPELINE] Avvio per {len(saved_problem_ids)} problemi")
     log_to_supabase("pipeline", "auto_pipeline_start", 0,
         f"{len(saved_problem_ids)} problemi", None, "none")
 
@@ -523,7 +1493,6 @@ def run_auto_pipeline(saved_problem_ids):
     new_solution_ids = []
     problems_processed = []
 
-    # FASE 1: Solution Architect per ogni problema
     for pid in saved_problem_ids:
         try:
             prob_result = supabase.table("problems").select("*").eq("id", pid).execute()
@@ -531,24 +1500,17 @@ def run_auto_pipeline(saved_problem_ids):
                 continue
             problem = prob_result.data[0]
 
-            logger.info(f"[PIPELINE] SA per '{problem['title'][:50]}'")
-
-            # SA Fase 1: Ricerca competitiva
             dossier = research_problem(problem)
             if not dossier:
                 dossier = {"existing_solutions": [], "market_gaps": ["nessun dato"],
                     "failed_attempts": [], "expert_insights": [],
                     "market_size_estimate": "sconosciuto", "key_finding": "ricerca non disponibile"}
 
-            # SA Fase 2: Generazione soluzioni senza vincoli
             solutions_data = generate_solutions_unconstrained(problem, dossier)
             if not solutions_data or not solutions_data.get("solutions"):
-                logger.warning(f"[PIPELINE] Nessuna soluzione per {problem['title'][:50]}")
                 continue
 
             ranking_rationale = solutions_data.get("ranking_rationale", "")
-
-            # SA Fase 3: Fattibilita SA
             feasibility_data = assess_feasibility(problem, solutions_data)
             if not feasibility_data:
                 feasibility_data = {"assessments": [], "best_feasible": "", "best_overall": ""}
@@ -583,11 +1545,11 @@ def run_auto_pipeline(saved_problem_ids):
         except Exception as e:
             logger.error(f"[PIPELINE] SA error pid={pid}: {e}")
 
-    # FASE 2: Feasibility Engine per ogni soluzione
+    # FASE 2: Feasibility Engine
     go_count = 0
     conditional_count = 0
     no_go_count = 0
-    go_solutions = []
+    bos_results = []
 
     for sid in new_solution_ids:
         try:
@@ -596,464 +1558,49 @@ def run_auto_pipeline(saved_problem_ids):
                 go_count += result.get("go", 0)
                 conditional_count += result.get("conditional_go", 0)
                 no_go_count += result.get("no_go", 0)
-                if result.get("go", 0) > 0:
-                    # Recupera titolo soluzione
-                    try:
-                        sol_data = supabase.table("solutions").select("title,feasibility_score").eq("id", sid).execute()
-                        if sol_data.data:
-                            go_solutions.append(sol_data.data[0])
-                    except:
-                        pass
         except Exception as e:
             logger.error(f"[PIPELINE] FE error sid={sid}: {e}")
 
+    # FASE 3: BOS per tutte
+    for sid in new_solution_ids:
+        bos_data = calculate_bos(sid)
+        if bos_data:
+            try:
+                sol_data = supabase.table("solutions").select("title").eq("id", sid).execute()
+                title = sol_data.data[0]["title"] if sol_data.data else "?"
+            except:
+                title = "?"
+            bos_results.append({"title": title, "bos": bos_data})
+
     pipeline_duration = int(time.time() - pipeline_start)
 
-    # RIEPILOGO FINALE — unica notifica
+    # RIEPILOGO — formato decimale
     msg = f"PIPELINE COMPLETATA ({pipeline_duration}s)\n\n"
     msg += f"Problemi analizzati: {len(problems_processed)}\n"
     for pp in problems_processed:
-        msg += f"  [{pp['score']:.2f}] {pp['title'][:40]} → {pp['solutions']} soluzioni\n"
-    msg += f"\nSoluzioni generate: {total_solutions}\n"
+        msg += f"  Score: {pp['score']:.2f} | {pp['title'][:40]} -> {pp['solutions']} sol.\n"
+    msg += f"\nSoluzioni: {total_solutions}\n"
     msg += f"Feasibility: {go_count} GO, {conditional_count} conditional, {no_go_count} no-go\n"
-    if go_solutions:
-        msg += "\nMigliori GO:\n"
-        for gs in sorted(go_solutions, key=lambda x: x.get("feasibility_score", 0), reverse=True)[:3]:
-            msg += f"  [{gs.get('feasibility_score', 0):.2f}] {gs['title']}\n"
+
+    if bos_results:
+        bos_sorted = sorted(bos_results, key=lambda x: x["bos"]["bos_score"], reverse=True)
+        msg += "\nBOS RANKING:\n"
+        for br in bos_sorted[:5]:
+            b = br["bos"]
+            msg += f"  Score: {b['bos_score']:.2f} | {b['verdict']} | {br['title'][:35]}\n"
+
     msg += "\nChiedimi i dettagli sul Command Center!"
     notify_telegram(msg)
 
+    for br in bos_results:
+        if br["bos"]["verdict"] in ("AUTO-GO", "REVIEW"):
+            card = format_bos_card(br["title"], br["bos"])
+            notify_telegram(card)
+
     log_to_supabase("pipeline", "auto_pipeline_complete", 0,
-        f"{len(saved_problem_ids)} problemi → {total_solutions} soluzioni",
+        f"{len(saved_problem_ids)} problemi -> {total_solutions} soluzioni",
         f"GO:{go_count} COND:{conditional_count} NO:{no_go_count}",
         "none", 0, 0, 0, pipeline_duration * 1000)
-
-    logger.info(f"[PIPELINE] Completata: {total_solutions} soluzioni, {go_count} GO")
-
-
-def run_world_scanner():
-    logger.info("World Scanner v2.2 starting (standard scan)...")
-    try:
-        sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
-        sources = sources.data or []
-    except:
-        sources = []
-
-    queries = get_standard_queries(sources)
-    result = run_scan(queries)
-    logger.info(f"World Scanner completato: {result}")
-
-    # Pipeline automatica in background
-    saved_ids = result.get("saved_ids", [])
-    if saved_ids:
-        import threading
-        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
-        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
-
-    return result
-
-
-def run_custom_scan(topic):
-    """Scan mirato su un argomento specifico richiesto da Mirco"""
-    logger.info(f"World Scanner custom scan: {topic}")
-
-    queries = [
-        ("custom", f"{topic} biggest problems pain points"),
-        ("custom", f"{topic} unsolved needs market gap"),
-        ("custom", f"{topic} consumers complaints frustrations"),
-    ]
-
-    result = run_scan(queries)
-    logger.info(f"Custom scan completato: {result}")
-
-    # Pipeline automatica in background
-    saved_ids = result.get("saved_ids", [])
-    if saved_ids:
-        import threading
-        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
-        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
-    elif result.get("saved", 0) == 0:
-        notify_telegram(f"Scan su '{topic}' completato ma non ho trovato problemi nuovi.")
-
-    return result
-
-
-# ============================================================
-# SOLUTION ARCHITECT v2.0 — 3 fasi: Ricerca, Generazione, Fattibilita
-# ============================================================
-
-# FASE 1: Prompt per ricerca competitiva
-RESEARCH_PROMPT = """Sei un analista di mercato esperto. Dati i risultati di ricerca sul web, crea un DOSSIER COMPETITIVO per il problema dato.
-
-Il dossier deve includere:
-1. SOLUZIONI ESISTENTI: chi gia' risolve (anche parzialmente) questo problema? Nome, cosa fa, prezzo, punti deboli.
-2. GAP DI MERCATO: cosa manca nelle soluzioni attuali? Dove i clienti sono insoddisfatti?
-3. TENTATIVI FALLITI: qualcuno ha provato e fallito? Perche'?
-4. INSIGHT ESPERTI: cosa dicono ricercatori, analisti, utenti su Reddit/forum?
-5. DIMENSIONE OPPORTUNITA: quanto vale questo mercato? Quanto si spende oggi?
-
-Rispondi SOLO con JSON:
-{"existing_solutions":[{"name":"nome","what_it_does":"cosa fa","price":"costo","weaknesses":"punti deboli","market_share":"stima"}],"market_gaps":["gap1","gap2"],"failed_attempts":[{"who":"chi","why_failed":"perche"}],"expert_insights":["insight1","insight2"],"market_size_estimate":"stima valore mercato","key_finding":"la scoperta piu' importante in una frase"}
-SOLO JSON."""
-
-# FASE 2: Prompt per generazione soluzioni SENZA vincoli tech
-GENERATION_PROMPT = """Sei un innovation strategist di livello mondiale. Combini il meglio di:
-- Opportunity Solution Tree (Teresa Torres): dal problema alle opportunita' ai prodotti
-- Blue Ocean Strategy: cerchi spazi vuoti dove nessun competitor opera
-- Jobs-to-be-Done: che "lavoro" il cliente sta cercando di fare
-- Lean Canvas: proposta valore, segmento, canale, revenue, costi
-
-Hai un DOSSIER COMPETITIVO e un PROBLEMA. Genera 3 soluzioni ordinate per potenziale.
-
-REGOLE CRITICHE:
-- NON proporre soluzioni che gia' esistono e funzionano bene (le hai nel dossier)
-- Cerca gli SPAZI VUOTI: dove nessuno opera, o dove tutti fanno male
-- Pensa a soluzioni che creano un vantaggio difendibile (network effect, dati proprietari, lock-in naturale)
-- NON limitarti alla tecnologia: una soluzione puo' essere un servizio, un marketplace, un protocollo, una community
-- Sii SPECIFICO: non "piattaforma AI che..." ma "servizio che fa X per Y tramite Z"
-
-Per ogni soluzione fornisci:
-- title: nome chiaro
-- description: cosa fa in 2 frasi
-- value_proposition: perche' il cliente paga — in una frase
-- target_segment: chi esattamente (specifico)
-- job_to_be_done: quale "lavoro" risolve per il cliente
-- revenue_model: come genera soldi (subscription, transazione, freemium, ecc.)
-- monthly_revenue_potential: stima revenue mensile a regime (12 mesi)
-- monthly_burn_rate: stima costi mensili per operare
-- competitive_moat: perche' e' difficile da copiare
-- novelty_score: 0.0-1.0 quanto e' nuova vs soluzioni esistenti (0=esiste gia', 1=mai vista)
-- opportunity_score: 0.0-1.0 dimensione opportunita' di mercato
-- defensibility_score: 0.0-1.0 quanto e' difendibile nel tempo
-
-Rispondi SOLO con JSON:
-{"solutions":[{"title":"","description":"","value_proposition":"","target_segment":"","job_to_be_done":"","revenue_model":"","monthly_revenue_potential":"","monthly_burn_rate":"","competitive_moat":"","novelty_score":0.7,"opportunity_score":0.8,"defensibility_score":0.6}],"ranking_rationale":"perche' hai messo la prima in cima"}
-SOLO JSON."""
-
-# FASE 3: Prompt per valutazione fattibilita
-FEASIBILITY_PROMPT = """Sei un CTO pragmatico. Valuta la fattibilita' di ogni soluzione dati questi VINCOLI:
-
-VINCOLI ATTUALI:
-- 1 persona, 20h/settimana, competenza tecnica minima (no-code/low-code preferito)
-- Budget: 1000 euro/mese totale, primo progetto sotto 200 euro/mese
-- Stack disponibile: Claude API, Supabase (PostgreSQL + pgvector), Python, Google Cloud Run, Telegram Bot
-- Obiettivo: revenue entro 3 mesi, marginalita' alta priorita' assoluta
-- Puo' usare qualsiasi API/servizio esterno purche' nel budget
-
-Per ogni soluzione valuta:
-- feasibility_score: 0.0-1.0 (possiamo farlo con i vincoli attuali?)
-- complexity: low/medium/high
-- time_to_mvp: tempo per un MVP funzionante
-- cost_estimate: costo mensile stimato
-- tech_stack_fit: quanto il nostro stack copre il bisogno (0.0-1.0)
-- biggest_risk: il rischio principale
-- recommended_mvp: cosa costruire come primo test (specifico, concreto)
-- nocode_compatible: true/false
-
-Rispondi SOLO con JSON:
-{"assessments":[{"solution_title":"","feasibility_score":0.7,"complexity":"medium","time_to_mvp":"3 settimane","cost_estimate":"80 euro/mese","tech_stack_fit":0.8,"biggest_risk":"rischio","recommended_mvp":"cosa costruire","nocode_compatible":true}],"best_feasible":"quale soluzione e' la piu' fattibile e perche'","best_overall":"quale soluzione e' la migliore in assoluto ignorando i vincoli"}
-SOLO JSON."""
-
-
-def research_problem(problem):
-    """FASE 1: Ricerca competitiva via Perplexity + analisi Claude"""
-    logger.info(f"[SA] Fase 1: Ricerca per '{problem['title'][:60]}'")
-
-    title = problem["title"]
-    sector = problem.get("sector", "")
-    description = problem.get("description", "")
-
-    # 4 ricerche mirate su Perplexity
-    search_queries = [
-        f"{title} existing solutions competitors market",
-        f"{title} startup failed attempts lessons learned",
-        f"{title} reddit forum user complaints workarounds",
-        f"{title} market size revenue opportunity {sector}",
-    ]
-
-    search_results = []
-    for q in search_queries:
-        result = search_perplexity(q)
-        if result:
-            search_results.append(result)
-        time.sleep(1)
-
-    if not search_results:
-        logger.warning("[SA] Nessun risultato di ricerca")
-        return None
-
-    combined_research = "\n\n---\n\n".join(search_results)
-
-    problem_context = (
-        f"PROBLEMA: {title}\n"
-        f"Descrizione: {description}\n"
-        f"Settore: {sector}\n"
-        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
-        f"Perche conta: {problem.get('why_it_matters', '')}"
-    )
-
-    start = time.time()
-    try:
-        response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=3000,
-            system=RESEARCH_PROMPT,
-            messages=[{"role": "user", "content": f"{problem_context}\n\nRISULTATI RICERCA:\n{combined_research}\n\nCrea il dossier. SOLO JSON."}]
-        )
-        duration = int((time.time() - start) * 1000)
-        reply = response.content[0].text
-
-        log_to_supabase("solution_architect", "research", 2,
-            f"Ricerca: {title[:100]}", reply[:500],
-            "claude-haiku-4-5-20251001",
-            response.usage.input_tokens, response.usage.output_tokens,
-            (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
-            duration)
-
-        return extract_json(reply)
-
-    except Exception as e:
-        logger.error(f"[SA RESEARCH ERROR] {e}")
-        return None
-
-
-def generate_solutions_unconstrained(problem, dossier):
-    """FASE 2: Generazione soluzioni senza vincoli tech"""
-    logger.info(f"[SA] Fase 2: Generazione per '{problem['title'][:60]}'")
-
-    problem_context = (
-        f"PROBLEMA: {problem['title']}\n"
-        f"Descrizione: {problem.get('description', '')}\n"
-        f"Settore: {problem.get('sector', '')}\n"
-        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
-        f"Esempio reale: {problem.get('real_world_example', '')}\n"
-        f"Perche conta: {problem.get('why_it_matters', '')}\n"
-        f"Score problema: {problem.get('weighted_score', '')}"
-    )
-
-    dossier_text = json.dumps(dossier, indent=2, ensure_ascii=False)
-
-    start = time.time()
-    try:
-        response = claude.messages.create(
-            model="claude-sonnet-4-5-20250514",
-            max_tokens=4000,
-            system=GENERATION_PROMPT,
-            messages=[{"role": "user", "content": f"{problem_context}\n\nDOSSIER COMPETITIVO:\n{dossier_text}\n\nGenera 3 soluzioni. SOLO JSON."}]
-        )
-        duration = int((time.time() - start) * 1000)
-        reply = response.content[0].text
-
-        log_to_supabase("solution_architect", "generate_unconstrained", 2,
-            f"Soluzioni per: {problem['title'][:100]}", reply[:500],
-            "claude-sonnet-4-5-20250514",
-            response.usage.input_tokens, response.usage.output_tokens,
-            (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000,
-            duration)
-
-        return extract_json(reply)
-
-    except Exception as e:
-        logger.error(f"[SA GENERATE ERROR] {e}")
-        return None
-
-
-def assess_feasibility(problem, solutions_data):
-    """FASE 3: Valutazione fattibilita con vincoli"""
-    logger.info(f"[SA] Fase 3: Fattibilita per '{problem['title'][:60]}'")
-
-    solutions_text = json.dumps(solutions_data.get("solutions", []), indent=2, ensure_ascii=False)
-
-    start = time.time()
-    try:
-        response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=2000,
-            system=FEASIBILITY_PROMPT,
-            messages=[{"role": "user", "content": f"PROBLEMA: {problem['title']}\n\nSOLUZIONI DA VALUTARE:\n{solutions_text}\n\nValuta fattibilita. SOLO JSON."}]
-        )
-        duration = int((time.time() - start) * 1000)
-        reply = response.content[0].text
-
-        log_to_supabase("solution_architect", "assess_feasibility", 2,
-            f"Fattibilita: {problem['title'][:100]}", reply[:500],
-            "claude-haiku-4-5-20251001",
-            response.usage.input_tokens, response.usage.output_tokens,
-            (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
-            duration)
-
-        return extract_json(reply)
-
-    except Exception as e:
-        logger.error(f"[SA FEASIBILITY ERROR] {e}")
-        return None
-
-
-def save_solution_v2(problem_id, sol, assessment, ranking_rationale, dossier):
-    """Salva soluzione con tutti i dati delle 3 fasi"""
-    try:
-        complexity = str(assessment.get("complexity", "medium")).lower().strip()
-        if "low" in complexity:
-            complexity = "low"
-        elif "high" in complexity:
-            complexity = "high"
-        else:
-            complexity = "medium"
-
-        # Salva soluzione
-        sol_result = supabase.table("solutions").insert({
-            "problem_id": problem_id,
-            "title": sol.get("title", "Senza titolo"),
-            "description": sol.get("description", ""),
-            "approach": json.dumps({
-                "value_proposition": sol.get("value_proposition", ""),
-                "target_segment": sol.get("target_segment", ""),
-                "job_to_be_done": sol.get("job_to_be_done", ""),
-                "revenue_model": sol.get("revenue_model", ""),
-                "competitive_moat": sol.get("competitive_moat", ""),
-                "recommended_mvp": assessment.get("recommended_mvp", ""),
-                "monthly_revenue_potential": sol.get("monthly_revenue_potential", ""),
-                "monthly_burn_rate": sol.get("monthly_burn_rate", ""),
-                "biggest_risk": assessment.get("biggest_risk", ""),
-                "market_gaps": dossier.get("market_gaps", []),
-                "existing_competitors": [s.get("name", "") for s in dossier.get("existing_solutions", [])],
-                "ranking_rationale": ranking_rationale,
-            }, ensure_ascii=False),
-            "sector": sol.get("sector", ""),
-            "sub_sector": sol.get("sub_sector", ""),
-            "status": "proposed",
-            "created_by": "solution_architect_v2",
-        }).execute()
-
-        sol_id = sol_result.data[0]["id"]
-
-        # Score combinato: media di novelty, opportunity, defensibility per impact
-        novelty = float(sol.get("novelty_score", 0.5))
-        opportunity = float(sol.get("opportunity_score", 0.5))
-        defensibility = float(sol.get("defensibility_score", 0.5))
-        feasibility = float(assessment.get("feasibility_score", 0.5))
-        tech_fit = float(assessment.get("tech_stack_fit", 0.5))
-
-        # Impact score = media dei 3 score strategici
-        impact = round((novelty + opportunity + defensibility) / 3, 4)
-        # Overall = media di impact e feasibility
-        overall = round((impact + feasibility) / 2, 4)
-
-        supabase.table("solution_scores").insert({
-            "solution_id": sol_id,
-            "feasibility_score": feasibility,
-            "impact_score": impact,
-            "cost_estimate": str(assessment.get("cost_estimate", "unknown")),
-            "complexity": complexity,
-            "time_to_market": str(assessment.get("time_to_mvp", "unknown")),
-            "nocode_compatible": bool(assessment.get("nocode_compatible", True)),
-            "overall_score": overall,
-            "notes": json.dumps({
-                "novelty": novelty,
-                "opportunity": opportunity,
-                "defensibility": defensibility,
-                "tech_stack_fit": tech_fit,
-                "revenue_model": sol.get("revenue_model", ""),
-                "monthly_revenue_potential": sol.get("monthly_revenue_potential", ""),
-                "monthly_burn_rate": sol.get("monthly_burn_rate", ""),
-            }, ensure_ascii=False),
-            "scored_by": "solution_architect_v2",
-        }).execute()
-
-        return sol_id, overall
-
-    except Exception as e:
-        logger.error(f"[SAVE SOL V2 ERROR] {e}")
-        return None, 0
-
-
-def run_solution_architect(problem_id=None):
-    logger.info("Solution Architect v2.0 starting (3 fasi)...")
-
-    try:
-        query = supabase.table("problems").select("*").eq("status", "approved").order("weighted_score", desc=True)
-        if problem_id:
-            query = query.eq("id", problem_id)
-        problems = query.execute()
-        problems = problems.data or []
-    except:
-        problems = []
-
-    if not problems:
-        return {"status": "no_problems", "saved": 0}
-
-    # Controlla problemi che hanno gia soluzioni
-    try:
-        existing = supabase.table("solutions").select("problem_id").execute()
-        existing_ids = {s["problem_id"] for s in (existing.data or [])}
-    except:
-        existing_ids = set()
-
-    problems = [p for p in problems if p["id"] not in existing_ids]
-    if not problems:
-        return {"status": "all_solved", "saved": 0}
-
-    total_saved = 0
-    for problem in problems:
-        # FASE 1: Ricerca competitiva
-        dossier = research_problem(problem)
-        if not dossier:
-            dossier = {"existing_solutions": [], "market_gaps": ["nessun dato"], "failed_attempts": [], "expert_insights": [], "market_size_estimate": "sconosciuto", "key_finding": "ricerca non disponibile"}
-
-        # FASE 2: Generazione soluzioni senza vincoli (usa Sonnet per qualita')
-        solutions_data = generate_solutions_unconstrained(problem, dossier)
-        if not solutions_data or not solutions_data.get("solutions"):
-            logger.warning(f"[SA] Nessuna soluzione generata per {problem['title'][:60]}")
-            continue
-
-        ranking_rationale = solutions_data.get("ranking_rationale", "")
-
-        # FASE 3: Valutazione fattibilita
-        feasibility_data = assess_feasibility(problem, solutions_data)
-        if not feasibility_data:
-            feasibility_data = {"assessments": [], "best_feasible": "", "best_overall": ""}
-
-        # Mappa fattibilita per titolo
-        feas_map = {}
-        for a in feasibility_data.get("assessments", []):
-            feas_map[a.get("solution_title", "")] = a
-
-        # Salva ogni soluzione
-        best_score = 0
-        best_title = ""
-        for sol in solutions_data.get("solutions", []):
-            title = sol.get("title", "")
-            assessment = feas_map.get(title, {
-                "feasibility_score": 0.5, "complexity": "medium",
-                "time_to_mvp": "sconosciuto", "cost_estimate": "sconosciuto",
-                "tech_stack_fit": 0.5, "biggest_risk": "non valutato",
-                "recommended_mvp": "non valutato", "nocode_compatible": True,
-            })
-
-            sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
-            if sol_id:
-                total_saved += 1
-                if overall > best_score:
-                    best_score = overall
-                    best_title = title
-
-        # Notifica Mirco con risultato
-        if total_saved > 0:
-            best_feasible = feasibility_data.get("best_feasible", "")
-            best_overall = feasibility_data.get("best_overall", "")
-            key_finding = dossier.get("key_finding", "")
-
-            msg = f"Ho analizzato '{problem['title']}' in 3 fasi:\n\n"
-            msg += f"Ricerca: {key_finding}\n\n"
-            msg += f"Miglior soluzione in assoluto: {best_overall}\n"
-            msg += f"Piu' fattibile per noi: {best_feasible}\n\n"
-            msg += f"{total_saved} soluzioni salvate. Chiedimi i dettagli!"
-            notify_telegram(msg)
-
-        time.sleep(2)
-
-    logger.info(f"Solution Architect v2.0 completato: {total_saved} soluzioni")
-    return {"status": "completed", "saved": total_saved}
 
 
 # ============================================================
@@ -1214,7 +1761,6 @@ def run_capability_scout():
                             emit_event("capability_scout", "high_impact_tool", None,
                                 {"tool": disc["tool_name"], "impact": disc.get("potential_impact", "")}, "high")
                             notify_telegram(f"Tool consigliato: {disc['tool_name']}\n{disc.get('potential_impact', '')}")
-
                     except:
                         pass
 
@@ -1232,7 +1778,7 @@ def run_capability_scout():
 MONTHLY_BUDGET_EUR = 1000.0
 DEFAULT_USD_TO_EUR = 0.92
 DAILY_COST_ALERT_USD = 5.0
-BUDGET_ALERT_PCT = 70.0  # percentuale
+BUDGET_ALERT_PCT = 70.0
 
 
 def finance_get_usd_to_eur():
@@ -1240,25 +1786,21 @@ def finance_get_usd_to_eur():
         result = supabase.table("org_config").select("value").eq("key", "usd_to_eur_rate").execute()
         if result.data:
             return float(json.loads(result.data[0]["value"]))
-    except Exception:
+    except:
         pass
     return DEFAULT_USD_TO_EUR
 
 
 def finance_get_daily_costs(date_str):
-    """Aggrega costi da agent_logs per un giorno specifico."""
     day_start = f"{date_str}T00:00:00+00:00"
     day_end = f"{date_str}T23:59:59+00:00"
-
     try:
         result = supabase.table("agent_logs") \
             .select("agent_id, cost_usd, tokens_input, tokens_output, status") \
-            .gte("created_at", day_start) \
-            .lte("created_at", day_end) \
-            .execute()
+            .gte("created_at", day_start).lte("created_at", day_end).execute()
         logs = result.data or []
     except Exception as e:
-        logger.error(f"[FINANCE] Lettura agent_logs: {e}")
+        logger.error(f"[FINANCE] {e}")
         return None
 
     total_cost = 0.0
@@ -1277,16 +1819,12 @@ def finance_get_daily_costs(date_str):
         total_calls += 1
         tokens_in += int(log.get("tokens_input", 0) or 0)
         tokens_out += int(log.get("tokens_output", 0) or 0)
-
         if log.get("status") == "success":
             successful += 1
         else:
             failed += 1
-
         cost_by_agent[agent] = cost_by_agent.get(agent, 0.0) + cost
         calls_by_agent[agent] = calls_by_agent.get(agent, 0) + 1
-
-    cost_by_agent = {k: round(v, 6) for k, v in cost_by_agent.items()}
 
     return {
         "date": date_str,
@@ -1296,30 +1834,26 @@ def finance_get_daily_costs(date_str):
         "failed_calls": failed,
         "total_tokens_in": tokens_in,
         "total_tokens_out": tokens_out,
-        "cost_by_agent": cost_by_agent,
+        "cost_by_agent": {k: round(v, 6) for k, v in cost_by_agent.items()},
         "calls_by_agent": calls_by_agent,
     }
 
 
 def finance_get_month_costs(year, month):
-    """Costi totali del mese corrente fino ad oggi."""
     first_day = f"{year}-{month:02d}-01"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     try:
         result = supabase.table("agent_logs") \
             .select("cost_usd") \
             .gte("created_at", f"{first_day}T00:00:00+00:00") \
-            .lte("created_at", f"{today}T23:59:59+00:00") \
-            .execute()
+            .lte("created_at", f"{today}T23:59:59+00:00").execute()
         logs = result.data or []
-    except Exception as e:
-        logger.error(f"[FINANCE] Lettura costi mese: {e}")
+    except:
         return 0.0
     return sum(float(l.get("cost_usd", 0) or 0) for l in logs)
 
 
 def finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct, alerts, usd_to_eur):
-    """Salva metriche in finance_metrics (upsert su report_date)."""
     row = {
         "report_date": daily_data["date"],
         "total_cost_usd": daily_data["total_cost_usd"],
@@ -1340,57 +1874,16 @@ def finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct,
     }
     try:
         supabase.table("finance_metrics").insert(row).execute()
-        return True
     except Exception as e:
         if "duplicate" in str(e).lower() or "unique" in str(e).lower():
             try:
                 del row["report_date"]
                 supabase.table("finance_metrics").update(row).eq("report_date", daily_data["date"]).execute()
-                return True
-            except Exception as e2:
-                logger.error(f"[FINANCE] Update metrics: {e2}")
-        else:
-            logger.error(f"[FINANCE] Insert metrics: {e}")
-        return False
-
-
-def finance_build_report(daily_data, month_total_usd, projection_usd, projection_eur, budget_pct, usd_to_eur):
-    """Costruisce messaggio report giornaliero."""
-    cost_eur = round(daily_data["total_cost_usd"] * usd_to_eur, 4)
-    month_eur = round(month_total_usd * usd_to_eur, 2)
-
-    lines = [
-        f"REPORT COSTI {daily_data['date']}",
-        "",
-        f"Oggi: ${daily_data['total_cost_usd']:.4f} ({cost_eur:.4f} EUR)",
-        f"Chiamate API: {daily_data['total_calls']} ({daily_data['successful_calls']} ok, {daily_data['failed_calls']} errori)",
-        f"Token: {daily_data['total_tokens_in']:,} in / {daily_data['total_tokens_out']:,} out",
-        "",
-    ]
-
-    if daily_data["cost_by_agent"]:
-        lines.append("Per agente:")
-        sorted_agents = sorted(daily_data["cost_by_agent"].items(), key=lambda x: x[1], reverse=True)
-        for agent, agent_cost in sorted_agents:
-            calls = daily_data["calls_by_agent"].get(agent, 0)
-            lines.append(f"  {agent}: ${agent_cost:.4f} ({calls} chiamate)")
-        lines.append("")
-
-    lines.extend([
-        f"Mese corrente: ${month_total_usd:.4f} ({month_eur:.2f} EUR)",
-        f"Proiezione fine mese: ${projection_usd:.2f} ({projection_eur:.2f} EUR)",
-        f"Budget: {MONTHLY_BUDGET_EUR:.0f} EUR | Uso: {budget_pct:.1f}%",
-    ])
-
-    filled = int(budget_pct / 5)
-    bar = "[" + "#" * min(filled, 20) + "." * max(0, 20 - filled) + "]"
-    lines.append(bar)
-
-    return "\n".join(lines)
+            except:
+                pass
 
 
 def run_finance_agent(target_date=None):
-    """Esegue il Finance Agent. Default: report su ieri."""
     logger.info("Finance Agent v1.0 starting...")
 
     now = datetime.now(timezone.utc)
@@ -1401,13 +1894,10 @@ def run_finance_agent(target_date=None):
         date_str = yesterday.strftime("%Y-%m-%d")
 
     usd_to_eur = finance_get_usd_to_eur()
-
-    # 1. Aggrega costi giornalieri
     daily_data = finance_get_daily_costs(date_str)
     if daily_data is None:
         return {"status": "error", "error": "agent_logs read failed"}
 
-    # 2. Costi mese + proiezione
     year = now.year
     month = now.month
     month_total_usd = finance_get_month_costs(year, month)
@@ -1420,40 +1910,53 @@ def run_finance_agent(target_date=None):
     else:
         days_in_month = 30
 
-    if days_elapsed > 0:
-        projection_usd = round((month_total_usd / days_elapsed) * days_in_month, 4)
-    else:
-        projection_usd = 0.0
+    projection_usd = round((month_total_usd / days_elapsed) * days_in_month, 4) if days_elapsed > 0 else 0.0
     projection_eur = round(projection_usd * usd_to_eur, 4)
     budget_pct = round((projection_eur / MONTHLY_BUDGET_EUR) * 100, 2) if MONTHLY_BUDGET_EUR > 0 else 0
 
-    # 3. Check alert
     alerts = []
     if daily_data["total_cost_usd"] > DAILY_COST_ALERT_USD:
         alerts.append({"type": "daily_cost_high", "message": f"Costo giornaliero ${daily_data['total_cost_usd']:.4f} supera soglia ${DAILY_COST_ALERT_USD}", "severity": "high"})
     if budget_pct > BUDGET_ALERT_PCT:
-        alerts.append({"type": "budget_projection_high", "message": f"Proiezione {projection_eur:.2f} EUR supera {BUDGET_ALERT_PCT:.0f}% del budget ({MONTHLY_BUDGET_EUR:.0f} EUR)", "severity": "high"})
+        alerts.append({"type": "budget_projection_high", "message": f"Proiezione {projection_eur:.2f} EUR supera {BUDGET_ALERT_PCT:.0f}% del budget", "severity": "high"})
     if budget_pct > 90:
-        alerts.append({"type": "budget_critical", "message": f"Proiezione al {budget_pct:.1f}% del budget! Rischio sforamento.", "severity": "critical"})
+        alerts.append({"type": "budget_critical", "message": f"Proiezione al {budget_pct:.1f}% del budget!", "severity": "critical"})
 
-    # 4. Salva metriche
     finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct, alerts, usd_to_eur)
 
-    # 5. Report Telegram
-    report = finance_build_report(daily_data, month_total_usd, projection_usd, projection_eur, budget_pct, usd_to_eur)
+    # Report formato decimale
+    cost_eur = round(daily_data["total_cost_usd"] * usd_to_eur, 4)
+    month_eur = round(month_total_usd * usd_to_eur, 2)
+    report = (
+        f"REPORT COSTI {daily_data['date']}\n\n"
+        f"Oggi: ${daily_data['total_cost_usd']:.4f} ({cost_eur:.4f} EUR)\n"
+        f"API: {daily_data['total_calls']} ({daily_data['successful_calls']} ok, {daily_data['failed_calls']} err)\n"
+        f"Token: {daily_data['total_tokens_in']:,} in / {daily_data['total_tokens_out']:,} out\n\n"
+    )
+
+    if daily_data["cost_by_agent"]:
+        report += "Per agente:\n"
+        for agent, agent_cost in sorted(daily_data["cost_by_agent"].items(), key=lambda x: x[1], reverse=True):
+            calls = daily_data["calls_by_agent"].get(agent, 0)
+            report += f"  {agent}: ${agent_cost:.4f} ({calls} call)\n"
+        report += "\n"
+
+    report += (
+        f"Mese: ${month_total_usd:.4f} ({month_eur:.2f} EUR)\n"
+        f"Proiezione: ${projection_usd:.2f} ({projection_eur:.2f} EUR)\n"
+        f"Budget: {MONTHLY_BUDGET_EUR:.0f} EUR | Uso: {budget_pct:.1f}%"
+    )
+
     notify_telegram(report)
 
-    # 6. Alert separati
     for alert in alerts:
         severity = "CRITICO" if alert["severity"] == "critical" else "ALERT"
         notify_telegram(f"{severity} METABOLISM\n\n{alert['message']}")
 
-    # 7. Log azione
     log_to_supabase("finance_agent", "daily_report", 6,
-        f"Report {date_str}", f"Cost: ${daily_data['total_cost_usd']:.4f}, Projection: {projection_eur:.2f} EUR ({budget_pct:.1f}%)",
+        f"Report {date_str}", f"Cost: ${daily_data['total_cost_usd']:.4f}, {budget_pct:.1f}%",
         "none", 0, 0, 0, 0)
 
-    logger.info(f"Finance Agent completato: ${daily_data['total_cost_usd']:.4f} today, {budget_pct:.1f}% budget")
     return {
         "status": "completed",
         "date": date_str,
@@ -1466,284 +1969,120 @@ def run_finance_agent(target_date=None):
 
 
 # ============================================================
-# FEASIBILITY ENGINE v1.0 — THINKING
+# PARTE 8: DAILY REPORT ORE 20
 # ============================================================
 
-FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
-Valuti la fattibilita' economica e tecnica di soluzioni AI.
+def generate_daily_report():
+    """Report giornaliero completo: scan, problemi, soluzioni, BOS, costi, lezioni."""
+    logger.info("Generating daily report...")
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    day_start = f"{today}T00:00:00+00:00"
 
-VINCOLI DELL'ORGANIZZAZIONE:
-- 1 persona, 20h/settimana, competenza tecnica minima
-- Budget: 1000 EUR/mese totale, primo progetto sotto 200 EUR/mese
-- Stack: Claude API (Haiku/Sonnet), Supabase (PostgreSQL + pgvector), Python, Google Cloud Run, Telegram Bot
-- Obiettivo: revenue entro 3 mesi, marginalita' alta priorita' assoluta
-- Puo' usare API/servizi esterni purche' nel budget
+    report_lines = [f"REPORT GIORNALIERO {today}", ""]
 
-Hai la SOLUZIONE da valutare e una RICERCA COMPETITIVA sul mercato.
-
-Per la soluzione, calcola:
-
-1. COSTO MVP (in EUR):
-   - dev_hours: ore di sviluppo stimate per MVP funzionante
-   - dev_cost_eur: dev_hours * 50 EUR/ora (costo opportunita')
-   - api_monthly_eur: costo mensile API (Claude, Perplexity, altri)
-   - hosting_monthly_eur: costo mensile hosting (Cloud Run, Supabase, domini)
-   - other_monthly_eur: altri costi ricorrenti (email, pagamenti, ecc.)
-   - total_mvp_cost_eur: costo una-tantum per costruire MVP
-   - total_monthly_cost_eur: costi operativi mensili
-
-2. TEMPO SVILUPPO:
-   - weeks_to_mvp: settimane per MVP (considerando 20h/settimana)
-   - weeks_to_revenue: settimane stimate per primo euro di revenue
-
-3. REVENUE MENSILE (3 scenari, a 6 mesi dal lancio):
-   - pessimistic_monthly_eur: scenario pessimista (pochi clienti, prezzo basso)
-   - realistic_monthly_eur: scenario realistico
-   - optimistic_monthly_eur: scenario ottimista (trazione buona)
-   - pricing_model: come si fa pagare (subscription, pay-per-use, freemium+premium, ecc.)
-   - price_point_eur: prezzo per cliente/mese
-
-4. MARGINALITA':
-   - monthly_margin_pessimistic: revenue pessimista - costi mensili
-   - monthly_margin_realistic: revenue realistico - costi mensili
-   - monthly_margin_optimistic: revenue ottimista - costi mensili
-   - margin_percentage_realistic: (margine realistico / revenue realistico) * 100
-   - breakeven_months: mesi per recuperare costo MVP (scenario realistico)
-
-5. COMPETITION SCORE (0.0-1.0, dove 0=mercato deserto, 1=mercato saturo):
-   - competition_score: quanto e' affollato il mercato
-   - direct_competitors: numero di competitor diretti
-   - indirect_competitors: numero di alternative indirette
-   - our_advantage: perche' possiamo competere nonostante i limiti
-
-6. GO/NO-GO:
-   - recommendation: "GO", "CONDITIONAL_GO", o "NO_GO"
-   - confidence: 0.0-1.0 quanto sei sicuro della raccomandazione
-   - reasoning: motivazione in 2-3 frasi
-   - conditions: se CONDITIONAL_GO, cosa deve succedere prima di procedere
-   - biggest_risk: rischio principale
-   - biggest_opportunity: opportunita' principale
-
-REGOLE:
-- Sii REALISTICO, non ottimista. Meglio sottostimare revenue e sovrastimare costi.
-- Se il mercato e' saturo e non abbiamo un vantaggio chiaro, di' NO_GO.
-- Se i costi superano il budget (200 EUR/mese per primo progetto), segnalalo.
-- Considera che l'operatore ha competenza tecnica MINIMA — tempi di sviluppo piu' lunghi.
-
-Rispondi SOLO con JSON:
-{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""}}
-SOLO JSON."""
-
-
-def feasibility_calculate_score(analysis):
-    """Calcola score composito 0-1 dai risultati dell'analisi."""
-    if not analysis:
-        return 0.0
-
-    scores = []
-
-    # 1. Marginalita' realistica (peso 0.30)
-    margin = analysis.get("margin", {})
-    margin_pct = float(margin.get("margin_percentage_realistic", 0))
-    margin_score = min(1.0, max(0.0, margin_pct / 80))
-    scores.append(margin_score * 0.30)
-
-    # 2. Tempo al revenue (peso 0.20)
-    timeline = analysis.get("timeline", {})
-    weeks_to_rev = float(timeline.get("weeks_to_revenue", 52))
-    time_score = max(0.0, 1.0 - (weeks_to_rev / 24))
-    scores.append(time_score * 0.20)
-
-    # 3. Costi mensili entro budget (peso 0.20)
-    costs = analysis.get("mvp_cost", {})
-    monthly_cost = float(costs.get("total_monthly_cost_eur", 1000))
-    cost_score = max(0.0, 1.0 - (monthly_cost / 200))
-    scores.append(cost_score * 0.20)
-
-    # 4. Competition bassa (peso 0.15)
-    competition = analysis.get("competition", {})
-    comp = float(competition.get("competition_score", 0.5))
-    comp_score = 1.0 - comp
-    scores.append(comp_score * 0.15)
-
-    # 5. Confidence della raccomandazione (peso 0.15)
-    rec = analysis.get("recommendation", {})
-    confidence = float(rec.get("confidence", 0.5))
-    decision = rec.get("decision", "NO_GO")
-    decision_mult = 1.0 if decision == "GO" else 0.7 if decision == "CONDITIONAL_GO" else 0.3
-    rec_score = confidence * decision_mult
-    scores.append(rec_score * 0.15)
-
-    total = sum(scores)
-    return round(min(1.0, max(0.0, total)), 4)
-
-
-def run_feasibility_engine(solution_id=None, notify=True):
-    """Valuta fattibilita' economica e tecnica delle soluzioni proposte."""
-    logger.info("Feasibility Engine v1.0 starting...")
-
+    # Scan fatti oggi
     try:
-        query = supabase.table("solutions").select(
-            "*, problems(title, description, sector, who_is_affected, why_it_matters, weighted_score)"
-        )
-        if solution_id:
-            query = query.eq("id", solution_id)
-        else:
-            query = query.eq("status", "proposed").is_("feasibility_details", "null")
-        result = query.order("created_at", desc=True).limit(20).execute()
-        solutions = result.data or []
-    except Exception as e:
-        logger.error(f"[FE] Recupero soluzioni: {e}")
-        return {"status": "error", "error": str(e)}
+        scans = supabase.table("agent_logs").select("id", count="exact").eq("agent_id", "world_scanner").gte("created_at", day_start).execute()
+        scan_count = scans.count or 0
+    except:
+        scan_count = 0
 
-    if not solutions:
-        return {"status": "no_solutions", "evaluated": 0}
+    # Problemi trovati oggi
+    try:
+        problems = supabase.table("problems").select("id, title, weighted_score, sector", count="exact").gte("created_at", day_start).execute()
+        problem_count = problems.count or 0
+        problem_data = problems.data or []
+    except:
+        problem_count = 0
+        problem_data = []
 
-    evaluated = 0
-    go_solutions = []
-    conditional_solutions = []
+    # Soluzioni generate oggi
+    try:
+        solutions = supabase.table("solutions").select("id, title, bos_score, bos_details", count="exact").gte("created_at", day_start).execute()
+        solution_count = solutions.count or 0
+        solution_data = solutions.data or []
+    except:
+        solution_count = 0
+        solution_data = []
 
-    for sol in solutions:
-        title = sol.get("title", "Senza titolo")
-        sector = sol.get("sector", "")
-        logger.info(f"[FE] Valutazione: {title[:60]}")
+    # BOS calcolati oggi
+    bos_count = sum(1 for s in solution_data if s.get("bos_score") is not None)
 
-        problem = sol.get("problems", {}) or {}
+    # Costi oggi
+    daily_costs = finance_get_daily_costs(today)
+    usd_to_eur = finance_get_usd_to_eur()
 
-        # Score dal Solution Architect
-        try:
-            scores_result = supabase.table("solution_scores").select("*").eq("solution_id", sol["id"]).execute()
-            scores = scores_result.data[0] if scores_result.data else {}
-        except Exception:
-            scores = {}
+    report_lines.append(f"Scan: {scan_count}")
+    report_lines.append(f"Problemi trovati: {problem_count}")
+    report_lines.append(f"Soluzioni generate: {solution_count}")
+    report_lines.append(f"BOS calcolati: {bos_count}")
 
-        # Ricerca competitiva via Perplexity
-        competition_research = search_perplexity(
-            f"{title} competitors alternatives market size pricing {sector}"
-        )
-        time.sleep(1)
+    if daily_costs:
+        cost_eur = round(daily_costs["total_cost_usd"] * usd_to_eur, 4)
+        report_lines.append(f"Costi oggi: ${daily_costs['total_cost_usd']:.4f} ({cost_eur:.4f} EUR)")
+    report_lines.append("")
 
-        # Prepara contesto
-        approach = sol.get("approach", "")
-        if isinstance(approach, str):
-            try:
-                approach_data = json.loads(approach)
-                approach_text = json.dumps(approach_data, indent=2, ensure_ascii=False)
-            except Exception:
-                approach_text = approach
-        else:
-            approach_text = json.dumps(approach, indent=2, ensure_ascii=False)
+    # Top 3 problemi
+    if problem_data:
+        top_problems = sorted(problem_data, key=lambda x: float(x.get("weighted_score", 0) or 0), reverse=True)[:3]
+        report_lines.append("TOP PROBLEMI:")
+        for p in top_problems:
+            report_lines.append(f"  Score: {float(p.get('weighted_score', 0)):.2f} | {p.get('sector', '?')} | {p['title'][:45]}")
+        report_lines.append("")
 
-        context = (
-            f"SOLUZIONE: {title}\n"
-            f"Descrizione: {sol.get('description', '')}\n"
-            f"Approccio: {approach_text}\n"
-            f"Settore: {sector} / {sol.get('sub_sector', '')}\n\n"
-            f"PROBLEMA ORIGINALE: {problem.get('title', '')}\n"
-            f"Descrizione problema: {problem.get('description', '')}\n"
-            f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
-            f"Perche' conta: {problem.get('why_it_matters', '')}\n"
-            f"Score problema: {problem.get('weighted_score', '')}\n\n"
-            f"SCORE SOLUTION ARCHITECT:\n"
-            f"Feasibility: {scores.get('feasibility_score', 'N/A')}\n"
-            f"Impact: {scores.get('impact_score', 'N/A')}\n"
-            f"Complexity: {scores.get('complexity', 'N/A')}\n"
-            f"Time to market: {scores.get('time_to_market', 'N/A')}\n"
-            f"Cost estimate SA: {scores.get('cost_estimate', 'N/A')}\n"
-            f"Notes: {scores.get('notes', '')}\n"
-        )
-        if competition_research:
-            context += f"\nRICERCA COMPETITIVA:\n{competition_research}\n"
+    # Top 3 soluzioni per BOS
+    if solution_data:
+        top_solutions = sorted([s for s in solution_data if s.get("bos_score")],
+            key=lambda x: float(x.get("bos_score", 0) or 0), reverse=True)[:3]
+        if top_solutions:
+            report_lines.append("TOP SOLUZIONI (BOS):")
+            for s in top_solutions:
+                bos = float(s.get("bos_score", 0))
+                details = s.get("bos_details", {})
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except:
+                        details = {}
+                verdict = details.get("verdict", "?")
+                report_lines.append(f"  Score: {bos:.2f} | {verdict} | {s['title'][:40]}")
+            report_lines.append("")
 
-        # Analisi Haiku
-        start = time.time()
-        try:
-            response = claude.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=2048,
-                system=FEASIBILITY_ENGINE_PROMPT,
-                messages=[{"role": "user", "content": f"Valuta questa soluzione. SOLO JSON:\n\n{context}"}]
-            )
-            duration = int((time.time() - start) * 1000)
-            reply = response.content[0].text
+    # Lezioni apprese oggi
+    try:
+        lessons = supabase.table("org_knowledge").select("title").gte("created_at", day_start).limit(3).execute()
+        if lessons.data:
+            report_lines.append("LEZIONI APPRESE:")
+            for l in lessons.data:
+                report_lines.append(f"  - {l['title'][:60]}")
+            report_lines.append("")
+    except:
+        pass
 
-            log_to_supabase("feasibility_engine", "analyze_feasibility", 2,
-                f"Feasibility: {title[:100]}", reply[:500],
-                "claude-haiku-4-5-20251001",
-                response.usage.input_tokens, response.usage.output_tokens,
-                (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
-                duration)
+    # Azioni pianificate domani
+    report_lines.append("DOMANI:")
+    strategy, idx = get_scan_strategy()
+    report_lines.append(f"  Prossimo scan: strategia {strategy}")
+    try:
+        pending_events = supabase.table("agent_events").select("event_type", count="exact").eq("status", "pending").execute()
+        pending_count = pending_events.count or 0
+        if pending_count > 0:
+            report_lines.append(f"  Eventi pending: {pending_count}")
+    except:
+        pass
 
-            analysis = extract_json(reply)
-        except Exception as e:
-            logger.error(f"[FE ANALYSIS ERROR] {e}")
-            analysis = None
+    report = "\n".join(report_lines)
+    notify_telegram(report)
 
-        if not analysis:
-            logger.warning(f"[FE] Analisi fallita per {title[:60]}")
-            continue
+    log_to_supabase("daily_report", "generate", 0,
+        f"Report {today}", report[:500], "none")
 
-        # Calcola score composito
-        feasibility_score = feasibility_calculate_score(analysis)
-
-        # Salva su DB
-        try:
-            supabase.table("solutions").update({
-                "feasibility_score": feasibility_score,
-                "feasibility_details": json.dumps(analysis, ensure_ascii=False),
-            }).eq("id", sol["id"]).execute()
-            evaluated += 1
-        except Exception as e:
-            logger.error(f"[FE SAVE ERROR] {e}")
-            continue
-
-        decision = analysis.get("recommendation", {}).get("decision", "NO_GO")
-        if decision == "GO":
-            go_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis})
-        elif decision == "CONDITIONAL_GO":
-            conditional_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis})
-
-        logger.info(f"[FE] {title[:40]}: {feasibility_score:.2f} | {decision}")
-        time.sleep(1)
-
-    # Notifica Telegram (solo se non silenziato dalla pipeline)
-    if notify and (go_solutions or conditional_solutions):
-        msg = f"FEASIBILITY ENGINE - {evaluated} soluzioni valutate\n\n"
-        if go_solutions:
-            msg += "GO:\n"
-            for s in sorted(go_solutions, key=lambda x: x["score"], reverse=True):
-                a = s["analysis"]
-                rev = a.get("revenue", {}).get("realistic_monthly_eur", 0)
-                cost = a.get("mvp_cost", {}).get("total_monthly_cost_eur", 0)
-                weeks = a.get("timeline", {}).get("weeks_to_mvp", "?")
-                msg += f"  [{s['score']:.2f}] {s['title']}\n"
-                msg += f"    Revenue: {rev} EUR/mese, Costi: {cost} EUR/mese, MVP: {weeks} sett.\n"
-        if conditional_solutions:
-            msg += "\nCONDITIONAL GO:\n"
-            for s in sorted(conditional_solutions, key=lambda x: x["score"], reverse=True):
-                cond = s["analysis"].get("recommendation", {}).get("conditions", "")
-                msg += f"  [{s['score']:.2f}] {s['title']}\n"
-                msg += f"    Condizione: {cond[:100]}\n"
-        notify_telegram(msg)
-
-    # Evento proattivo: se ci sono GO, segnala al futuro Project Builder
-    if go_solutions:
-        best = sorted(go_solutions, key=lambda x: x["score"], reverse=True)[0]
-        emit_event("feasibility_engine", "solution_go", "project_builder",
-            {"title": best["title"], "score": best["score"]}, "high")
-
-    logger.info(f"Feasibility Engine completato: {evaluated} valutate, {len(go_solutions)} GO, {len(conditional_solutions)} conditional")
-    return {
-        "status": "completed",
-        "evaluated": evaluated,
-        "go": len(go_solutions),
-        "conditional_go": len(conditional_solutions),
-        "no_go": evaluated - len(go_solutions) - len(conditional_solutions),
-    }
+    return {"status": "completed", "date": today}
 
 
 # ============================================================
-# EVENT PROCESSOR
+# PARTE 1: EVENT PROCESSOR — cascade completa
 # ============================================================
 
 def process_events():
@@ -1755,22 +2094,110 @@ def process_events():
         target = event.get("target_agent", "")
         payload = event.get("payload", {})
         if isinstance(payload, str):
-            payload = json.loads(payload)
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {}
 
         try:
-            if event_type == "high_score_problem" and target == "solution_architect":
+            if event_type == "scan_completed":
+                # Trigger solution generation per problemi con score >= 0.65
+                problem_ids = payload.get("problem_ids", [])
+                for pid in problem_ids:
+                    try:
+                        prob = supabase.table("problems").select("weighted_score").eq("id", pid).execute()
+                        if prob.data and float(prob.data[0].get("weighted_score", 0) or 0) >= 0.65:
+                            emit_event("event_processor", "problem_ready", "solution_architect",
+                                {"problem_id": str(pid)})
+                    except:
+                        pass
+                mark_event_done(event["id"])
+
+            elif event_type == "problems_found":
+                # Notify Mirco con top problemi
+                problem_ids = payload.get("problem_ids", [])
+                count = payload.get("count", len(problem_ids))
+                notify_telegram(f"Trovati {count} nuovi problemi con score alto. Controllali sul bot!")
+                mark_event_done(event["id"])
+
+            elif event_type == "problem_approved":
+                problem_id = payload.get("problem_id")
+                if problem_id:
+                    run_solution_architect(problem_id=problem_id)
+                mark_event_done(event["id"])
+
+            elif event_type == "solutions_generated":
+                # Trigger feasibility engine
+                solution_ids = payload.get("solution_ids", [])
+                for sid in solution_ids:
+                    run_feasibility_engine(solution_id=sid, notify=True)
+                mark_event_done(event["id"])
+
+            elif event_type == "feasibility_completed":
+                # BOS is already calculated inline in run_feasibility_engine
+                mark_event_done(event["id"])
+
+            elif event_type == "bos_calculated":
+                bos_score = payload.get("bos_score", 0)
+                verdict = payload.get("verdict", "ARCHIVE")
+                solution_id = payload.get("solution_id")
+
+                if verdict == "AUTO-GO":
+                    emit_event("event_processor", "auto_go", "project_builder",
+                        {"solution_id": solution_id, "bos": bos_score}, "high")
+                elif verdict == "REVIEW":
+                    emit_event("event_processor", "review_request", "command_center",
+                        {"solution_id": solution_id, "bos": bos_score}, "high")
+                # ARCHIVE: no action needed
+
+                mark_event_done(event["id"])
+
+            elif event_type == "mirco_feedback":
+                # Self-improvement: salva preferenza
+                feedback_type = payload.get("type", "")
+                item_id = payload.get("item_id", "")
+                action = payload.get("action", "")
+                reason = payload.get("reason", "")
+
+                if feedback_type and action:
+                    try:
+                        supabase.table("org_knowledge").insert({
+                            "title": f"Preferenza: {feedback_type} {action}",
+                            "content": f"Mirco ha {action} un {feedback_type}. ID: {item_id}. Motivo: {reason}",
+                            "category": "preference",
+                            "source": "mirco_feedback",
+                        }).execute()
+                    except:
+                        pass
+
                 mark_event_done(event["id"])
 
             elif event_type == "batch_scan_complete" and target == "knowledge_keeper":
                 run_knowledge_keeper()
                 mark_event_done(event["id"])
 
-            elif event_type == "problem_approved":
-                run_solution_architect(problem_id=payload.get("problem_id"))
+            elif event_type == "solution_go" and target == "project_builder":
+                # Futuro: Project Builder
                 mark_event_done(event["id"])
 
-            elif event_type == "solution_go" and target == "project_builder":
-                # Futuro: qui si attivera' il Project Builder
+            elif event_type == "review_request":
+                sol_id = payload.get("solution_id")
+                bos = payload.get("bos", 0)
+                if sol_id:
+                    try:
+                        sol = supabase.table("solutions").select("title").eq("id", sol_id).execute()
+                        title = sol.data[0]["title"] if sol.data else "?"
+                        notify_telegram(f"REVIEW RICHIESTA\n\nSoluzione: {title}\nBOS: {bos:.2f}\n\nVuoi procedere? Rispondi sul Command Center.")
+                    except:
+                        pass
+                mark_event_done(event["id"])
+
+            elif event_type == "error_pattern_detected":
+                # Gia notificato da knowledge_keeper
+                mark_event_done(event["id"])
+
+            elif event_type == "high_impact_tool":
+                # Gia notificato da capability_scout
                 mark_event_done(event["id"])
 
             else:
@@ -1779,10 +2206,107 @@ def process_events():
             processed += 1
 
         except Exception as e:
-            logger.error(f"[EVENT ERROR] {e}")
+            logger.error(f"[EVENT ERROR] {event_type}: {e}")
             mark_event_done(event["id"], "failed")
 
     return {"processed": processed}
+
+
+# ============================================================
+# IDEA RECYCLER
+# ============================================================
+
+def run_idea_recycler():
+    """Rivaluta problemi e soluzioni archiviate."""
+    logger.info("Idea Recycler starting...")
+
+    try:
+        archived = supabase.table("problems").select("id, title, sector, weighted_score, created_at") \
+            .eq("status", "archived").order("weighted_score", desc=True).limit(10).execute()
+        archived = archived.data or []
+    except:
+        archived = []
+
+    if not archived:
+        return {"status": "no_archived", "recycled": 0}
+
+    recycled = 0
+    for problem in archived:
+        age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(problem["created_at"].replace("Z", "+00:00"))).days
+        if age_days < 14:
+            continue
+
+        title = problem["title"]
+        sector = problem.get("sector", "")
+        result = search_perplexity(f"{title} new developments changes 2026")
+
+        if result and ("growing" in result.lower() or "increasing" in result.lower() or "new" in result.lower()):
+            try:
+                supabase.table("reevaluation_log").insert({
+                    "problem_id": problem["id"],
+                    "reason": "Periodic recycler - potential relevance change",
+                    "new_data": result[:500],
+                }).execute()
+
+                emit_event("idea_recycler", "problem_may_be_relevant", "command_center",
+                    {"problem_id": str(problem["id"]), "title": title})
+
+                recycled += 1
+            except:
+                pass
+        time.sleep(1)
+
+    log_to_supabase("idea_recycler", "recycle", 5,
+        f"Rivalutati {len(archived)} problemi", f"{recycled} potenzialmente rilevanti",
+        "none")
+
+    return {"status": "completed", "recycled": recycled}
+
+
+# ============================================================
+# SOURCE REFRESH
+# ============================================================
+
+def run_source_refresh():
+    """Aggiorna ranking fonti e cerca nuove fonti."""
+    logger.info("Source Refresh starting...")
+
+    try:
+        sources = supabase.table("scan_sources").select("*").eq("status", "active").execute()
+        sources = sources.data or []
+    except:
+        sources = []
+
+    updated = 0
+    for source in sources:
+        last_scanned = source.get("last_scanned")
+        problems_found = source.get("problems_found", 0)
+
+        if last_scanned:
+            try:
+                last_dt = datetime.fromisoformat(last_scanned.replace("Z", "+00:00"))
+                days_since = (datetime.now(timezone.utc) - last_dt).days
+            except:
+                days_since = 30
+        else:
+            days_since = 30
+
+        # Penalizza fonti che non producono risultati
+        if days_since > 14 and problems_found == 0:
+            new_rel = max(0.1, source.get("relevance_score", 0.5) - 0.05)
+            try:
+                supabase.table("scan_sources").update({
+                    "relevance_score": round(new_rel, 4),
+                }).eq("id", source["id"]).execute()
+                updated += 1
+            except:
+                pass
+
+    log_to_supabase("source_refresh", "refresh", 1,
+        f"{len(sources)} fonti analizzate", f"{updated} aggiornate",
+        "none")
+
+    return {"status": "completed", "sources": len(sources), "updated": updated}
 
 
 # ============================================================
@@ -1823,7 +2347,7 @@ async def run_finance_endpoint(request):
     try:
         data = await request.json()
         target_date = data.get("date")
-    except Exception:
+    except:
         target_date = None
     result = run_finance_agent(target_date=target_date)
     return web.json_response(result)
@@ -1832,9 +2356,18 @@ async def run_feasibility_endpoint(request):
     try:
         data = await request.json()
         solution_id = data.get("solution_id")
-    except Exception:
+    except:
         solution_id = None
     result = run_feasibility_engine(solution_id=solution_id)
+    return web.json_response(result)
+
+async def run_bos_endpoint(request):
+    try:
+        data = await request.json()
+        solution_id = data.get("solution_id")
+    except:
+        solution_id = None
+    result = run_bos_endpoint_logic(solution_id=solution_id)
     return web.json_response(result)
 
 async def run_events_endpoint(request):
@@ -1842,7 +2375,6 @@ async def run_events_endpoint(request):
     return web.json_response(result)
 
 async def run_pipeline_endpoint(request):
-    """Pipeline completa sincrona: scan → SA → FE."""
     try:
         sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
         sources = sources.data or []
@@ -1855,10 +2387,21 @@ async def run_pipeline_endpoint(request):
         run_auto_pipeline(saved_ids)
     return web.json_response({"scan": scan_result, "pipeline": f"{len(saved_ids)} problemi processati"})
 
+async def run_daily_report_endpoint(request):
+    result = generate_daily_report()
+    return web.json_response(result)
+
+async def run_recycle_endpoint(request):
+    result = run_idea_recycler()
+    return web.json_response(result)
+
+async def run_source_refresh_endpoint(request):
+    result = run_source_refresh()
+    return web.json_response(result)
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
-    # Pipeline automatica parte in background dal scanner
     results["knowledge"] = run_knowledge_keeper()
     results["scout"] = run_capability_scout()
     results["finance"] = run_finance_agent()
@@ -1867,7 +2410,7 @@ async def run_all_endpoint(request):
 
 
 async def main():
-    logger.info("brAIn Agents Runner v1.5 starting...")
+    logger.info("brAIn Agents Runner v2.0 starting...")
 
     app = web.Application()
     app.router.add_get("/", health_check)
@@ -1878,8 +2421,15 @@ async def main():
     app.router.add_post("/scout", run_scout_endpoint)
     app.router.add_post("/finance", run_finance_endpoint)
     app.router.add_post("/feasibility", run_feasibility_endpoint)
+    app.router.add_post("/bos", run_bos_endpoint)
     app.router.add_post("/pipeline", run_pipeline_endpoint)
-    app.router.add_post("/events", run_events_endpoint)
+    app.router.add_post("/events/process", run_events_endpoint)
+    app.router.add_post("/report/daily", run_daily_report_endpoint)
+    app.router.add_post("/cycle/scan", run_scanner_endpoint)
+    app.router.add_post("/cycle/knowledge", run_knowledge_endpoint)
+    app.router.add_post("/cycle/capability", run_scout_endpoint)
+    app.router.add_post("/cycle/sources", run_source_refresh_endpoint)
+    app.router.add_post("/cycle/recycle", run_recycle_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)
@@ -1887,7 +2437,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    logger.info(f"Agents Runner on port {PORT}")
+    logger.info(f"Agents Runner v2.0 on port {PORT}")
 
     try:
         while True:
