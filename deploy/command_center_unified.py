@@ -1,5 +1,5 @@
 """
-brAIn Command Center Unified v2.1
+brAIn Command Center Unified v2.2
 Bot Telegram unificato — unico punto di contatto per Mirco.
 Modello: Haiku 4.5 (economico, veloce, sufficiente per dashboard).
 Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat, /code.
@@ -42,7 +42,7 @@ MAX_HISTORY = 10
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 GITHUB_API = "https://api.github.com"
-CODE_AGENT_MODEL = "claude-sonnet-4-5-20250514"
+CODE_AGENT_MODEL = "claude-sonnet-4-5-20250929"
 
 pending_deploys = {}  # chat_id -> {"files": [...], "summary": ..., "timestamp": ...}
 
@@ -918,7 +918,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     await update.message.reply_text(
-        "brAIn Command Center Unified v2.1 attivo.\n"
+        "brAIn Command Center Unified v2.2 attivo.\n"
         "Haiku 4.5 — vocali, foto, dashboard, /code.\n"
         "Scrivimi quello che vuoi, o usa /code per scrivere codice."
     )
@@ -1044,7 +1044,7 @@ def is_authorized(update):
 # ---- HTTP ENDPOINTS ----
 
 async def health_check(request):
-    return web.Response(text="brAIn Command Center Unified v2.1 OK", status=200)
+    return web.Response(text="brAIn Command Center Unified v2.2 OK", status=200)
 
 
 async def telegram_webhook(request):
@@ -1096,7 +1096,7 @@ async def handle_alert(request):
 async def main():
     global tg_app
 
-    logger.info("brAIn Command Center Unified v2.1 — Haiku 4.5 + Voice + Photo + Tools + /code")
+    logger.info("brAIn Command Center Unified v2.2 — Haiku 4.5 + Voice + Photo + Tools + /code")
 
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
