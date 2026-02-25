@@ -144,7 +144,11 @@ def build_system_prompt(chat_id=None):
         if parts:
             session = "\nCONTESTO SESSIONE:\n" + "\n".join(parts) + "\n"
 
-    return f"""Sei il COO di brAIn — organismo AI-native. Unico punto di contatto per Mirco (CEO).
+    oggi = datetime.now().strftime("%d/%m/%Y")
+
+    return f"""Oggi e' il {oggi}.
+
+Sei il COO di brAIn — organismo AI-native. Unico punto di contatto per Mirco (CEO).
 brAIn scansiona problemi globali, genera soluzioni, le testa sul mercato, scala quelle che funzionano.
 
 PERSONALITA':
@@ -1196,7 +1200,7 @@ async def handle_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE
             "Esempio: /code aggiungi un endpoint /health che ritorna lo stato degli agenti")
         return
     if not GITHUB_TOKEN:
-        await update.message.reply_text("GITHUB_TOKEN non configurato. Contatta brAIn God.")
+        await update.message.reply_text("GITHUB_TOKEN non configurato.")
         return
 
     await update.message.reply_text(f"Ci lavoro con Sonnet: {prompt[:100]}...")
