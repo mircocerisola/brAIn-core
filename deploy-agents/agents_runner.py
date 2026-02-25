@@ -3946,72 +3946,136 @@ DOPO LA SEZIONE 10, includi OBBLIGATORIAMENTE questo blocco (NON omettere, NON m
 
 
 def run_spec_generator(project_id):
-    """Genera SPEC.md per il progetto. Salva in DB e committa su GitHub."""
+    """Genera SPEC.md per il progetto.
+    Legge TUTTI i dati ESCLUSIVAMENTE da Supabase (projects + solutions + problems).
+    NON usa sessioni Telegram, contesti conversazionali o dati esterni alla DB.
+    Fail esplicito se bos_id o solution mancano — mai generare da dati vuoti.
+    """
     start = time.time()
     logger.info(f"[SPEC] Avvio per project_id={project_id}")
 
+    # 1. Carica progetto da DB
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
-            return {"status": "error", "error": "project not found"}
+            logger.error(f"[SPEC] Project {project_id} non trovato in DB")
+            return {"status": "error", "error": f"project {project_id} not found"}
         project = proj.data[0]
-        solution_id = project.get("bos_id")
-        github_repo = project.get("github_repo", "")
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-    solution = {}
-    problem = {}
-    feasibility_details = ""
-    bos_score = project.get("bos_score", 0) or 0
+    solution_id = project.get("bos_id")
+    github_repo = project.get("github_repo", "")
+    bos_score = float(project.get("bos_score") or 0)
 
-    if solution_id:
-        try:
-            sol = supabase.table("solutions").select("*").eq("id", solution_id).execute()
-            if sol.data:
-                solution = sol.data[0]
-                problem_id = solution.get("problem_id")
-                if problem_id:
-                    prob = supabase.table("problems").select("*").eq("id", problem_id).execute()
-                    if prob.data:
-                        problem = prob.data[0]
-        except Exception as e:
-            logger.warning(f"[SPEC] Solution/problem load: {e}")
+    # 2. VALIDAZIONE ESPLICITA: bos_id obbligatorio
+    if not solution_id:
+        err = (f"project {project_id} ha bos_id=NULL — "
+               "impossibile generare SPEC senza BOS associato dal database")
+        logger.error(f"[SPEC] {err}")
+        return {"status": "error", "error": err}
 
+    # 3. Carica soluzione BOS da DB — UNICA fonte di verità
     try:
-        fe = supabase.table("solution_scores").select("*").eq("solution_id", solution_id).execute()
+        sol = supabase.table("solutions").select("*").eq("id", int(solution_id)).execute()
+        if not sol.data:
+            err = f"solution {solution_id} non trovata in DB (bos_id di project {project_id})"
+            logger.error(f"[SPEC] {err}")
+            return {"status": "error", "error": err}
+        solution = sol.data[0]
+    except Exception as e:
+        return {"status": "error", "error": f"solution load error: {e}"}
+
+    logger.info(f"[SPEC] Solution caricata: id={solution_id} title={solution.get('title','')[:60]!r}")
+
+    # 4. Carica problema associato dalla DB (se problem_id disponibile)
+    problem = {}
+    problem_id = solution.get("problem_id")
+    if problem_id:
+        try:
+            prob = supabase.table("problems").select("*").eq("id", int(problem_id)).execute()
+            if prob.data:
+                problem = prob.data[0]
+                logger.info(f"[SPEC] Problem caricato: id={problem_id} title={problem.get('title','')[:60]!r}")
+            else:
+                logger.warning(f"[SPEC] Problem {problem_id} non trovato in DB — sezione PROBLEMA limitata")
+        except Exception as e:
+            logger.warning(f"[SPEC] Problem load error: {e}")
+    else:
+        logger.warning(f"[SPEC] Solution {solution_id} ha problem_id=NULL — sezione PROBLEMA derivata dalla soluzione")
+
+    # 5. Carica feasibility scores dalla DB
+    feasibility_details = ""
+    try:
+        fe = supabase.table("solution_scores").select("*").eq("solution_id", int(solution_id)).execute()
         if fe.data:
-            feasibility_details = json.dumps(fe.data[0])[:500]
-    except:
-        pass
+            feasibility_details = json.dumps(fe.data[0], default=str)[:600]
+            logger.info(f"[SPEC] Feasibility scores caricati per solution {solution_id}")
+    except Exception as e:
+        logger.warning(f"[SPEC] Feasibility load: {e}")
 
-    sol_title = solution.get("title", project.get("name", "MVP"))
-    prob_title = problem.get("title", "")
+    # 6. Estrai campi — SOLO da DB, nessun fallback a contesti esterni
+    sol_title       = solution.get("title") or project.get("name") or "MVP"
+    sol_description = solution.get("description") or ""
+    sol_sector      = solution.get("sector") or ""
+    sol_sub_sector  = solution.get("sub_sector") or ""
+    sol_market      = str(solution.get("market_analysis") or "")[:400]
+    sol_feasibility = float(solution.get("feasibility_score") or bos_score)
+    sol_revenue     = solution.get("revenue_model") or ""
+    sol_advantage   = solution.get("competitive_advantage") or ""
+    sol_target      = solution.get("target_customer") or ""
 
-    competitor_query = f"competitor analysis for '{sol_title}' solving '{prob_title}' — top solutions, pricing, market size 2026"
+    prob_title       = problem.get("title") or ""
+    prob_description = problem.get("description") or ""
+    prob_target      = problem.get("target_customer") or sol_target
+    prob_geography   = problem.get("target_geography") or ""
+    prob_urgency     = str(problem.get("urgency") or "")
+    prob_evidence    = (problem.get("evidence") or "")[:300]
+    prob_why_now     = (problem.get("why_now") or "")[:300]
+
+    logger.info(
+        f"[SPEC] Dati pronti per Claude: sol={sol_title!r:.60} prob={prob_title!r:.40} "
+        f"has_problem={bool(problem)} has_feasibility={bool(feasibility_details)}"
+    )
+
+    # 7. Ricerca competitiva via Perplexity (unico dato esterno al DB)
+    competitor_query = (f"competitor analysis '{sol_title}' settore '{sol_sector}' "
+                        f"— top solutions, pricing, market size 2026")
     competitor_info = search_perplexity(competitor_query) or "Dati competitivi non disponibili."
 
-    user_prompt = f"""Genera il SPEC.md per questo progetto:
+    # 8. User prompt — SOLO dati da DB, nessun contesto sessione
+    user_prompt = f"""Genera il SPEC.md per questo progetto.
+FONTE DATI: record Supabase — solutions.id={solution_id}, problems.id={problem_id or 'non collegato'}.
+NON inventare dati non presenti qui sotto. Se un campo mostra "(non disponibile)", derivalo logicamente dalla descrizione della soluzione.
 
-NOME PROGETTO: {project.get("name", sol_title)}
-SLUG: {project.get("slug", "")}
+=== PROGETTO ===
+Nome: {project.get("name") or sol_title}
+Slug: {project.get("slug") or ""}
+BOS score: {bos_score:.2f}/1.00
 
-PROBLEMA:
-Titolo: {prob_title}
-Descrizione: {problem.get("description", "")[:600]}
-Target: {problem.get("target_customer", "")}
-Geografia: {problem.get("target_geography", "")}
-Urgency: {problem.get("urgency", "")}
-
-SOLUZIONE BOS (score: {bos_score:.2f}/1):
+=== SOLUZIONE BOS (id={solution_id}) ===
 Titolo: {sol_title}
-Descrizione: {solution.get("description", "")[:600]}
-Settore: {solution.get("sector", "")} / {solution.get("sub_sector", "")}
+Descrizione: {sol_description[:800]}
+Settore: {sol_sector} / {sol_sub_sector}
+Target customer: {sol_target or "(vedi problema)"}
+Revenue model: {sol_revenue or "da definire in base al settore"}
+Vantaggio competitivo: {sol_advantage or "(non disponibile)"}
+Market analysis: {sol_market or "(non disponibile)"}
+Feasibility score: {sol_feasibility:.2f}/1.00
 
-ANALISI COMPETITIVA (Perplexity):
+=== PROBLEMA ORIGINALE (id={problem_id or "non collegato"}) ===
+Titolo: {prob_title or "(non disponibile — deriva dalla soluzione)"}
+Descrizione: {prob_description[:600] or "(non disponibile)"}
+Target: {prob_target or "(non disponibile)"}
+Geografia: {prob_geography or "(non disponibile)"}
+Urgency score: {prob_urgency or "(non disponibile)"}
+Evidence: {prob_evidence or "(non disponibile)"}
+Why now: {prob_why_now or "(non disponibile)"}
+
+=== ANALISI COMPETITIVA (Perplexity) ===
 {competitor_info[:800]}
 
-FEASIBILITY DETAILS:
+=== FEASIBILITY DETAILS ===
 {feasibility_details or "Non disponibile"}
 
 Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
@@ -4044,7 +4108,6 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
             spec_meta = json.loads(match.group(1))
             stack = spec_meta.get("stack", [])
             kpis = spec_meta.get("kpis", {})
-            # mvp_build_time_days e mvp_cost_eur sono al root di JSON_SPEC, non dentro kpis
             if spec_meta.get("mvp_build_time_days"):
                 kpis["mvp_build_time_days"] = spec_meta["mvp_build_time_days"]
             if spec_meta.get("mvp_cost_eur"):
@@ -4066,19 +4129,20 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         ok = _commit_to_project_repo(
             github_repo, "SPEC.md", spec_md,
-            f"feat: SPEC.md generato da brAIn — {ts}",
+            f"feat: SPEC.md rigenerato da brAIn — {ts}",
         )
         if ok:
             logger.info(f"[SPEC] SPEC.md committato su {github_repo}")
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("spec_generator", "spec_generate", 3,
-                    f"project={project_id} solution={solution_id}",
+                    f"project={project_id} solution={solution_id} problem={problem_id}",
                     f"SPEC {len(spec_md)} chars stack={stack}",
                     "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
 
-    logger.info(f"[SPEC] Completato project={project_id} in {duration_ms}ms")
+    logger.info(f"[SPEC] Completato project={project_id} in {duration_ms}ms spec_len={len(spec_md)}")
     return {"status": "ok", "project_id": project_id, "spec_length": len(spec_md),
+            "solution_id": solution_id, "problem_id": problem_id,
             "stack": stack, "kpis": kpis, "cost_usd": round(cost, 5)}
 
 
