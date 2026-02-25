@@ -3817,13 +3817,16 @@ def _create_github_repo(slug, name):
 
 
 def _get_telegram_group_id():
-    """Legge telegram_group_id da org_config."""
+    """Legge telegram_group_id da org_config. Gestisce sia string che int (jsonb)."""
     try:
         r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
         if r.data:
-            return json.loads(r.data[0]["value"])
-    except:
-        pass
+            val = r.data[0]["value"]
+            if isinstance(val, (int, float)):
+                return int(val)
+            return json.loads(str(val))
+    except Exception as e:
+        logger.warning(f"[GROUP_ID] {e}")
     return None
 
 
@@ -4148,7 +4151,18 @@ Genera la landing page HTML completa."""
             system=LP_SYSTEM_PROMPT_AR,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        html = response.content[0].text.strip()
+        raw_html = response.content[0].text.strip()
+        # Strip markdown code fences se il modello le ha aggiunte
+        if raw_html.startswith("```"):
+            lines = raw_html.split("\n")
+            # rimuovi prima riga (```html o ```) e ultima riga (```)
+            if lines[-1].strip() == "```":
+                lines = lines[1:-1]
+            else:
+                lines = lines[1:]
+        else:
+            lines = raw_html.split("\n")
+        html = "\n".join(lines).strip()
         tokens_in = response.usage.input_tokens
         tokens_out = response.usage.output_tokens
     except Exception as e:

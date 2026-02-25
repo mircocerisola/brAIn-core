@@ -134,7 +134,13 @@ Genera la landing page HTML completa per questo MVP."""
             system=LP_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
         )
-        html = response.content[0].text.strip()
+        raw_html = response.content[0].text.strip()
+        if raw_html.startswith("```"):
+            lines = raw_html.split("\n")
+            lines = lines[1:-1] if lines[-1].strip() == "```" else lines[1:]
+        else:
+            lines = raw_html.split("\n")
+        html = "\n".join(lines).strip()
         tokens_in = response.usage.input_tokens
         tokens_out = response.usage.output_tokens
     except Exception as e:
