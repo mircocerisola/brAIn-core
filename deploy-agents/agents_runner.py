@@ -1047,7 +1047,7 @@ def run_solution_architect(problem_id=None):
         return {"status": "all_solved", "saved": 0}
 
     total_saved = 0
-    new_solution_ids = []
+    all_solution_ids = []
 
     for problem in problems:
         dossier = research_problem(problem)
@@ -1056,6 +1056,8 @@ def run_solution_architect(problem_id=None):
 
         solutions_data = generate_solutions_unconstrained(problem, dossier)
         if not solutions_data or not solutions_data.get("solutions"):
+            logger.warning(f"[SA] Nessuna soluzione valida per '{problem['title'][:60]}'. "
+                f"Risposta: {str(solutions_data)[:200] if solutions_data else 'None'}")
             continue
 
         ranking_rationale = solutions_data.get("ranking_rationale", "")
@@ -1068,6 +1070,7 @@ def run_solution_architect(problem_id=None):
         for a in feasibility_data.get("assessments", []):
             feas_map[a.get("solution_title", "")] = a
 
+        problem_solution_ids = []
         for sol in solutions_data.get("solutions", []):
             title = sol.get("title", "")
             assessment = feas_map.get(title, {
@@ -1080,17 +1083,18 @@ def run_solution_architect(problem_id=None):
             sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
             if sol_id:
                 total_saved += 1
-                new_solution_ids.append(sol_id)
+                problem_solution_ids.append(sol_id)
+                all_solution_ids.append(sol_id)
 
-        # Emit event
-        if new_solution_ids:
+        # Emit event per questo problema
+        if problem_solution_ids:
             emit_event("solution_architect", "solutions_generated", "feasibility_engine",
-                {"solution_ids": new_solution_ids, "problem_id": str(problem["id"])})
+                {"solution_ids": problem_solution_ids, "problem_id": str(problem["id"])})
 
         time.sleep(2)
 
     logger.info(f"Solution Architect v2.0 completato: {total_saved} soluzioni")
-    return {"status": "completed", "saved": total_saved, "solution_ids": new_solution_ids}
+    return {"status": "completed", "saved": total_saved, "solution_ids": all_solution_ids}
 
 
 # ============================================================
@@ -1533,6 +1537,8 @@ def run_auto_pipeline(saved_problem_ids):
 
             solutions_data = generate_solutions_unconstrained(problem, dossier)
             if not solutions_data or not solutions_data.get("solutions"):
+                logger.warning(f"[PIPELINE] SA generazione fallita per '{problem['title'][:60]}'. "
+                    f"Risposta: {str(solutions_data)[:200] if solutions_data else 'None'}")
                 continue
 
             ranking_rationale = solutions_data.get("ranking_rationale", "")
