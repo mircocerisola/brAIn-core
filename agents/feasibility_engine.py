@@ -1,11 +1,12 @@
 """
-brAIn Feasibility Engine v1.1
+brAIn Feasibility Engine v2.0
 THINKING — Valuta fattibilita' economica e tecnica delle soluzioni proposte.
-Per ogni soluzione: costo MVP, tempo sviluppo, revenue 3 scenari, marginalita', competition, go/no-go.
+v2.0: scoring non-lineare (^1.5), 7 parametri BOS ridefiniti, soglie a step calibrate.
 """
 
 import os
 import json
+import math
 import time
 from dotenv import load_dotenv
 import anthropic
@@ -19,43 +20,43 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-# Costanti
-DEV_HOURLY_RATE_EUR = 50  # costo orario sviluppo (freelance medio EU)
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 
 FEASIBILITY_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
-Valuti la fattibilita' economica e tecnica di soluzioni AI.
+Valuti la fattibilita' economica e tecnica di soluzioni AI con MASSIMO realismo.
 
 VINCOLI DELL'ORGANIZZAZIONE:
 - 1 persona, 20h/settimana, competenza tecnica minima
-- Budget: 1000 EUR/mese totale, primo progetto sotto 200 EUR/mese
+- Budget: 1000 EUR/mese totale, primo progetto SOTTO 200 EUR/mese
 - Stack: Claude API (Haiku/Sonnet), Supabase (PostgreSQL + pgvector), Python, Google Cloud Run, Telegram Bot
 - Obiettivo: revenue entro 3 mesi, marginalita' alta priorita' assoluta
-- Puo' usare API/servizi esterni purche' nel budget
+- Vantaggio: AI-native, zero overhead umano, velocita' di build
 
-Hai la SOLUZIONE da valutare e una RICERCA COMPETITIVA sul mercato.
+REGOLE DI REALISMO:
+- Sii PESSIMISTA su revenue (non ottimista). Dimezza la stima iniziale.
+- Sii PESSIMISTA su timeline (20h/settimana con competenza minima = lento).
+- Se il mercato ha >5 competitor attivi e non abbiamo un vantaggio 10x chiaro, di' NO_GO.
+- Se i costi superano 200 EUR/mese, segnalalo come BLOCCO.
 
-Per la soluzione, calcola:
-
-1. COSTO MVP (in EUR):
-   - dev_hours: ore di sviluppo stimate per MVP funzionante
-   - dev_cost_eur: dev_hours * 50 EUR/ora (costo opportunita')
+1. COSTO MVP:
+   - dev_hours: ore di sviluppo MVP (20h/settimana, competenza minima)
+   - dev_cost_eur: dev_hours * 0 EUR (noi usiamo agenti AI, costo opportunita' teorico)
    - api_monthly_eur: costo mensile API (Claude, Perplexity, altri)
-   - hosting_monthly_eur: costo mensile hosting (Cloud Run, Supabase, domini)
-   - other_monthly_eur: altri costi ricorrenti (email, pagamenti, ecc.)
-   - total_mvp_cost_eur: costo una-tantum per costruire MVP
-   - total_monthly_cost_eur: costi operativi mensili
+   - hosting_monthly_eur: Cloud Run + Supabase (gia' pagato, incrementale ~0-20 EUR)
+   - other_monthly_eur: altri costi ricorrenti
+   - total_mvp_cost_eur: costo una-tantum API durante sviluppo
+   - total_monthly_cost_eur: costi operativi mensili a regime
 
-2. TEMPO SVILUPPO:
-   - weeks_to_mvp: settimane per MVP (considerando 20h/settimana)
-   - weeks_to_revenue: settimane stimate per primo euro di revenue
+2. TIMELINE:
+   - weeks_to_mvp: settimane per MVP funzionante (20h/settimana, competenza minima)
+   - weeks_to_revenue: settimane per primo pagamento reale
 
-3. REVENUE MENSILE (3 scenari, a 6 mesi dal lancio):
-   - pessimistic_monthly_eur: scenario pessimista (pochi clienti, prezzo basso)
-   - realistic_monthly_eur: scenario realistico
-   - optimistic_monthly_eur: scenario ottimista (trazione buona)
-   - pricing_model: come si fa pagare (subscription, pay-per-use, freemium+premium, ecc.)
+3. REVENUE (a 6 mesi dal lancio, scenario PESSIMISTA come base):
+   - pessimistic_monthly_eur: 3-5 clienti paganti, prezzo basso
+   - realistic_monthly_eur: 15-30 clienti, prezzo medio
+   - optimistic_monthly_eur: trazione forte, prezzo pieno
+   - pricing_model: subscription | pay_per_use | freemium_premium | one_time | transactional
    - price_point_eur: prezzo per cliente/mese
 
 4. MARGINALITA':
@@ -63,39 +64,33 @@ Per la soluzione, calcola:
    - monthly_margin_realistic: revenue realistico - costi mensili
    - monthly_margin_optimistic: revenue ottimista - costi mensili
    - margin_percentage_realistic: (margine realistico / revenue realistico) * 100
-   - breakeven_months: mesi per recuperare costo MVP (scenario realistico)
+   - breakeven_months: mesi per recuperare total_mvp_cost_eur (scenario realistico)
 
-5. COMPETITION SCORE (0.0-1.0, dove 0=mercato deserto, 1=mercato saturo):
-   - competition_score: quanto e' affollato il mercato
-   - direct_competitors: numero di competitor diretti
-   - indirect_competitors: numero di alternative indirette
-   - our_advantage: perche' possiamo competere nonostante i limiti
+5. COMPETITION:
+   - competition_score: 0=nessun competitor, 1=mercato saturo
+   - direct_competitors: numero competitor diretti con feature identiche
+   - indirect_competitors: numero alternative indirette
+   - our_advantage: vantaggio specifico vs competitor (deve essere 10x su almeno 1 dimensione)
 
 6. GO/NO-GO:
-   - recommendation: "GO", "CONDITIONAL_GO", o "NO_GO"
-   - confidence: 0.0-1.0 quanto sei sicuro della raccomandazione
-   - reasoning: motivazione in 2-3 frasi
-   - conditions: se CONDITIONAL_GO, cosa deve succedere prima di procedere
+   - decision: "GO", "CONDITIONAL_GO", o "NO_GO"
+   - confidence: 0.0-1.0 certezza della raccomandazione
+   - reasoning: 2-3 frasi max
+   - conditions: se CONDITIONAL_GO, cosa deve succedere prima
    - biggest_risk: rischio principale
    - biggest_opportunity: opportunita' principale
 
-7. BOS FEASIBILITY SCORES (0.0-1.0 per ogni parametro):
-   - margin_potential: potenziale di margine alto (margine >70% = 1.0, <20% = 0.0)
-   - ai_buildability: quanto e' costruibile con AI/automazione (completamente AI-driven = 1.0)
-   - time_to_market_score: velocita' di lancio MVP (1 settimana = 1.0, 6+ mesi = 0.0)
-   - mvp_cost_score: costo MVP entro budget (sotto 50 EUR/mese = 1.0, sopra 300 = 0.0)
-   - recurring_revenue: potenziale di revenue ricorrente (subscription forte = 1.0, one-shot = 0.0)
-   - market_access: facilita' di raggiungere clienti (canale diretto/organico = 1.0, enterprise sales = 0.0)
-   - scalability: scalabilita' senza aggiunta risorse umane (auto-scaling = 1.0, richiede team = 0.0)
-
-REGOLE:
-- Sii REALISTICO, non ottimista. Meglio sottostimare revenue e sovrastimare costi.
-- Se il mercato e' saturo e non abbiamo un vantaggio chiaro, di' NO_GO.
-- Se i costi superano il budget (200 EUR/mese per primo progetto), segnalalo.
-- Considera che l'operatore ha competenza tecnica MINIMA — tempi di sviluppo piu' lunghi.
+7. BOS FEASIBILITY SCORES (0.0-1.0 per ogni parametro, scala SEVERA):
+   - mvp_cost_score: <200 EUR/mese = 1.0, 200-500 EUR/mese = 0.8, 500-2000 = 0.5, >2000 = 0.2
+   - time_to_market: <1 settimana = 1.0, 1-2 settimane = 0.8, 1 mese = 0.5, 2 mesi = 0.3, >2 mesi = 0.1
+   - ai_buildability: costruibile interamente con Claude Code + agenti AI = 1.0, richiede dev umano = 0.4, richiede team = 0.0
+   - margin_potential: >80% margine = 1.0, 50-80% = 0.7, 20-50% = 0.4, <20% = 0.1
+   - market_access: 100 clienti via SEO/community/content senza paid ads = 1.0, solo partnership = 0.5, solo cold outreach = 0.3, enterprise sales = 0.0
+   - recurring_revenue: SaaS mensile = 1.0, abbonamento annuale = 0.8, pay_per_use frequente = 0.6, one_shot = 0.2
+   - scalability: 100->10.000 clienti senza costi proporzionali = 1.0, richiede support umano = 0.4, richiede team = 0.0
 
 Rispondi SOLO con JSON:
-{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"margin_potential":0.0,"ai_buildability":0.0,"time_to_market_score":0.0,"mvp_cost_score":0.0,"recurring_revenue":0.0,"market_access":0.0,"scalability":0.0}}
+{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"mvp_cost_score":0.0,"time_to_market":0.0,"ai_buildability":0.0,"margin_potential":0.0,"market_access":0.0,"recurring_revenue":0.0,"scalability":0.0}}
 SOLO JSON."""
 
 
@@ -174,9 +169,11 @@ def search_perplexity(query):
 
 
 def get_pending_solutions(solution_id=None):
-    """Recupera soluzioni proposte che non hanno ancora feasibility_details."""
     try:
-        query = supabase.table("solutions").select("*, problems(title, description, sector, who_is_affected, why_it_matters, weighted_score)")
+        query = supabase.table("solutions").select(
+            "*, problems(title, description, sector, who_is_affected, why_it_matters, "
+            "weighted_score, target_customer, target_geography, pain_intensity, evidence, why_now)"
+        )
         if solution_id:
             query = query.eq("id", solution_id)
         else:
@@ -189,7 +186,6 @@ def get_pending_solutions(solution_id=None):
 
 
 def get_solution_scores(solution_id):
-    """Recupera gli score dal Solution Architect."""
     try:
         result = supabase.table("solution_scores").select("*").eq("solution_id", solution_id).execute()
         if result.data:
@@ -200,14 +196,11 @@ def get_solution_scores(solution_id):
 
 
 def research_competition(solution_title, sector):
-    """Ricerca competitiva via Perplexity."""
-    query = f"{solution_title} competitors alternatives market size pricing {sector}"
+    query = f"{solution_title} competitors alternatives market size pricing {sector} 2026"
     return search_perplexity(query)
 
 
 def analyze_solution(solution, problem, scores, competition_research):
-    """Chiama Haiku per analisi di fattibilita' completa."""
-    # Estrai approach se e' JSON
     approach = solution.get("approach", "")
     if isinstance(approach, str):
         try:
@@ -218,23 +211,42 @@ def analyze_solution(solution, problem, scores, competition_research):
     else:
         approach_text = json.dumps(approach, indent=2, ensure_ascii=False)
 
+    # Includi i nuovi campi MVP della soluzione
+    mvp_features = solution.get("mvp_features", "")
+    if isinstance(mvp_features, str):
+        try:
+            mvp_features_text = json.dumps(json.loads(mvp_features), ensure_ascii=False)
+        except:
+            mvp_features_text = mvp_features
+    else:
+        mvp_features_text = json.dumps(mvp_features, ensure_ascii=False) if mvp_features else ""
+
     context = (
         f"SOLUZIONE: {solution['title']}\n"
         f"Descrizione: {solution.get('description', '')}\n"
         f"Approccio: {approach_text}\n"
-        f"Settore: {solution.get('sector', '')} / {solution.get('sub_sector', '')}\n\n"
+        f"Settore: {solution.get('sector', '')} / {solution.get('sub_sector', '')}\n"
+        f"Value Proposition: {solution.get('value_proposition', '')}\n"
+        f"Customer Segment: {solution.get('customer_segment', '')}\n"
+        f"Revenue Model: {solution.get('revenue_model', '')}\n"
+        f"Price Point: {solution.get('price_point', '')}\n"
+        f"Distribution Channel: {solution.get('distribution_channel', '')}\n"
+        f"MVP Features: {mvp_features_text}\n"
+        f"MVP Build Time (SA stima): {solution.get('mvp_build_time', '')} giorni\n"
+        f"MVP Cost EUR (SA stima): {solution.get('mvp_cost_eur', '')} EUR\n"
+        f"Unfair Advantage: {solution.get('unfair_advantage', '')}\n"
+        f"Competitive Gap: {solution.get('competitive_gap', '')}\n\n"
         f"PROBLEMA ORIGINALE: {problem.get('title', '')}\n"
-        f"Descrizione problema: {problem.get('description', '')}\n"
-        f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
-        f"Perche' conta: {problem.get('why_it_matters', '')}\n"
+        f"Target Customer: {problem.get('target_customer', problem.get('who_is_affected', ''))}\n"
+        f"Target Geography: {problem.get('target_geography', '')}\n"
+        f"Pain Intensity: {problem.get('pain_intensity', '')}/5\n"
+        f"Evidence: {problem.get('evidence', '')}\n"
+        f"Why Now: {problem.get('why_now', '')}\n"
         f"Score problema: {problem.get('weighted_score', '')}\n\n"
         f"SCORE SOLUTION ARCHITECT:\n"
         f"Feasibility: {scores.get('feasibility_score', 'N/A')}\n"
         f"Impact: {scores.get('impact_score', 'N/A')}\n"
         f"Complexity: {scores.get('complexity', 'N/A')}\n"
-        f"Time to market: {scores.get('time_to_market', 'N/A')}\n"
-        f"Cost estimate SA: {scores.get('cost_estimate', 'N/A')}\n"
-        f"Notes: {scores.get('notes', '')}\n"
     )
 
     if competition_research:
@@ -246,17 +258,16 @@ def analyze_solution(solution, problem, scores, competition_research):
             model=HAIKU_MODEL,
             max_tokens=2048,
             system=FEASIBILITY_PROMPT,
-            messages=[{"role": "user", "content": f"Valuta questa soluzione. SOLO JSON:\n\n{context}"}]
+            messages=[{"role": "user", "content": f"Valuta questa soluzione con MASSIMO realismo. SOLO JSON:\n\n{context}"}]
         )
         duration = int((time.time() - start) * 1000)
         reply = response.content[0].text
 
-        # Log
         supabase.table("agent_logs").insert({
             "agent_id": "feasibility_engine",
-            "action": "analyze_feasibility",
+            "action": "analyze_feasibility_v2",
             "layer": 2,
-            "input_summary": f"Feasibility: {solution['title'][:100]}",
+            "input_summary": f"Feasibility v2: {solution['title'][:100]}",
             "output_summary": reply[:500],
             "model_used": HAIKU_MODEL,
             "tokens_input": response.usage.input_tokens,
@@ -274,50 +285,54 @@ def analyze_solution(solution, problem, scores, competition_research):
 
 
 def calculate_feasibility_score(analysis):
-    """Calcola score composito 0-1 dai risultati dell'analisi."""
+    """
+    Calcola score composito 0-1 dai BOS feasibility scores.
+    Applica scala non-lineare (^1.5) per evitare clustering alto:
+    - score grezzo 0.9 -> 0.85
+    - score grezzo 0.7 -> 0.59
+    - score grezzo 0.5 -> 0.35
+    - score grezzo 0.3 -> 0.16
+    """
     if not analysis:
         return 0.0
 
-    scores = []
+    bos = analysis.get("bos_feasibility", {})
 
-    # 1. Marginalita' realistica (peso 0.30)
-    margin = analysis.get("margin", {})
-    margin_pct = float(margin.get("margin_percentage_realistic", 0))
-    margin_score = min(1.0, max(0.0, margin_pct / 80))  # 80%+ margine = score 1.0
-    scores.append(("margin", margin_score, 0.30))
+    # 7 parametri BOS v2.0 con pesi
+    params = [
+        ("mvp_cost_score", 0.20),
+        ("time_to_market", 0.15),
+        ("ai_buildability", 0.15),
+        ("margin_potential", 0.20),
+        ("market_access", 0.15),
+        ("recurring_revenue", 0.10),
+        ("scalability", 0.05),
+    ]
 
-    # 2. Tempo al revenue (peso 0.20)
-    timeline = analysis.get("timeline", {})
-    weeks_to_rev = float(timeline.get("weeks_to_revenue", 52))
-    time_score = max(0.0, 1.0 - (weeks_to_rev / 24))  # 24+ settimane = 0
-    scores.append(("time", time_score, 0.20))
+    raw_score = 0.0
+    for key, weight in params:
+        val = float(bos.get(key, 0.0))
+        val = max(0.0, min(1.0, val))
+        raw_score += val * weight
 
-    # 3. Costi mensili entro budget (peso 0.20)
-    costs = analysis.get("mvp_cost", {})
-    monthly_cost = float(costs.get("total_monthly_cost_eur", 1000))
-    cost_score = max(0.0, 1.0 - (monthly_cost / 200))  # >200 EUR/mese = 0
-    scores.append(("cost", cost_score, 0.20))
-
-    # 4. Competition bassa (peso 0.15)
-    competition = analysis.get("competition", {})
-    comp = float(competition.get("competition_score", 0.5))
-    comp_score = 1.0 - comp  # meno competition = meglio
-    scores.append(("competition", comp_score, 0.15))
-
-    # 5. Confidence della raccomandazione (peso 0.15)
+    # Applica moltiplicatore decisione
     rec = analysis.get("recommendation", {})
-    confidence = float(rec.get("confidence", 0.5))
     decision = rec.get("decision", "NO_GO")
-    decision_mult = 1.0 if decision == "GO" else 0.7 if decision == "CONDITIONAL_GO" else 0.3
-    rec_score = confidence * decision_mult
-    scores.append(("recommendation", rec_score, 0.15))
+    confidence = float(rec.get("confidence", 0.5))
 
-    total = sum(score * weight for _, score, weight in scores)
-    return round(min(1.0, max(0.0, total)), 4)
+    if decision == "NO_GO":
+        raw_score *= 0.5
+    elif decision == "CONDITIONAL_GO":
+        raw_score *= max(0.7, confidence)
+    # GO: nessuna penalità
+
+    # Scala non-lineare: penalizza mediocri, premia eccellenti
+    final_score = raw_score ** 1.5
+
+    return round(max(0.0, min(1.0, final_score)), 4)
 
 
 def save_feasibility(solution_id, analysis, feasibility_score):
-    """Aggiorna la soluzione con score e dettagli."""
     try:
         supabase.table("solutions").update({
             "feasibility_score": feasibility_score,
@@ -330,7 +345,7 @@ def save_feasibility(solution_id, analysis, feasibility_score):
 
 
 def run(solution_id=None):
-    print("Feasibility Engine v1.1 avviato...")
+    print("Feasibility Engine v2.0 avviato...")
 
     solutions = get_pending_solutions(solution_id)
 
@@ -349,19 +364,15 @@ def run(solution_id=None):
         sector = sol.get("sector", "")
         print(f"   [{i}/{len(solutions)}] {title}")
 
-        # Recupera problema collegato
         problem = sol.get("problems", {}) or {}
         if not problem:
             problem = {"title": "", "description": ""}
 
-        # Recupera score dal Solution Architect
         scores = get_solution_scores(sol["id"])
 
-        # Ricerca competitiva
         print(f"      Ricerca competitiva...")
         competition = research_competition(title, sector)
 
-        # Analisi Haiku
         print(f"      Analisi fattibilita'...")
         analysis = analyze_solution(sol, problem, scores, competition)
 
@@ -369,10 +380,8 @@ def run(solution_id=None):
             print(f"      [ERROR] Analisi fallita, skip")
             continue
 
-        # Calcola score composito
         feasibility_score = calculate_feasibility_score(analysis)
 
-        # Salva su DB
         saved = save_feasibility(sol["id"], analysis, feasibility_score)
         if saved:
             evaluated += 1
@@ -380,8 +389,15 @@ def run(solution_id=None):
             decision = analysis.get("recommendation", {}).get("decision", "NO_GO")
             margin_real = analysis.get("margin", {}).get("monthly_margin_realistic", 0)
             weeks = analysis.get("timeline", {}).get("weeks_to_mvp", "?")
+            monthly_cost = analysis.get("mvp_cost", {}).get("total_monthly_cost_eur", "?")
 
-            print(f"      Score: {feasibility_score:.2f} | {decision} | Margine: {margin_real} EUR/mese | MVP: {weeks} sett.")
+            # Mostra distribuzione BOS
+            bos = analysis.get("bos_feasibility", {})
+            bos_str = " | ".join([f"{k[:4]}:{v:.2f}" for k, v in bos.items()])
+
+            print(f"      Score: {feasibility_score:.3f} | {decision}")
+            print(f"      BOS: {bos_str}")
+            print(f"      Margine: {margin_real} EUR/mese | MVP: {weeks} sett. | Costi: {monthly_cost} EUR/mese")
 
             if decision == "GO":
                 go_solutions.append({"title": title, "score": feasibility_score, "analysis": analysis})
@@ -392,7 +408,7 @@ def run(solution_id=None):
 
     # Notifica Telegram
     if go_solutions or conditional_solutions:
-        msg = f"FEASIBILITY ENGINE - {evaluated} soluzioni valutate\n\n"
+        msg = f"FEASIBILITY ENGINE v2.0 — {evaluated} soluzioni valutate\n\n"
 
         if go_solutions:
             msg += "GO:\n"
@@ -401,22 +417,22 @@ def run(solution_id=None):
                 rev = a.get("revenue", {}).get("realistic_monthly_eur", 0)
                 cost = a.get("mvp_cost", {}).get("total_monthly_cost_eur", 0)
                 weeks = a.get("timeline", {}).get("weeks_to_mvp", "?")
-                msg += f"  [{s['score']:.2f}] {s['title']}\n"
-                msg += f"    Revenue: {rev} EUR/mese, Costi: {cost} EUR/mese, MVP: {weeks} sett.\n"
+                msg += f"  [{s['score']:.3f}] {s['title']}\n"
+                msg += f"    Rev: {rev} EUR/mese, Costi: {cost} EUR/mese, MVP: {weeks} sett.\n"
 
         if conditional_solutions:
             msg += "\nCONDITIONAL GO:\n"
             for s in sorted(conditional_solutions, key=lambda x: x["score"], reverse=True):
                 a = s["analysis"]
                 cond = a.get("recommendation", {}).get("conditions", "")
-                msg += f"  [{s['score']:.2f}] {s['title']}\n"
+                msg += f"  [{s['score']:.3f}] {s['title']}\n"
                 msg += f"    Condizione: {cond[:100]}\n"
 
         notify_telegram(msg)
 
     print(f"\n   Totale: {evaluated} soluzioni valutate")
     print(f"   GO: {len(go_solutions)}, Conditional: {len(conditional_solutions)}, No-go: {evaluated - len(go_solutions) - len(conditional_solutions)}")
-    print("Feasibility Engine v1.1 completato.")
+    print("Feasibility Engine v2.0 completato.")
 
     return {
         "status": "completed",

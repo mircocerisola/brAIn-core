@@ -274,50 +274,53 @@ SCANNER_SECTORS = [
     "cybersecurity", "entertainment", "logistics",
 ]
 
-SCANNER_ANALYSIS_PROMPT = """Sei il World Scanner di brAIn, un'organizzazione AI-native.
-Analizzi risultati di ricerca per identificare problemi reali e concreti che colpiscono persone o organizzazioni.
+SCANNER_ANALYSIS_PROMPT = """Sei il World Scanner di brAIn, un'organizzazione AI-native che cerca problemi SPECIFICI e AZIONABILI.
 
-Per ogni problema identificato (massimo 3), fornisci:
+REGOLA FONDAMENTALE: ogni problema deve riguardare un segmento PRECISO di persone in un contesto geografico PRECISO con prove CONCRETE.
 
-1. DATI QUANTITATIVI - 7 score da 0.0 a 1.0:
-   - market_size: quante persone/organizzazioni colpisce
-   - willingness_to_pay: quanto pagherebbero per una soluzione
-   - urgency: quanto e' urgente risolverlo
-   - competition_gap: quanto sono deboli le soluzioni attuali
-   - ai_solvability: quanto si puo risolvere con AI
-   - time_to_market: quanto veloce si puo lanciare
-   - recurring_potential: problema ricorrente = revenue ricorrente
+ESEMPIO SBAGLIATO (troppo generico, rifiutato):
+"Le PMI faticano con la gestione finanziaria"
 
-REGOLA CRITICA SUGLI SCORE: Devi usare TUTTA la scala da 0.0 a 1.0. NON dare score tutti simili.
-Usa questi riferimenti precisi:
-- 0.0-0.2 = molto basso
-- 0.2-0.4 = basso
-- 0.4-0.6 = medio
-- 0.6-0.8 = alto
-- 0.8-1.0 = molto alto
+ESEMPIO CORRETTO (specifico, azionabile):
+"Gli elettricisti autonomi italiani tra 30-45 anni non hanno accesso a corsi di aggiornamento normativo certificati a meno di 500 EUR"
 
-Ogni problema DEVE avere almeno 2 score sotto 0.4 e almeno 1 score sotto 0.3.
+Per ogni problema identificato (massimo 3), fornisci TUTTI questi campi:
 
-2. DATI QUALITATIVI:
-   - who_is_affected: chi soffre? Sii specifico
-   - real_world_example: storia concreta
-   - why_it_matters: perche ci tiene a risolverlo
+1. IDENTIFICAZIONE TARGET (OBBLIGATORIO — rifiuta se non hai dati specifici):
+   - target_customer: segmento SPECIFICO — professione + fascia d'eta' + contesto (NON "aziende" o "persone")
+   - target_geography: paese/regione SPECIFICA + perche' proprio li'
+   - problem_frequency: daily/weekly/monthly/quarterly
 
-3. CLASSIFICAZIONE:
+2. DESCRIZIONE PROBLEMA (OBBLIGATORIO):
+   - current_workaround: come il target risolve OGGI il problema e perche' e' insufficiente
+   - pain_intensity: 1 (fastidio) a 5 (blocca il business/la vita)
+   - evidence: dato CONCRETO e verificabile — statistica con fonte, numero persone colpite, dimensione mercato
+
+3. TIMING (OBBLIGATORIO):
+   - why_now: perche' questo problema e' rilevante ORA (cambio normativo, tecnologia, comportamento)
+
+4. DATI QUANTITATIVI — 7 score da 0.0 a 1.0 — usa TUTTA la scala, ogni problema DEVE avere almeno 2 score sotto 0.4:
+   - market_size: 0.1=nicchia <1M EUR, 0.5=medio 10-100M EUR, 1.0=miliardi
+   - willingness_to_pay: 0.1=difficile convincerli, 1.0=pagano gia' o chiedono attivamente
+   - urgency: 0.1=fastidio, 1.0=perde soldi/clienti oggi
+   - competition_gap: 1.0=nessuna soluzione, 0.0=mercato saturo
+   - ai_solvability: 0.1=richiede umani, 1.0=100% automatizzabile
+   - time_to_market: 1.0=1 settimana, 0.3=3 mesi, 0.0=anni
+   - recurring_potential: 1.0=quotidiano, 0.3=mensile, 0.0=una tantum
+
+5. CLASSIFICAZIONE:
    - sector: uno tra food, health, finance, education, legal, ecommerce, hr, real_estate, sustainability, cybersecurity, entertainment, logistics
    - geographic_scope: global, continental, national, regional
    - top_markets: lista 3-5 codici paese ISO
+   - who_is_affected, real_world_example, why_it_matters: testo descrittivo in italiano
 
-NON riproporre problemi generici. Cerca problemi specifici con gap reale.
-
-LINGUA: Rispondi SEMPRE in italiano. Titoli, descrizioni, who_is_affected, real_world_example, why_it_matters: tutto in italiano.
-
+SCARTA qualsiasi problema senza target_customer specifico, evidence con dati numerici, o why_now chiaro.
 REGOLA DIVERSITA SETTORI: i problemi devono riguardare settori DIVERSI.
 
 {preferences_block}
 
 Rispondi SOLO con JSON:
-{{"problems":[{{"title":"titolo","description":"descrizione","who_is_affected":"chi","real_world_example":"storia","why_it_matters":"perche","sector":"food","geographic_scope":"global","top_markets":["US","UK"],"market_size":0.8,"willingness_to_pay":0.3,"urgency":0.6,"competition_gap":0.8,"ai_solvability":0.9,"time_to_market":0.4,"recurring_potential":0.2,"source_name":"fonte","source_url":"url"}}],"new_sources":[{{"name":"nome","url":"url","category":"tipo","sectors":["settore"]}}]}}
+{{"problems":[{{"title":"titolo specifico","description":"descrizione","target_customer":"elettricisti autonomi italiani 30-45 anni","target_geography":"Italia nord e centro","problem_frequency":"monthly","current_workaround":"cercano corsi online generici","pain_intensity":4,"evidence":"In Italia ci sono 180.000 elettricisti autonomi (CGIA 2024)","why_now":"Norma CEI 64-8/7 del 2023 obbligatoria dal 2025","who_is_affected":"chi soffre","real_world_example":"storia concreta","why_it_matters":"perche conta","sector":"education","geographic_scope":"national","top_markets":["IT"],"market_size":0.4,"willingness_to_pay":0.7,"urgency":0.8,"competition_gap":0.7,"ai_solvability":0.8,"time_to_market":0.8,"recurring_potential":0.6,"source_name":"CGIA Mestre","source_url":"https://cgia.it"}}],"new_sources":[{{"name":"nome","url":"url","category":"tipo","sectors":["settore"]}}]}}
 SOLO JSON."""
 
 
@@ -454,13 +457,51 @@ def scanner_normalize_urgency(value):
     return "medium"
 
 
+SCANNER_GENERIC_TERMS = [
+    "aziende", "companies", "persone", "people", "utenti", "users",
+    "imprenditori", "entrepreneurs", "professionisti", "professionals",
+    "individui", "individuals", "clienti", "customers", "lavoratori", "workers",
+]
+
+
 def scanner_calculate_weighted_score(problem):
-    score = 0
+    base_score = 0.0
     for param, weight in SCANNER_WEIGHTS.items():
         value = problem.get(param, 0.5)
         if isinstance(value, (int, float)):
-            score += value * weight
-    return round(score, 4)
+            base_score += float(value) * weight
+
+    adjustments = 0.0
+    multiplier = 1.0
+
+    target_customer = problem.get("target_customer", "").lower()
+    evidence = problem.get("evidence", "")
+    why_now = problem.get("why_now", "")
+    pain_intensity = problem.get("pain_intensity", 3)
+
+    # Penalita' per genericita'
+    generic_count = sum(1 for t in SCANNER_GENERIC_TERMS if t in target_customer.split())
+    if generic_count > 0 and len(target_customer.split()) <= 3:
+        adjustments -= 0.20
+    if not evidence or len(evidence) < 30:
+        adjustments -= 0.15
+    if not why_now or len(why_now) < 20:
+        adjustments -= 0.10
+    if isinstance(pain_intensity, (int, float)) and pain_intensity < 3:
+        multiplier *= 0.7
+
+    # Bonus per specificita'
+    has_age = any(c.isdigit() for c in target_customer)
+    has_many_words = len(target_customer.split()) >= 4
+    if has_age or has_many_words:
+        adjustments += 0.10
+    has_number = any(c.isdigit() for c in evidence)
+    has_source = any(t in evidence.lower() for t in ["fonte", "source", "report", "%", "milion", "miliard"])
+    if has_number and (has_source or len(evidence) > 80):
+        adjustments += 0.10
+
+    final_score = (base_score + adjustments) * multiplier
+    return round(max(0.0, min(1.0, final_score)), 4)
 
 
 def normalize_batch_scores(problems_data):
@@ -651,6 +692,10 @@ def run_scan(queries):
                     if isinstance(top_markets, str):
                         top_markets = json.loads(top_markets)
 
+                    pain_intensity_val = prob.get("pain_intensity", None)
+                    if isinstance(pain_intensity_val, (int, float)):
+                        pain_intensity_val = int(pain_intensity_val)
+
                     try:
                         insert_result = supabase.table("problems").insert({
                             "title": title,
@@ -669,8 +714,16 @@ def run_scan(queries):
                             "who_is_affected": prob.get("who_is_affected", ""),
                             "real_world_example": prob.get("real_world_example", ""),
                             "why_it_matters": prob.get("why_it_matters", ""),
+                            # Nuovi campi specificita' v3.0
+                            "target_customer": prob.get("target_customer", ""),
+                            "target_geography": prob.get("target_geography", ""),
+                            "problem_frequency": prob.get("problem_frequency", ""),
+                            "current_workaround": prob.get("current_workaround", ""),
+                            "pain_intensity": pain_intensity_val,
+                            "evidence": prob.get("evidence", ""),
+                            "why_now": prob.get("why_now", ""),
                             "fingerprint": fp, "source_id": source_id,
-                            "status": save_status, "created_by": "world_scanner_v2",
+                            "status": save_status, "created_by": "world_scanner_v3",
                         }).execute()
 
                         existing_fps.add(fp)
@@ -801,39 +854,55 @@ Rispondi SOLO con JSON:
 {"existing_solutions":[{"name":"nome","what_it_does":"cosa fa","price":"costo","weaknesses":"punti deboli","market_share":"stima"}],"market_gaps":["gap1","gap2"],"failed_attempts":[{"who":"chi","why_failed":"perche"}],"expert_insights":["insight1","insight2"],"market_size_estimate":"stima valore mercato","key_finding":"la scoperta piu' importante in una frase"}
 SOLO JSON."""
 
-GENERATION_PROMPT = """Sei un innovation strategist di livello mondiale. Combini il meglio di:
-- Opportunity Solution Tree (Teresa Torres)
-- Blue Ocean Strategy
-- Jobs-to-be-Done
-- Lean Canvas
+GENERATION_PROMPT = """Sei il Solution Architect di brAIn, un'organizzazione AI-native.
+Genera 3 soluzioni MVP-ready basandoti su:
+1. Business Model Canvas (Osterwalder): value prop + segmento + revenue + canali + costi
+2. Principio YC "10x better": la soluzione DEVE essere 10x migliore dello status quo su almeno una dimensione
+3. "Paradox of Specificity" (First Round): piu' e' specifica per un segmento, piu' e' forte il moat
+4. Dossier competitivo fornito: identifica il GAP reale e costruisci su quello
 
-Hai un DOSSIER COMPETITIVO e un PROBLEMA. Genera 3 soluzioni ordinate per potenziale.
+LINGUA: Rispondi SEMPRE in italiano. Tutto in italiano.
 
-LINGUA: Rispondi SEMPRE in italiano. Titoli, descrizioni, value proposition, tutto in italiano.
+VINCOLI: 1 persona, 20h/settimana, competenza tecnica minima. Budget: sotto 200 EUR/mese primo progetto.
 
 REGOLE CRITICHE:
-- NON proporre soluzioni che gia' esistono e funzionano bene
-- Cerca gli SPAZI VUOTI
-- Pensa a soluzioni con vantaggio difendibile
-- Sii SPECIFICO
+- Il customer_segment DEVE coincidere esattamente con il target_customer del problema
+- Sii SPECIFICO: NON "app per PMI" ma "bot Telegram per elettricisti che risponde a query sulla normativa CEI"
+- NON proporre soluzioni che gia' esistono e funzionano bene — cerca gli spazi vuoti
 
 Per ogni soluzione fornisci:
-- title, description, value_proposition, target_segment, job_to_be_done
-- revenue_model, monthly_revenue_potential, monthly_burn_rate
-- competitive_moat, novelty_score (0-1), opportunity_score (0-1), defensibility_score (0-1)
 
-BOS SOLUTION QUALITY SCORES (0.0-1.0 per ognuno):
-- uniqueness: unicita rispetto a soluzioni esistenti (peso 25%)
-- moat_potential: vantaggio difendibile (peso 20%)
-- value_multiplier: valore/prezzo, 10x = 1.0 (peso 20%)
-- simplicity: semplicita per il cliente (peso 10%)
-- revenue_clarity: chiarezza modello revenue (peso 15%)
-- ai_nativeness: quanto e' nativamente AI (peso 10%)
+BUSINESS MODEL CANVAS:
+- title, description
+- value_proposition: frase unica — "aiutiamo [target specifico] a [fare X] senza [pain attuale]"
+- target_segment, job_to_be_done
+- revenue_model: SaaS_mensile | marketplace | one_time | freemium | transactional
+- price_point_eur: prezzo EUR/mese con giustificazione
+- distribution_channel: come raggiungiamo i primi 100 clienti senza paid ads
+
+MVP SPEC:
+- mvp_features: lista 3 funzionalita' MINIME per validare l'ipotesi di valore
+- mvp_build_time_days: giorni per costruire MVP con agenti AI (20h/settimana)
+- mvp_cost_eur: costo totale MVP (hosting + API + tools)
+- unfair_advantage: perche' AI-native batte team tradizionale su questa soluzione
+- competitive_gap: cosa mancano ai competitor che noi copriamo
+
+METRICHE:
+- monthly_revenue_potential, monthly_burn_rate, competitive_moat
+- novelty_score (0-1), opportunity_score (0-1), defensibility_score (0-1)
+
+BOS SOLUTION QUALITY SCORES (0.0-1.0, scala severa):
+- uniqueness: penalizza se >3 competitor diretti con feature identiche
+- moat_potential: network effects o dati proprietari = 1.0, solo brand = 0.3
+- value_multiplier: 10x = 1.0, 5x = 0.7, 2x = 0.4, <2x = 0.1 (scala logaritmica)
+- revenue_clarity: SaaS con prezzo definito = 1.0, "valutiamo" = 0.5, "vedremo" = 0.0
+- ai_nativeness: togli AI e non funziona = 1.0, togli AI e funziona uguale = 0.0
+- simplicity: utente capisce in <10 secondi = 1.0
 
 {preferences_block}
 
 Rispondi SOLO con JSON:
-{{"solutions":[{{"title":"","description":"","value_proposition":"","target_segment":"","job_to_be_done":"","revenue_model":"","monthly_revenue_potential":"","monthly_burn_rate":"","competitive_moat":"","novelty_score":0.7,"opportunity_score":0.8,"defensibility_score":0.6,"uniqueness":0.7,"moat_potential":0.6,"value_multiplier":0.8,"simplicity":0.7,"revenue_clarity":0.8,"ai_nativeness":0.9}}],"ranking_rationale":"perche' hai messo la prima in cima"}}
+{{"solutions":[{{"title":"titolo specifico","description":"cosa fa in modo specifico","value_proposition":"aiutiamo X a fare Y senza Z","target_segment":"segmento preciso","job_to_be_done":"job da fare","revenue_model":"SaaS_mensile","price_point_eur":29,"distribution_channel":"community LinkedIn + SEO long-tail","mvp_features":["feature 1","feature 2","feature 3"],"mvp_build_time_days":14,"mvp_cost_eur":80,"unfair_advantage":"perche AI-native batte team tradizionale","competitive_gap":"cosa mancano i competitor","monthly_revenue_potential":"500-2000 EUR","monthly_burn_rate":"50 EUR","competitive_moat":"cosa ci rende difendibili","novelty_score":0.7,"opportunity_score":0.8,"defensibility_score":0.6,"uniqueness":0.7,"moat_potential":0.6,"value_multiplier":0.8,"simplicity":0.7,"revenue_clarity":0.8,"ai_nativeness":0.9}}],"ranking_rationale":"perche' hai messo la prima in cima"}}
 SOLO JSON."""
 
 SA_FEASIBILITY_PROMPT = """Sei un CTO pragmatico. Valuta la fattibilita' di ogni soluzione dati questi VINCOLI.
@@ -926,10 +995,20 @@ def generate_solutions_unconstrained(problem, dossier):
         f"PROBLEMA: {problem['title']}\n"
         f"Descrizione: {problem.get('description', '')}\n"
         f"Settore: {problem.get('sector', '')}\n"
+        f"Score: {problem.get('weighted_score', '')}\n\n"
+        f"TARGET SPECIFICO:\n"
+        f"  Target customer: {problem.get('target_customer', problem.get('who_is_affected', ''))}\n"
+        f"  Geografia: {problem.get('target_geography', problem.get('geographic_scope', ''))}\n"
+        f"  Mercati: {problem.get('top_markets', '')}\n\n"
+        f"DETTAGLI PROBLEMA:\n"
+        f"  Frequenza: {problem.get('problem_frequency', '')}\n"
+        f"  Workaround attuale: {problem.get('current_workaround', '')}\n"
+        f"  Pain intensity: {problem.get('pain_intensity', '')}/5\n"
+        f"  Evidence: {problem.get('evidence', '')}\n"
+        f"  Why now: {problem.get('why_now', '')}\n\n"
         f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
         f"Esempio reale: {problem.get('real_world_example', '')}\n"
-        f"Perche conta: {problem.get('why_it_matters', '')}\n"
-        f"Score problema: {problem.get('weighted_score', '')}"
+        f"Perche conta: {problem.get('why_it_matters', '')}"
     )
 
     dossier_text = json.dumps(dossier, indent=2, ensure_ascii=False)
@@ -996,6 +1075,13 @@ def save_solution_v2(problem_id, sol, assessment, ranking_rationale, dossier):
         else:
             complexity = "medium"
 
+        mvp_features = sol.get("mvp_features", [])
+        if isinstance(mvp_features, str):
+            try:
+                mvp_features = json.loads(mvp_features)
+            except:
+                mvp_features = [mvp_features]
+
         sol_result = supabase.table("solutions").insert({
             "problem_id": problem_id,
             "title": sol.get("title", "Senza titolo"),
@@ -1018,6 +1104,17 @@ def save_solution_v2(problem_id, sol, assessment, ranking_rationale, dossier):
             "sub_sector": sol.get("sub_sector", ""),
             "status": "proposed",
             "created_by": "solution_architect_v2",
+            # Nuovi campi MVP v2.0
+            "value_proposition": sol.get("value_proposition", ""),
+            "customer_segment": sol.get("target_segment", ""),
+            "revenue_model": sol.get("revenue_model", ""),
+            "price_point": str(sol.get("price_point_eur", "")),
+            "distribution_channel": sol.get("distribution_channel", ""),
+            "mvp_features": json.dumps(mvp_features) if mvp_features else None,
+            "mvp_build_time": int(sol.get("mvp_build_time_days", 0)) if sol.get("mvp_build_time_days") else None,
+            "mvp_cost_eur": float(sol.get("mvp_cost_eur", 0)) if sol.get("mvp_cost_eur") else None,
+            "unfair_advantage": sol.get("unfair_advantage", ""),
+            "competitive_gap": sol.get("competitive_gap", ""),
         }).execute()
 
         sol_id = sol_result.data[0]["id"]
@@ -1149,7 +1246,7 @@ def run_solution_architect(problem_id=None):
 # ============================================================
 
 FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
-Valuti la fattibilita' economica e tecnica di soluzioni AI.
+Valuti la fattibilita' economica e tecnica di soluzioni AI con MASSIMO realismo.
 
 LINGUA: Rispondi SEMPRE in italiano.
 
@@ -1157,60 +1254,68 @@ VINCOLI:
 - 1 persona, 20h/settimana, competenza tecnica minima
 - Budget: 1000 EUR/mese totale, primo progetto sotto 200 EUR/mese
 - Stack: Claude API, Supabase, Python, Google Cloud Run, Telegram Bot
-- Obiettivo: revenue entro 3 mesi, marginalita' alta
+- Obiettivo: revenue entro 3 mesi, marginalita' alta priorita' assoluta
 
-Per la soluzione, calcola:
+REGOLE DI REALISMO: sii PESSIMISTA su revenue, PESSIMISTA su timeline.
+Se il mercato ha >5 competitor attivi e non hai vantaggio 10x chiaro, di' NO_GO.
 
 1. COSTO MVP: dev_hours, dev_cost_eur, api_monthly_eur, hosting_monthly_eur, other_monthly_eur, total_mvp_cost_eur, total_monthly_cost_eur
-2. TEMPO: weeks_to_mvp, weeks_to_revenue
-3. REVENUE (3 scenari 6 mesi): pessimistic_monthly_eur, realistic_monthly_eur, optimistic_monthly_eur, pricing_model, price_point_eur
+2. TIMELINE: weeks_to_mvp, weeks_to_revenue
+3. REVENUE (3 scenari a 6 mesi): pessimistic_monthly_eur, realistic_monthly_eur, optimistic_monthly_eur, pricing_model, price_point_eur
 4. MARGINALITA: monthly_margin_pessimistic/realistic/optimistic, margin_percentage_realistic, breakeven_months
 5. COMPETITION: competition_score (0-1), direct_competitors, indirect_competitors, our_advantage
 6. GO/NO-GO: decision (GO/CONDITIONAL_GO/NO_GO), confidence (0-1), reasoning, conditions, biggest_risk, biggest_opportunity
 
-7. BOS FEASIBILITY SCORES (0.0-1.0 per ogni parametro):
-   - margin_potential (25%): margine >70% = 1.0, <20% = 0.0
-   - ai_buildability (20%): completamente AI-driven = 1.0
-   - time_to_market_score (15%): 1 settimana = 1.0, 6+ mesi = 0.0
-   - mvp_cost_score (15%): sotto 50 EUR/mese = 1.0, sopra 300 = 0.0
-   - recurring_revenue (10%): subscription forte = 1.0, one-shot = 0.0
-   - market_access (10%): canale diretto/organico = 1.0, enterprise sales = 0.0
-   - scalability (5%): auto-scaling = 1.0, richiede team = 0.0
-
-Sii REALISTICO.
+7. BOS FEASIBILITY SCORES v2.0 (0.0-1.0, scala a step SEVERA):
+   - mvp_cost_score: <200 EUR/mese=1.0, 200-500=0.8, 500-2000=0.5, >2000=0.2
+   - time_to_market: <1 settimana=1.0, 1-2 sett=0.8, 1 mese=0.5, 2 mesi=0.3, >2 mesi=0.1
+   - ai_buildability: interamente con Claude Code + agenti=1.0, richiede dev umano=0.4, richiede team=0.0
+   - margin_potential: >80% margine=1.0, 50-80%=0.7, 20-50%=0.4, <20%=0.1
+   - market_access: 100 clienti via SEO/community senza paid ads=1.0, solo partnership=0.5, solo cold outreach=0.3, enterprise=0.0
+   - recurring_revenue: SaaS mensile=1.0, abbonamento annuale=0.8, pay_per_use frequente=0.6, one_shot=0.2
+   - scalability: 100->10.000 clienti senza costi proporzionali=1.0, richiede support umano=0.4, richiede team=0.0
 
 Rispondi SOLO con JSON:
-{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"margin_potential":0.0,"ai_buildability":0.0,"time_to_market_score":0.0,"mvp_cost_score":0.0,"recurring_revenue":0.0,"market_access":0.0,"scalability":0.0}}
+{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"mvp_cost_score":0.0,"time_to_market":0.0,"ai_buildability":0.0,"margin_potential":0.0,"market_access":0.0,"recurring_revenue":0.0,"scalability":0.0}}
 SOLO JSON."""
 
 
 def feasibility_calculate_score(analysis):
+    """
+    Scoring BOS v2.0 con scala non-lineare (^1.5) per evitare clustering alto.
+    Distribuzione risultante: 0.9 grezzo -> 0.85, 0.7 -> 0.59, 0.5 -> 0.35, 0.3 -> 0.16
+    """
     if not analysis:
         return 0.0
-    scores = []
-    margin = analysis.get("margin", {})
-    margin_pct = float(margin.get("margin_percentage_realistic", 0))
-    scores.append(min(1.0, max(0.0, margin_pct / 80)) * 0.30)
 
-    timeline = analysis.get("timeline", {})
-    weeks_to_rev = float(timeline.get("weeks_to_revenue", 52))
-    scores.append(max(0.0, 1.0 - (weeks_to_rev / 24)) * 0.20)
+    bos = analysis.get("bos_feasibility", {})
+    params = [
+        ("mvp_cost_score", 0.20),
+        ("time_to_market", 0.15),
+        ("ai_buildability", 0.15),
+        ("margin_potential", 0.20),
+        ("market_access", 0.15),
+        ("recurring_revenue", 0.10),
+        ("scalability", 0.05),
+    ]
 
-    costs = analysis.get("mvp_cost", {})
-    monthly_cost = float(costs.get("total_monthly_cost_eur", 1000))
-    scores.append(max(0.0, 1.0 - (monthly_cost / 200)) * 0.20)
+    raw_score = 0.0
+    for key, weight in params:
+        val = float(bos.get(key, 0.0))
+        raw_score += max(0.0, min(1.0, val)) * weight
 
-    competition = analysis.get("competition", {})
-    comp = float(competition.get("competition_score", 0.5))
-    scores.append((1.0 - comp) * 0.15)
-
+    # Moltiplicatore decisione
     rec = analysis.get("recommendation", {})
-    confidence = float(rec.get("confidence", 0.5))
     decision = rec.get("decision", "NO_GO")
-    decision_mult = 1.0 if decision == "GO" else 0.7 if decision == "CONDITIONAL_GO" else 0.3
-    scores.append((confidence * decision_mult) * 0.15)
+    confidence = float(rec.get("confidence", 0.5))
+    if decision == "NO_GO":
+        raw_score *= 0.5
+    elif decision == "CONDITIONAL_GO":
+        raw_score *= max(0.7, confidence)
 
-    return round(min(1.0, max(0.0, sum(scores))), 4)
+    # Scala non-lineare: penalizza mediocri, premia eccellenti
+    final_score = raw_score ** 1.5
+    return round(max(0.0, min(1.0, final_score)), 4)
 
 
 def run_feasibility_engine(solution_id=None, notify=True):
@@ -1218,7 +1323,8 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
     try:
         query = supabase.table("solutions").select(
-            "*, problems(title, description, sector, who_is_affected, why_it_matters, weighted_score)"
+            "*, problems(title, description, sector, who_is_affected, why_it_matters, "
+            "weighted_score, target_customer, target_geography, pain_intensity, evidence, why_now)"
         )
         if solution_id:
             query = query.eq("id", solution_id)
@@ -1269,10 +1375,22 @@ def run_feasibility_engine(solution_id=None, notify=True):
             f"SOLUZIONE: {title}\n"
             f"Descrizione: {sol.get('description', '')}\n"
             f"Approccio: {approach_text}\n"
-            f"Settore: {sector} / {sol.get('sub_sector', '')}\n\n"
+            f"Settore: {sector} / {sol.get('sub_sector', '')}\n"
+            f"Value Proposition: {sol.get('value_proposition', '')}\n"
+            f"Customer Segment: {sol.get('customer_segment', '')}\n"
+            f"Revenue Model: {sol.get('revenue_model', '')}\n"
+            f"Price Point: {sol.get('price_point', '')}\n"
+            f"Distribution Channel: {sol.get('distribution_channel', '')}\n"
+            f"MVP Build Time: {sol.get('mvp_build_time', '')} giorni\n"
+            f"MVP Cost EUR: {sol.get('mvp_cost_eur', '')} EUR\n"
+            f"Unfair Advantage: {sol.get('unfair_advantage', '')}\n"
+            f"Competitive Gap: {sol.get('competitive_gap', '')}\n\n"
             f"PROBLEMA: {problem.get('title', '')}\n"
-            f"Descrizione: {problem.get('description', '')}\n"
-            f"Chi e' colpito: {problem.get('who_is_affected', '')}\n"
+            f"Target Customer: {problem.get('target_customer', problem.get('who_is_affected', ''))}\n"
+            f"Target Geography: {problem.get('target_geography', '')}\n"
+            f"Pain Intensity: {problem.get('pain_intensity', '')}/5\n"
+            f"Evidence: {problem.get('evidence', '')}\n"
+            f"Why Now: {problem.get('why_now', '')}\n"
             f"Score problema: {problem.get('weighted_score', '')}\n\n"
             f"SCORE SA: Feasibility={scores.get('feasibility_score', 'N/A')} Impact={scores.get('impact_score', 'N/A')} Complexity={scores.get('complexity', 'N/A')}\n"
         )
@@ -1381,9 +1499,9 @@ BOS_SQ_WEIGHTS = {
 }
 
 BOS_FEAS_WEIGHTS = {
-    "margin_potential": 0.25, "ai_buildability": 0.20, "time_to_market_score": 0.15,
-    "mvp_cost_score": 0.15, "recurring_revenue": 0.10, "market_access": 0.10,
-    "scalability": 0.05,
+    "mvp_cost_score": 0.20, "time_to_market": 0.15, "ai_buildability": 0.15,
+    "margin_potential": 0.20, "market_access": 0.15,
+    "recurring_revenue": 0.10, "scalability": 0.05,
 }
 
 BOS_PARAM_NAMES = {
@@ -1391,9 +1509,9 @@ BOS_PARAM_NAMES = {
     "sq_uniqueness": "Unicita", "sq_moat_potential": "Difendibilita",
     "sq_value_multiplier": "Valore/prezzo", "sq_simplicity": "Semplicita",
     "sq_revenue_clarity": "Chiarezza revenue", "sq_ai_nativeness": "AI-nativa",
-    "fe_margin_potential": "Potenziale margine", "fe_ai_buildability": "Costruibile con AI",
-    "fe_time_to_market_score": "Velocita lancio", "fe_mvp_cost_score": "Costo MVP",
-    "fe_recurring_revenue": "Revenue ricorrente", "fe_market_access": "Accesso mercato",
+    "fe_mvp_cost_score": "Costo MVP", "fe_time_to_market": "Velocita lancio",
+    "fe_ai_buildability": "Costruibile con AI", "fe_margin_potential": "Potenziale margine",
+    "fe_market_access": "Accesso mercato", "fe_recurring_revenue": "Revenue ricorrente",
     "fe_scalability": "Scalabilita",
 }
 
@@ -1452,8 +1570,9 @@ def calculate_bos(solution_id):
         feas_details[param] = round(value, 4)
         feasibility_score += value * weight
 
-    bos = round(problem_quality * 0.30 + solution_quality * 0.30 + feasibility_score * 0.40, 4)
-    bos = min(1.0, max(0.0, bos))
+    bos_raw = problem_quality * 0.30 + solution_quality * 0.30 + feasibility_score * 0.40
+    # Scala non-lineare: penalizza mediocri, premia eccellenti (^1.3 sul BOS composito)
+    bos = round(min(1.0, max(0.0, bos_raw)) ** 1.3, 4)
 
     # Soglia dinamica da DB: >= soglia_bos → AUTO-GO (notifica Mirco), altrimenti ARCHIVE
     thresholds = get_pipeline_thresholds()
