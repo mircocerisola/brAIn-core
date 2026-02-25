@@ -1873,7 +1873,7 @@ def enqueue_bos_action(problem_id, solution_id, problem_title, sol_title, sol_de
         logger.error(f"[BOS ACTION] enqueue error: {e}")
         return
 
-    # Notifica Mirco con formato speciale BOS — solo il messaggio, lui risponde si/no/dettagli
+    # Notifica Mirco con inline keyboard — Fix 3
     sep = "\u2501" * 15
     desc_2lines = "\n".join((sol_desc or "Descrizione non disponibile").split("\n")[:2])[:200]
     msg = (
@@ -1882,10 +1882,28 @@ def enqueue_bos_action(problem_id, solution_id, problem_title, sol_title, sol_de
         f"\U0001f3af BOS PRONTO \u2014 {problem_title[:60]}\n"
         f"Score: {bos_score:.2f}/1 | Soluzione: {sol_title[:50]}\n"
         f"{desc_2lines}\n"
-        f"{sep}\n"
-        f"\u2705 Avvia esecuzione  |  \u274c Scarta  |  \U0001f50d Dettagli"
+        f"{sep}"
     )
-    notify_telegram(msg, level="critical", source="pipeline")
+    bos_reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\u2705 Approva", "callback_data": f"bos_approve:{solution_id}:{action_db_id}"},
+            {"text": "\u274c Rifiuta", "callback_data": f"bos_reject:{solution_id}:{action_db_id}"},
+            {"text": "\U0001f50d Dettagli", "callback_data": f"bos_detail:{action_db_id}"},
+        ]]
+    }
+    chat_id_direct = get_telegram_chat_id()
+    if chat_id_direct and TELEGRAM_BOT_TOKEN:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id_direct, "text": msg, "reply_markup": bos_reply_markup},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.error(f"[BOS ACTION] sendMessage error: {e}")
+            notify_telegram(msg, level="critical", source="pipeline")
+    else:
+        notify_telegram(msg, level="critical", source="pipeline")
 
     # Informa il Command Center di caricare questa azione come current_action
     if COMMAND_CENTER_URL and action_db_id:
@@ -3118,23 +3136,19 @@ def run_finance_agent(target_date=None):
 # ============================================================
 
 def generate_daily_report():
-    """Report giornaliero — italiano, solo EUR, formato con ━ separatori."""
+    """Report giornaliero — redesign Fix 4. Box ╔══╗, costi per agente, pipeline, scanner, errori, pulsanti."""
     logger.info("Generating daily report...")
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     day_start = f"{today}T00:00:00+00:00"
 
-    # Data in italiano (es. "25 feb 2026")
     MESI_IT = {1:"gen",2:"feb",3:"mar",4:"apr",5:"mag",6:"giu",
                7:"lug",8:"ago",9:"set",10:"ott",11:"nov",12:"dic"}
     data_it = f"{now.day} {MESI_IT[now.month]} {now.year}"
 
-    SEP = "━━━━━━━━━━━━━━━━━━━━"
-
     def _shorten(title, max_words=6):
-        """Tronca titolo a max_words parole italiane."""
         words = title.split()
-        return " ".join(words[:max_words]) + ("…" if len(words) > max_words else "")
+        return " ".join(words[:max_words]) + ("\u2026" if len(words) > max_words else "")
 
     # --- DATI ---
     try:
@@ -3146,8 +3160,7 @@ def generate_daily_report():
 
     try:
         problems = supabase.table("problems").select(
-            "id, title, weighted_score, sector").eq(
-            "status_detail", "active").gte("created_at", day_start).execute()
+            "id, title, weighted_score, sector").gte("created_at", day_start).execute()
         problem_count = len(problems.data or [])
         problem_data = problems.data or []
     except:
@@ -3156,8 +3169,7 @@ def generate_daily_report():
 
     try:
         solutions = supabase.table("solutions").select(
-            "id, title, bos_score, bos_details").eq(
-            "status_detail", "active").gte("created_at", day_start).execute()
+            "id, title, bos_score, bos_details").gte("created_at", day_start).execute()
         solution_count = len(solutions.data or [])
         solution_data = solutions.data or []
     except:
@@ -3169,47 +3181,54 @@ def generate_daily_report():
     daily_costs = finance_get_daily_costs(today)
     usd_to_eur = finance_get_usd_to_eur()
     cost_eur = 0.0
+    cost_by_agent = {}
+    calls_by_agent = {}
     if daily_costs:
         cost_eur = round(daily_costs["total_cost_usd"] * usd_to_eur, 2)
+        cost_by_agent = {k: round(v * usd_to_eur, 4) for k, v in (daily_costs.get("cost_by_agent") or {}).items()}
+        calls_by_agent = daily_costs.get("calls_by_agent") or {}
 
-    # --- COMPOSIZIONE ---
+    # Errori ultime 24h
+    try:
+        err_res = supabase.table("agent_logs").select("agent_id,error").eq(
+            "status", "error").gte("created_at", day_start).limit(5).execute()
+        errors = err_res.data or []
+    except:
+        errors = []
+
+    # --- COMPOSIZIONE ╔══╗ ---
+    NUMERI = ["\u2460", "\u2461", "\u2462"]
     lines = [
-        SEP,
-        f"📋 REPORT GIORNALIERO — {data_it}",
-        SEP,
-        "",
-        "📡 ATTIVITÀ",
-        f"- Scansioni: {scan_count} | Problemi trovati: {problem_count}",
-        f"- Soluzioni generate: {solution_count} | BOS calcolati: {bos_count}",
-        f"- Costo giornata: €{cost_eur:.2f}",
+        f"\u2554\u2550\u2550 REPORT {data_it} \u2550\u2550\u2557",
     ]
 
-    # Top 3 problemi
+    # Sezione costi
+    lines.append(f"\U0001f4b0 Costi: \u20ac{cost_eur:.2f}")
+    sorted_agents = sorted(cost_by_agent.items(), key=lambda x: x[1], reverse=True)
+    for i, (agent, eur) in enumerate(sorted_agents[:5]):
+        calls = calls_by_agent.get(agent, 0)
+        prefix = "\u2514" if i == len(sorted_agents[:5]) - 1 else "\u251c"
+        lines.append(f"  {prefix} {agent}: \u20ac{eur:.4f} ({calls} call)")
+    if not cost_by_agent:
+        lines.append("  \u2514 Nessun costo registrato")
+
+    # Sezione scanner
+    lines.append(f"\n\U0001f50d Scanner: {scan_count} scansioni | {problem_count} problemi")
     if problem_data:
-        top_problems = sorted(
-            problem_data,
-            key=lambda x: float(x.get("weighted_score", 0) or 0),
-            reverse=True
-        )[:3]
-        NUMERI = ["①", "②", "③"]
-        lines.append("")
-        lines.append("🔝 PROBLEMI TOP")
+        top_problems = sorted(problem_data, key=lambda x: float(x.get("weighted_score", 0) or 0), reverse=True)[:3]
         for i, p in enumerate(top_problems):
             score = float(p.get("weighted_score", 0) or 0)
-            sector = (p.get("sector") or "?").split("/")[0].strip()[:12]
-            title = _shorten(p.get("title", "?"))
-            lines.append(f"{NUMERI[i]} {score:.2f} · {sector} · {title}")
+            sector = (p.get("sector") or "?").split("/")[0].strip()[:10]
+            title = _shorten(p.get("title", "?"), 5)
+            lines.append(f"  {NUMERI[i]} {score:.2f} \u00b7 {sector} \u00b7 {title}")
 
-    # Top 3 soluzioni per BOS
+    # Sezione pipeline
+    lines.append(f"\n\U0001f3af Pipeline: {solution_count} soluzioni | {bos_count} BOS calcolati")
     top_solutions = sorted(
         [s for s in solution_data if s.get("bos_score") is not None],
-        key=lambda x: float(x.get("bos_score", 0) or 0),
-        reverse=True
+        key=lambda x: float(x.get("bos_score", 0) or 0), reverse=True
     )[:3]
     if top_solutions:
-        NUMERI = ["①", "②", "③"]
-        lines.append("")
-        lines.append("🎯 SOLUZIONI TOP")
         for i, s in enumerate(top_solutions):
             bos = float(s.get("bos_score", 0) or 0)
             details = s.get("bos_details", {})
@@ -3219,29 +3238,43 @@ def generate_daily_report():
                 except:
                     details = {}
             verdict = details.get("verdict", "?")
-            title = _shorten(s.get("title", "?"))
-            lines.append(f"{NUMERI[i]} {bos:.2f} · {verdict} · {title}")
-
-    # Obiettivo settimanale BOS
-    bos_target = check_bos_weekly_target()
-    lines.append("")
-    lines.append("📊 OBIETTIVO SETTIMANALE")
-    if bos_target:
-        thresholds = get_pipeline_thresholds()
-        soglia = thresholds.get("bos", PIPELINE_THRESHOLDS["bos"])
-        above = bos_target["above_threshold"]
-        total = bos_target["total_bos"]
-        pct = bos_target["pct_above"]
-        avg = bos_target["avg_bos"]
-        lines.append(f"BOS sopra soglia: {above}/{total} ({pct}% · target: 10%)")
-        lines.append(f"Media BOS: {avg}")
+            title = _shorten(s.get("title", "?"), 5)
+            lines.append(f"  {NUMERI[i]} {bos:.2f} \u00b7 {verdict} \u00b7 {title}")
     else:
-        lines.append("Nessun BOS questa settimana")
+        lines.append("  Nessun BOS oggi")
 
-    lines.append(SEP)
+    # Sezione errori (opzionale)
+    if errors:
+        lines.append(f"\n\u26a0\ufe0f Errori ({len(errors)}):")
+        for e in errors[:3]:
+            err_text = (e.get("error") or "?")[:60]
+            lines.append(f"  \u2022 {e.get('agent_id','?')}: {err_text}")
+
+    lines.append("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d")
 
     report = "\n".join(lines)
-    notify_telegram(report)
+
+    # Pulsanti inline — Fix 4
+    report_reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\U0001f4ca Report fonti", "callback_data": "daily_report_fonti"},
+            {"text": "\U0001f4b0 Dettaglio costi", "callback_data": "daily_report_costi"},
+            {"text": "\u2753 Problemi", "callback_data": "daily_report_problemi"},
+        ]]
+    }
+    chat_id_report = get_telegram_chat_id()
+    if chat_id_report and TELEGRAM_BOT_TOKEN:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id_report, "text": report, "reply_markup": report_reply_markup},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.error(f"[DAILY_REPORT] Telegram error: {e}")
+            notify_telegram(report)
+    else:
+        notify_telegram(report)
 
     log_to_supabase("daily_report", "generate", 0,
         f"Report {today}", report[:500], "none")
@@ -3680,7 +3713,7 @@ def run_sources_cleanup_weekly():
                         "status": "archived",
                         "notes": f"Archiviata automaticamente {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: score {score:.2f} (soglia {threshold_used:.2f})",
                     }).eq("id", s["id"]).execute()
-                    archived_sources.append({"name": s["name"], "score": round(score, 3)})
+                    archived_sources.append({"id": s["id"], "name": s["name"], "score": round(score, 3)})
                     logger.info(f"[CLEANUP] Archiviata: {s['name']} (score {score:.2f})")
                 except Exception as e:
                     logger.warning(f"[CLEANUP] Errore archiviazione {s['name']}: {e}")
@@ -3701,13 +3734,36 @@ def run_sources_cleanup_weekly():
     except Exception as e:
         logger.warning(f"[CLEANUP] Errore salvataggio source_thresholds: {e}")
 
-    # Notifiche a Mirco
+    # Notifiche a Mirco — Fix 3: pulsanti Riattiva/Ok
     SEP = "━━━━━━━━━━━━━━━"
     if archived_sources:
-        lines = [f"📦 Pulizia fonti settimanale: {len(archived_sources)} archiviate, soglia: {dynamic_threshold:.2f if dynamic_threshold else 'N/A'}"]
+        lines = [f"\U0001f4e6 Pulizia fonti settimanale: {len(archived_sources)} archiviate, soglia: {dynamic_threshold:.2f if dynamic_threshold else 'N/A'}"]
         for a in archived_sources:
             lines.append(f"- {a['name']} (score {a['score']:.2f})")
-        notify_telegram("\n".join(lines))
+        src_msg = "\n".join(lines)
+        # Pulsanti Riattiva (max 3) + Ok
+        src_keyboard_rows = []
+        for a in archived_sources[:3]:
+            src_keyboard_rows.append([
+                {"text": f"\U0001f504 Riattiva: {a['name'][:20]}", "callback_data": f"source_reactivate:{a['id']}"},
+            ])
+        src_keyboard_rows.append([
+            {"text": "\u2705 Ok, capito", "callback_data": "source_archive_ok"},
+        ])
+        src_reply_markup = {"inline_keyboard": src_keyboard_rows}
+        chat_id_src = get_telegram_chat_id()
+        if chat_id_src and TELEGRAM_BOT_TOKEN:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id_src, "text": src_msg, "reply_markup": src_reply_markup},
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"[CLEANUP] notify error: {e}")
+                notify_telegram(src_msg)
+        else:
+            notify_telegram(src_msg)
 
     # Report settimanale soglie
     dt_str = f"{dynamic_threshold:.2f}" if dynamic_threshold is not None else "N/A"
@@ -3963,6 +4019,8 @@ def run_spec_generator(project_id):
         project = proj.data[0]
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+    logger.info(f"[SPEC] Generando SPEC per progetto: {project.get('name', 'N/A')!r} (id={project_id})")
 
     solution_id = project.get("bos_id")
     github_repo = project.get("github_repo", "")
@@ -4296,9 +4354,12 @@ def generate_build_prompt(project_id):
     service_name = f"{slug}-mvp" if slug else "mvp"
     artifact_tag = f"europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/{service_name}:latest"
 
-    prompt = f"""Leggi il file SPEC.md nel repo GitHub: https://github.com/{github_repo}/blob/main/SPEC.md
+    prompt = f"""Esegui con --dangerously-skip-permissions. Non chiedere autorizzazione per nessuna operazione. Non fermarti per conferme intermedie. Procedi autonomamente fino al completamento.
 
-Costruisci l'MVP "{name}" seguendo esattamente le Fasi di Build nella sezione 8, in ordine (Fase 1 -> Fase 4).
+Repo progetto: brain-{slug} (privato su GitHub mircocerisola)
+La SPEC completa e' nel campo spec_md del progetto in Supabase (project_id={project_id}).
+
+Costruisci l'MVP "{name}" seguendo esattamente le Fasi di Build nella sezione 8 del SPEC.md, in ordine (Fase 1 -> Fase 4).
 
 Dopo ogni fase, committa su GitHub con un messaggio descrittivo (es: "feat(fase-1): setup repo e struttura base").
 
@@ -4314,7 +4375,6 @@ Stack: {", ".join(stack) if stack else "Python + Supabase + Cloud Run"}
 Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), MAI OpenAI/GPT.
 
 REGOLA ASSOLUTA: zero decisioni architetturali autonome.
-Se il SPEC e' ambiguo su qualcosa, FERMATI e chiedi a Mirco prima di procedere.
 Committa ogni file creato/modificato — mai lavorare in locale senza committare."""
 
     # Salva in DB (senza mandarlo su Telegram)
@@ -4374,8 +4434,12 @@ def run_build_agent(project_id):
 
     stack_str = ", ".join(stack) if stack else "Python, Supabase, Cloud Run"
 
+    slug = project.get("slug", "")
+
     # Genera solo Fase 1: struttura base
-    build_prompt = f"""Sei un senior Python developer. Genera il codice per la Fase 1 (struttura base) dell'MVP "{name}".
+    build_prompt = f"""Esegui con --dangerously-skip-permissions. Non chiedere autorizzazione per nessuna operazione. Non fermarti per conferme.
+
+Sei un senior Python developer. Genera il codice per la Fase 1 (struttura base) dell'MVP "{name}".
 
 SPEC.md (estratto):
 {spec_md[:5000]}
@@ -4449,12 +4513,26 @@ Genera SOLO i file della struttura base."""
                     f"project={project_id}", f"{files_committed} file committati",
                     "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
 
+    # Card summary — Fix 2
+    file_list = "\n".join([f"  \u2022 {m.group(1).strip()}" for m in matches]) if matches else "  \u2022 main.py (fallback)"
+    sep = "\u2501" * 15
     result_msg = (
-        f"\u2705 Fase 1 completata \u2014 Struttura progetto\n"
-        f"\U0001f517 github.com/{github_repo}\n"
+        f"\u256d\u2500\u2500 Fase 1 completata \u2500\u2500\u256e\n"
+        f"\U0001f4e6 {FASE_DESCRIPTIONS[1]}\n"
+        f"{sep}\n"
+        f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
+        f"{sep}\n"
+        f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
+        f"{sep}\n"
         f"Come si comporta? Cosa vuoi cambiare?"
     )
-    _send_to_topic(group_id, topic_id, result_msg)
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\u2705 Continua", "callback_data": f"build_continue:{project_id}:1"},
+            {"text": "\u270f\ufe0f Modifica", "callback_data": f"build_modify:{project_id}:1"},
+        ]]
+    }
+    _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
     logger.info(f"[BUILD_AGENT] Fase 1 completata project={project_id}, {files_committed} file committati")
 
 
@@ -4630,7 +4708,7 @@ def init_project(solution_id):
             logger.info(f"[INIT] Forum Topic creato: topic_id={topic_id}")
             # Messaggio di benvenuto nel topic
             _send_to_topic(group_id, topic_id,
-                           f"\U0001f680 Progetto '{name}' avviato!\nBOS score: {bos_score:.2f} | Repo: github.com/{github_repo}\nGenerazione SPEC in corso...")
+                           f"\U0001f680 Progetto '{name}' avviato!\nBOS score: {bos_score:.2f}\nGenerazione SPEC in corso...")
     else:
         logger.info("[INIT] telegram_group_id non configurato, Forum Topic non creato")
 
@@ -4785,10 +4863,36 @@ Analizza e dai il verdetto."""
             f"{sep}"
         )
 
+        # Inline keyboard in base al verdict — Fix 3
+        verdict_upper = verdict_text.upper()
+        if "SCALE" in verdict_upper:
+            val_keyboard = [
+                {"text": "\U0001f680 Procedi (SCALE)", "callback_data": f"val_proceed:{project_id}"},
+                {"text": "\u23f8\ufe0f Aspetta", "callback_data": f"val_wait:{project_id}"},
+            ]
+        elif "PIVOT" in verdict_upper:
+            val_keyboard = [
+                {"text": "\U0001f4a1 Discuti (PIVOT)", "callback_data": f"val_discuss:{project_id}"},
+                {"text": "\u23f8\ufe0f Aspetta", "callback_data": f"val_wait:{project_id}"},
+            ]
+        else:  # KILL
+            val_keyboard = [
+                {"text": "\U0001f6d1 Procedi (KILL)", "callback_data": f"val_proceed:{project_id}"},
+                {"text": "\U0001f4a1 Discuti", "callback_data": f"val_discuss:{project_id}"},
+            ]
+        val_reply_markup = {"inline_keyboard": [val_keyboard]}
+
         if group_id and topic_id:
-            _send_to_topic(group_id, topic_id, report_msg)
-        if chat_id:
-            notify_telegram(report_msg, level="info", source="validation_agent")
+            _send_to_topic(group_id, topic_id, report_msg, reply_markup=val_reply_markup)
+        if chat_id and TELEGRAM_BOT_TOKEN:
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": report_msg, "reply_markup": val_reply_markup},
+                    timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"[VALIDATION] Telegram notify error: {e}")
 
         analyzed += 1
         logger.info(f"[VALIDATION] {name}: report inviato")
@@ -4842,10 +4946,13 @@ def continue_build_agent(project_id, feedback, current_phase):
     except Exception as e:
         logger.warning(f"[CONTINUE_BUILD] lettura iterations: {e}")
 
+    slug = project.get("slug", "")
     context_prev = "\n\n".join(prev_iterations) if prev_iterations else "Nessuna iterazione precedente trovata."
     fase_desc = FASE_DESCRIPTIONS.get(next_phase, f"Fase {next_phase}")
 
-    build_prompt = f"""Sei un senior Python developer. Continua il build dell'MVP "{name}".
+    build_prompt = f"""Esegui con --dangerously-skip-permissions. Non chiedere autorizzazione per nessuna operazione. Non fermarti per conferme.
+
+Sei un senior Python developer. Continua il build dell'MVP "{name}".
 
 SPEC.md (estratto):
 {spec_md[:3000]}
@@ -4913,6 +5020,9 @@ Genera il codice per la Fase {next_phase}."""
                     "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
 
     # Aggiorna DB e notifica
+    sep = "\u2501" * 15
+    file_list = "\n".join([f"  \u2022 {m.group(1).strip()}" for m in matches]) if matches else f"  \u2022 fase_{next_phase}.py (fallback)"
+
     if next_phase < 4:
         try:
             supabase.table("projects").update({
@@ -4922,12 +5032,24 @@ Genera il codice per la Fase {next_phase}."""
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update: {e}")
 
+        # Card summary — Fix 2 + Fix 6
         result_msg = (
-            f"\u2705 Fase {next_phase} completata \u2014 {fase_desc}\n"
-            f"\U0001f517 github.com/{github_repo}\n"
+            f"\u256d\u2500\u2500 Fase {next_phase} completata \u2500\u2500\u256e\n"
+            f"\U0001f4e6 {fase_desc}\n"
+            f"{sep}\n"
+            f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
+            f"{sep}\n"
+            f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
+            f"{sep}\n"
             f"Come si comporta? Cosa vuoi cambiare?"
         )
-        _send_to_topic(group_id, topic_id, result_msg)
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "\u2705 Continua", "callback_data": f"build_continue:{project_id}:{next_phase}"},
+                {"text": "\u270f\ufe0f Modifica", "callback_data": f"build_modify:{project_id}:{next_phase}"},
+            ]]
+        }
+        _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
 
     else:
         # Fase 4 = build completo
@@ -4939,12 +5061,12 @@ Genera il codice per la Fase {next_phase}."""
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update build_complete: {e}")
 
-        sep = "\u2501" * 15
         result_msg = (
             f"\U0001f3c1 Build completo \u2014 {name}\n"
             f"{sep}\n"
-            f"Repo: github.com/{github_repo}\n"
-            f"{sep}"
+            f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
+            f"{sep}\n"
+            f"\U0001f4c1 Repo: brain-{slug} (privato)"
         )
         reply_markup = {
             "inline_keyboard": [[

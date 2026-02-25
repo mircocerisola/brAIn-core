@@ -1870,7 +1870,7 @@ def handle_launch(project_id, chat_id, thread_id=None):
     """Aggiorna status a launch_approved, notifica nel topic, avvia validation in background."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     try:
-        proj = supabase.table("projects").select("name,github_repo").eq("id", project_id).execute()
+        proj = supabase.table("projects").select("name,github_repo,slug").eq("id", project_id).execute()
         project = proj.data[0] if proj.data else {}
         name = project.get("name", f"Progetto {project_id}")
         github_repo = project.get("github_repo", "")
@@ -1883,10 +1883,11 @@ def handle_launch(project_id, chat_id, thread_id=None):
     except Exception as e:
         logger.warning(f"[LAUNCH] DB update: {e}")
 
-    # Notifica nel topic
+    # Notifica nel topic — Fix 6: no link GitHub 404
+    slug = project.get("slug", github_repo.replace("mircocerisola/", "") if github_repo else "")
     msg = (
         f"\U0001f680 {name} approvato per il lancio!\n"
-        f"Repo: github.com/{github_repo}\n"
+        f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
         f"Avvia deploy manualmente su Cloud Run."
     )
     if token:
@@ -2208,21 +2209,187 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    # Callback legacy (spec_build, spec_read) mantenuti per compatibilità
+    # Build continue/modify (Fix 2)
+    elif data.startswith("build_continue:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        current_phase = int(parts[2]) if len(parts) > 2 else 1
+        await query.answer("Avvio fase successiva...")
+
+        def _continue_build_auto():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/project/continue_build",
+                    json={"project_id": project_id, "feedback": "ok, procedi alla fase successiva", "phase": current_phase},
+                    headers=headers, timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"[BUILD_CONTINUE_CB] {e}")
+
+        if AGENTS_RUNNER_URL:
+            threading.Thread(target=_continue_build_auto, daemon=True).start()
+
+    elif data.startswith("build_modify:"):
+        await query.answer("Scrivi il feedback nel topic del progetto.")
+
+    # BOS approval inline (Fix 3)
+    elif data.startswith("bos_approve:") or data.startswith("bos_reject:"):
+        parts = data.split(":")
+        approved = data.startswith("bos_approve:")
+        action_db_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        await query.answer("Approvato!" if approved else "Rifiutato!")
+
+        try:
+            action = None
+            if action_db_id:
+                ar = supabase.table(ACTION_QUEUE_TABLE).select("*").eq("id", action_db_id).execute()
+                action = ar.data[0] if ar.data else None
+            if not action:
+                action = get_next_action(chat_id)
+            if action:
+                payload = action.get("payload") or {}
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except:
+                        payload = {}
+                complete_action(action["id"], "completed" if approved else "rejected")
+                current = _current_action.get(chat_id)
+                if current and current.get("id") == action["id"]:
+                    del _current_action[chat_id]
+                result_text = _execute_action("approve_bos", payload, approved)
+                token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if token and result_text:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": result_text},
+                        timeout=10,
+                    )
+        except Exception as e:
+            logger.error(f"[BOS_CALLBACK] {e}")
+
+    elif data.startswith("bos_detail:"):
+        action_db_id = int(data.split(":")[1])
+        await query.answer()
+        try:
+            ar = supabase.table(ACTION_QUEUE_TABLE).select("*").eq("id", action_db_id).execute()
+            action = ar.data[0] if ar.data else None
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if action and token:
+                detail = action.get("description", "Nessun dettaglio.")
+                http_requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": detail[:4000]},
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.error(f"[BOS_DETAIL] {e}")
+
+    # Validation callbacks SCALE/PIVOT/KILL (Fix 3)
+    elif data.startswith("val_proceed:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Procedendo...")
+        try:
+            proj = supabase.table("projects").select("status,name").eq("id", project_id).execute()
+            if proj.data:
+                current_status = proj.data[0].get("status", "")
+                new_status = "scaling" if current_status != "killed" else "killed"
+                supabase.table("projects").update({"status": new_status}).eq("id", project_id).execute()
+                name = proj.data[0].get("name", f"Progetto {project_id}")
+                token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if token:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": f"✅ {name}: status aggiornato a '{new_status}'."},
+                        timeout=10,
+                    )
+        except Exception as e:
+            logger.error(f"[VAL_PROCEED] {e}")
+
+    elif data.startswith("val_wait:"):
+        await query.answer("Ok, continuo a monitorare.")
+
+    elif data.startswith("val_discuss:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Apri il topic del progetto per discutere.")
+
+    # Source callbacks (Fix 3)
+    elif data.startswith("source_reactivate:"):
+        source_id = int(data.split(":")[1])
+        await query.answer("Riattivazione in corso...")
+        try:
+            supabase.table("scan_sources").update({"status": "active", "notes": "Riattivata manualmente da Mirco"}).eq("id", source_id).execute()
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"✅ Fonte {source_id} riattivata."},
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.error(f"[SOURCE_REACTIVATE] {e}")
+
+    elif data == "source_archive_ok":
+        await query.answer("Ok!")
+
+    # Daily report callbacks (Fix 4)
+    elif data == "daily_report_fonti":
+        await query.answer()
+        try:
+            src_res = supabase.table("scan_sources").select("id,name,status,avg_problem_score,problems_found").execute()
+            all_src = src_res.data or []
+            active = [s for s in all_src if s.get("status") == "active"]
+            archived = [s for s in all_src if s.get("status") == "archived"]
+            top_active = sorted(active, key=lambda x: float(x.get("avg_problem_score") or 0), reverse=True)[:5]
+            lines = [f"📊 FONTI: {len(active)} attive / {len(archived)} archiviate"]
+            for s in top_active:
+                lines.append(f"  • {s['name'][:30]} · score {float(s.get('avg_problem_score') or 0):.2f} · {s.get('problems_found', 0)} prob")
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=10)
+        except Exception as e:
+            logger.error(f"[DAILY_REPORT_FONTI] {e}")
+
+    elif data == "daily_report_costi":
+        await query.answer()
+        try:
+            cost_text = get_cost_report(7)
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": f"💰 Costi ultimi 7 giorni:\n{cost_text[:3000]}"}, timeout=10)
+        except Exception as e:
+            logger.error(f"[DAILY_REPORT_COSTI] {e}")
+
+    elif data == "daily_report_problemi":
+        await query.answer()
+        try:
+            prob_res = supabase.table("problems").select("id,title,weighted_score,status,sector").eq(
+                "status", "new").order("weighted_score", desc=True).limit(5).execute()
+            probs = prob_res.data or []
+            if probs:
+                lines = [f"❓ Problemi in attesa ({len(probs)}):"]
+                for p in probs:
+                    score = float(p.get("weighted_score") or 0)
+                    lines.append(f"  • [{score:.2f}] {p['title'][:50]}")
+            else:
+                lines = ["Nessun problema in attesa."]
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=10)
+        except Exception as e:
+            logger.error(f"[DAILY_REPORT_PROBLEMI] {e}")
+
+    # Callback legacy (spec_build) mantenuto per compatibilità
     elif data.startswith("spec_build:"):
         project_id = int(data.split(":")[1])
         await query.answer("Avvio build...")
         threading.Thread(
             target=build_approved_action,
-            args=(project_id, chat_id, thread_id),
-            daemon=True,
-        ).start()
-
-    elif data.startswith("spec_read:"):
-        project_id = int(data.split(":")[1])
-        await query.answer("Carico SPEC...")
-        threading.Thread(
-            target=send_spec_chunks,
             args=(project_id, chat_id, thread_id),
             daemon=True,
         ).start()
