@@ -20,8 +20,8 @@ from dotenv import load_dotenv
 import anthropic
 import requests as http_requests
 from supabase import create_client
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -1138,7 +1138,22 @@ def _execute_action(action_type, payload, approved):
                         supabase.table("problems").update({"status": "approved"}).eq("id", int(pid)).execute()
                     except:
                         pass
-                return f"BOS approvato. {result}\nProject Builder notificato. Procedo con la costruzione."
+                # Triggera Layer 3: init_project in background
+                if AGENTS_RUNNER_URL:
+                    def _trigger_init():
+                        try:
+                            oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                            headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                            http_requests.post(
+                                f"{AGENTS_RUNNER_URL}/project/init",
+                                json={"solution_id": sid},
+                                headers=headers,
+                                timeout=5,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[EXECUTE_ACTION] /project/init trigger error: {e}")
+                    threading.Thread(target=_trigger_init, daemon=True).start()
+                return f"BOS approvato. {result}\nAvvio Layer 3: spec, landing page, review in preparazione."
             elif not approved and sid:
                 try:
                     supabase.table("solutions").update({"status": "archived"}).eq("id", int(sid)).execute()
@@ -1724,6 +1739,167 @@ def github_commit_files(files, message):
     return True, committed
 
 
+# ---- LAYER 3: FORUM TOPICS + PROJECT MANAGEMENT ----
+
+def lookup_project_by_topic_id(thread_id):
+    """Cerca un progetto per topic_id nel DB. Ritorna il record o None."""
+    try:
+        result = supabase.table("projects").select("*").eq("topic_id", int(thread_id)).execute()
+        if result.data:
+            return result.data[0]
+    except Exception as e:
+        logger.warning(f"[TOPIC] lookup_project_by_topic_id({thread_id}): {e}")
+    return None
+
+
+def send_spec_chunks(project_id, target_chat_id, thread_id=None):
+    """Carica spec_md dal DB e lo invia in chunks (max 3800 chars ciascuno)."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return
+    try:
+        proj = supabase.table("projects").select("spec_md,name").eq("id", project_id).execute()
+        if not proj.data or not proj.data[0].get("spec_md"):
+            http_requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": target_chat_id, "text": "SPEC non ancora disponibile per questo progetto."},
+                timeout=10,
+            )
+            return
+        spec_md = proj.data[0]["spec_md"]
+        name = proj.data[0].get("name", "")
+        # Header
+        payload = {"chat_id": target_chat_id, "text": f"SPEC.md — {name}:"}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+        # Chunks
+        chunk_size = 3800
+        for i in range(0, len(spec_md), chunk_size):
+            chunk_payload = {"chat_id": target_chat_id, "text": spec_md[i:i + chunk_size]}
+            if thread_id:
+                chunk_payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=chunk_payload, timeout=10)
+    except Exception as e:
+        logger.error(f"[SPEC_CHUNKS] {e}")
+
+
+def build_approved_action(project_id, target_chat_id, thread_id=None):
+    """Esegue le azioni quando Mirco approva il build della SPEC."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    try:
+        # Aggiorna status
+        supabase.table("projects").update({"status": "build_approved"}).eq("id", project_id).execute()
+
+        # Notifica
+        confirm_payload = {"chat_id": target_chat_id, "text": "Build approvato. Generando prompt Claude Code..."}
+        if thread_id:
+            confirm_payload["message_thread_id"] = thread_id
+        if token:
+            http_requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=confirm_payload, timeout=10,
+            )
+
+        # Chiama agents_runner per generare build prompt
+        if AGENTS_RUNNER_URL:
+            oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+            headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+            http_requests.post(
+                f"{AGENTS_RUNNER_URL}/project/build_prompt",
+                json={"project_id": str(project_id)},
+                headers=headers,
+                timeout=10,
+            )
+    except Exception as e:
+        logger.error(f"[BUILD_APPROVED] {e}")
+
+
+async def handle_project_message(update, project):
+    """Handler per messaggi arrivati in un Forum Topic di progetto."""
+    msg = update.message.text or ""
+    chat_id = update.effective_chat.id
+    thread_id = update.message.message_thread_id
+    project_id = project["id"]
+    name = project.get("name", "")
+
+    # Controlla stato spec_edit
+    ctx = _session_context.get(chat_id, {})
+    if ctx.get("awaiting_spec_edit") == project_id:
+        _session_context[chat_id]["awaiting_spec_edit"] = None
+        await update.message.reply_text(f"Aggiornando SPEC per '{name}'...")
+        if AGENTS_RUNNER_URL:
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/spec/update",
+                    json={"project_id": str(project_id), "modification": msg},
+                    headers=headers,
+                    timeout=10,
+                )
+                await update.message.reply_text("Modifica avviata. Ti mando la nuova SPEC review.")
+            except Exception as e:
+                await update.message.reply_text(f"Errore: {e}")
+        return
+
+    # Risposta generica con contesto progetto
+    context_note = f"[Progetto: {name} | Status: {project.get('status')} | BOS: {project.get('bos_score', 0):.2f}]"
+    reply = clean_reply(ask_claude(f"{context_note}\n{msg}", chat_id=chat_id))
+    for i in range(0, len(reply), 4000):
+        await update.message.reply_text(reply[i:i + 4000])
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler per callback query dei pulsanti inline (spec review)."""
+    query = update.callback_query
+    if not query or not query.data:
+        return
+
+    data = query.data
+    chat_id = update.effective_chat.id
+    thread_id = query.message.message_thread_id if query.message else None
+
+    if data.startswith("spec_build:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio build...")
+        threading.Thread(
+            target=build_approved_action,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
+    elif data.startswith("spec_read:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Carico SPEC...")
+        threading.Thread(
+            target=send_spec_chunks,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
+    elif data.startswith("spec_edit:"):
+        project_id = int(data.split(":")[1])
+        await query.answer()
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_spec_edit"] = project_id
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {
+                "chat_id": chat_id,
+                "text": "Cosa vuoi modificare? (es: architettura, kpi, gtm, stack)",
+            }
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload, timeout=10,
+            )
+    else:
+        await query.answer()
+
+
 def _send_telegram_sync(chat_id, text):
     """Invia messaggio Telegram (sync, per thread background)."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -2008,6 +2184,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Traccia ultimo messaggio per notifiche intelligenti
     _last_mirco_message_time = time.time()
 
+    # ---- FORUM TOPIC ROUTING ----
+    thread_id = update.message.message_thread_id if update.message else None
+    if thread_id:
+        project = lookup_project_by_topic_id(thread_id)
+        if project:
+            await handle_project_message(update, project)
+            return
+
     if msg.strip().upper() == "STOP":
         await update.message.reply_text("STOP ricevuto. Tutto fermo.")
         return
@@ -2268,6 +2452,7 @@ async def main():
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
     tg_app.add_handler(CommandHandler("code", handle_code_command))
+    tg_app.add_handler(CallbackQueryHandler(handle_callback_query))
     tg_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     tg_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command_as_message))

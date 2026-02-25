@@ -3736,6 +3736,947 @@ def run_sources_cleanup_weekly():
 
 
 # ============================================================
+# LAYER 3: EXECUTION PIPELINE — init_project, spec, landing, build, validation
+# ============================================================
+
+import re as _re
+import base64 as _base64
+
+GITHUB_TOKEN_AR = os.getenv("GITHUB_TOKEN")
+GITHUB_API_BASE_AR = "https://api.github.com"
+GITHUB_OWNER_AR = "mircocerisola"
+
+
+def _github_project_api(method, repo, endpoint, data=None):
+    """GitHub API per un repo di progetto specifico."""
+    if not GITHUB_TOKEN_AR:
+        return None
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN_AR}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"{GITHUB_API_BASE_AR}/repos/{repo}{endpoint}"
+    try:
+        if method == "GET":
+            r = requests.get(url, headers=headers, timeout=30)
+        elif method == "PUT":
+            r = requests.put(url, headers=headers, json=data, timeout=30)
+        elif method == "POST":
+            r = requests.post(url, headers=headers, json=data, timeout=30)
+        else:
+            return None
+        if r.status_code in (200, 201):
+            return r.json()
+        logger.warning(f"[GITHUB_AR] {method} {repo}{endpoint} -> {r.status_code}: {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"[GITHUB_AR] {e}")
+        return None
+
+
+def _commit_to_project_repo(repo, path, content, message):
+    """Committa un file (crea o aggiorna) su un repo di progetto."""
+    content_b64 = _base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    existing = _github_project_api("GET", repo, f"/contents/{path}")
+    data = {"message": message, "content": content_b64}
+    if existing and "sha" in existing:
+        data["sha"] = existing["sha"]
+    result = _github_project_api("PUT", repo, f"/contents/{path}", data)
+    return result is not None
+
+
+def _create_github_repo(slug, name):
+    """Crea repo privato brain-[slug] tramite GitHub API."""
+    if not GITHUB_TOKEN_AR:
+        logger.warning("[INIT] GITHUB_TOKEN non disponibile")
+        return None
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN_AR}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    try:
+        r = requests.post(
+            f"{GITHUB_API_BASE_AR}/user/repos",
+            headers=headers,
+            json={
+                "name": f"brain-{slug}",
+                "private": True,
+                "description": f"brAIn Project: {name}",
+                "auto_init": True,
+            },
+            timeout=30,
+        )
+        if r.status_code in (200, 201):
+            data = r.json()
+            return data.get("full_name")
+        logger.warning(f"[INIT] GitHub repo creation -> {r.status_code}: {r.text[:200]}")
+        return None
+    except Exception as e:
+        logger.error(f"[INIT] GitHub repo error: {e}")
+        return None
+
+
+def _get_telegram_group_id():
+    """Legge telegram_group_id da org_config."""
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+        if r.data:
+            return json.loads(r.data[0]["value"])
+    except:
+        pass
+    return None
+
+
+def _create_forum_topic(group_id, name):
+    """Crea Forum Topic nel gruppo Telegram. Ritorna topic_id."""
+    if not TELEGRAM_BOT_TOKEN or not group_id:
+        return None
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createForumTopic",
+            json={"chat_id": group_id, "name": f"\U0001f3d7\ufe0f Cantiere {name}", "icon_color": 7322096},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("result", {}).get("message_thread_id")
+        logger.warning(f"[INIT] createForumTopic -> {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"[INIT] Forum topic error: {e}")
+    return None
+
+
+def _send_to_topic(group_id, topic_id, text, reply_markup=None):
+    """Invia messaggio nel Forum Topic del progetto."""
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    # Fallback a DM se group non configurato
+    chat_id = group_id if group_id else get_telegram_chat_id()
+    payload = {"chat_id": chat_id, "text": text}
+    if group_id and topic_id:
+        payload["message_thread_id"] = topic_id
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+    except Exception as e:
+        logger.error(f"[TG_TOPIC] {e}")
+
+
+def _slugify(text, max_len=20):
+    """Genera slug da testo: lowercase, trattini, max_len chars."""
+    slug = text.lower().strip()
+    slug = _re.sub(r"[^\w\s-]", "", slug)
+    slug = _re.sub(r"[\s_]+", "-", slug)
+    slug = _re.sub(r"-+", "-", slug).strip("-")
+    return slug[:max_len].rstrip("-")
+
+
+# ---- SPEC GENERATOR (inlined) ----
+
+SPEC_SYSTEM_PROMPT_AR = """Sei l'Architect di brAIn, un'organizzazione AI-native che costruisce prodotti con marginalita' alta.
+Genera un SPEC.md COMPLETO e OTTIMIZZATO PER AI CODING AGENTS (Claude Code).
+
+REGOLE:
+- Ogni fase di build: task ATOMICI con comandi copy-paste pronti
+- Nessuna ambiguita' tecnica: endpoint, schemi DB, variabili d'ambiente tutti espliciti
+- Stack: Python + Supabase + Google Cloud Run (sempre, salvo eccezioni giustificate)
+- Costo infrastruttura target: < 50 EUR/mese
+- Deploy target: Google Cloud Run europe-west3, Container Docker
+
+STRUTTURA OBBLIGATORIA (usa esattamente questi header):
+
+## 1. Sintesi del Progetto
+Una frase: cosa fa, per chi, perche' vale.
+
+## 2. Problema e Target Customer
+Target specifico (professione + eta' + contesto), geografia, frequenza problema, pain intensity.
+
+## 3. Soluzione Proposta
+Funzionalita' core MVP (massimo 3), value proposition in 2 righe, differenziatore chiave.
+
+## 4. Analisi Competitiva e Differenziazione
+Top 3 competitor con pricing, nostro vantaggio competitivo concreto.
+
+## 5. Architettura Tecnica e Stack
+Diagramma testuale del flusso dati, componenti, API utilizzate, schema DB (tabelle + colonne principali).
+
+## 6. KPI e Metriche di Successo
+KPI primario (con target settimana 4 e settimana 12), revenue target mese 3, criteri SCALE/PIVOT/KILL.
+
+## 7. Variabili d'Ambiente Necessarie
+Lista completa ENV VAR con descrizione (una per riga, formato KEY=descrizione).
+
+## 8. Fasi di Build MVP
+Fase 1: Setup repo e struttura base
+Fase 2: Core logic [nome funzionalita']
+Fase 3: Interfaccia utente / API
+Fase 4: Test, deploy Cloud Run, monitoraggio
+Ogni fase: lista task atomici, tempo stimato, comandi chiave.
+
+## 9. Go-To-Market — Primo Cliente
+Come acquisire il primo cliente pagante in 14 giorni. Canale specifico, messaggio, pricing iniziale.
+
+## 10. Roadmap Post-MVP
+3 iterazioni successive (settimane 4, 8, 12) con funzionalita' e ricavi target.
+
+DOPO LA SEZIONE 10, includi OBBLIGATORIAMENTE questo blocco (NON omettere, NON modificare i marker):
+
+<!-- JSON_SPEC:
+{
+  "stack": ["elenco", "tecnologie", "usate"],
+  "kpis": {
+    "primary": "nome KPI principale",
+    "target_week4": 0,
+    "target_week12": 0,
+    "revenue_target_month3_eur": 0
+  },
+  "mvp_build_time_days": 0,
+  "mvp_cost_eur": 0
+}
+:JSON_SPEC_END -->"""
+
+
+def run_spec_generator(project_id):
+    """Genera SPEC.md per il progetto. Salva in DB e committa su GitHub."""
+    start = time.time()
+    logger.info(f"[SPEC] Avvio per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+        solution_id = project.get("bos_id")
+        github_repo = project.get("github_repo", "")
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    solution = {}
+    problem = {}
+    feasibility_details = ""
+    bos_score = project.get("bos_score", 0) or 0
+
+    if solution_id:
+        try:
+            sol = supabase.table("solutions").select("*").eq("id", solution_id).execute()
+            if sol.data:
+                solution = sol.data[0]
+                problem_id = solution.get("problem_id")
+                if problem_id:
+                    prob = supabase.table("problems").select("*").eq("id", problem_id).execute()
+                    if prob.data:
+                        problem = prob.data[0]
+        except Exception as e:
+            logger.warning(f"[SPEC] Solution/problem load: {e}")
+
+    try:
+        fe = supabase.table("solution_scores").select("*").eq("solution_id", solution_id).execute()
+        if fe.data:
+            feasibility_details = json.dumps(fe.data[0])[:500]
+    except:
+        pass
+
+    sol_title = solution.get("title", project.get("name", "MVP"))
+    prob_title = problem.get("title", "")
+
+    competitor_query = f"competitor analysis for '{sol_title}' solving '{prob_title}' — top solutions, pricing, market size 2026"
+    competitor_info = search_perplexity(competitor_query) or "Dati competitivi non disponibili."
+
+    user_prompt = f"""Genera il SPEC.md per questo progetto:
+
+NOME PROGETTO: {project.get("name", sol_title)}
+SLUG: {project.get("slug", "")}
+
+PROBLEMA:
+Titolo: {prob_title}
+Descrizione: {problem.get("description", "")[:600]}
+Target: {problem.get("target_customer", "")}
+Geografia: {problem.get("target_geography", "")}
+Urgency: {problem.get("urgency", "")}
+
+SOLUZIONE BOS (score: {bos_score:.2f}/1):
+Titolo: {sol_title}
+Descrizione: {solution.get("description", "")[:600]}
+Settore: {solution.get("sector", "")} / {solution.get("sub_sector", "")}
+
+ANALISI COMPETITIVA (Perplexity):
+{competitor_info[:800]}
+
+FEASIBILITY DETAILS:
+{feasibility_details or "Non disponibile"}
+
+Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
+
+    tokens_in = tokens_out = 0
+    spec_md = ""
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=8000,
+            system=SPEC_SYSTEM_PROMPT_AR,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        spec_md = response.content[0].text
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+    except Exception as e:
+        logger.error(f"[SPEC] Claude error: {e}")
+        log_to_supabase("spec_generator", "spec_generate", 3, f"project={project_id}", str(e),
+                        "claude-sonnet-4-5", 0, 0, 0, int((time.time() - start) * 1000), "error", str(e))
+        return {"status": "error", "error": str(e)}
+
+    cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+
+    stack = []
+    kpis = {}
+    try:
+        match = _re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', spec_md, _re.DOTALL)
+        if match:
+            spec_meta = json.loads(match.group(1))
+            stack = spec_meta.get("stack", [])
+            kpis = spec_meta.get("kpis", {})
+    except Exception as e:
+        logger.warning(f"[SPEC] JSON extraction error: {e}")
+
+    try:
+        supabase.table("projects").update({
+            "spec_md": spec_md,
+            "stack": json.dumps(stack) if stack else None,
+            "kpis": json.dumps(kpis) if kpis else None,
+            "status": "spec_generated",
+        }).eq("id", project_id).execute()
+    except Exception as e:
+        logger.error(f"[SPEC] DB update error: {e}")
+
+    if github_repo:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ok = _commit_to_project_repo(
+            github_repo, "SPEC.md", spec_md,
+            f"feat: SPEC.md generato da brAIn — {ts}",
+        )
+        if ok:
+            logger.info(f"[SPEC] SPEC.md committato su {github_repo}")
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("spec_generator", "spec_generate", 3,
+                    f"project={project_id} solution={solution_id}",
+                    f"SPEC {len(spec_md)} chars stack={stack}",
+                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+
+    logger.info(f"[SPEC] Completato project={project_id} in {duration_ms}ms")
+    return {"status": "ok", "project_id": project_id, "spec_length": len(spec_md),
+            "stack": stack, "kpis": kpis, "cost_usd": round(cost, 5)}
+
+
+# ---- LANDING PAGE GENERATOR (inlined) ----
+
+LP_SYSTEM_PROMPT_AR = """Sei un designer/copywriter esperto. Genera HTML single-file per una landing page MVP.
+
+REQUISITI:
+- HTML completo (<!DOCTYPE html> ... </html>), CSS inline nel <style>, nessuna dipendenza esterna
+- Mobile-first, responsive, caricamento istantaneo
+- Colori: bianco + un colore primario coerente col settore
+- Font: system-ui / -apple-system (nessun Google Fonts)
+- NO JavaScript complesso
+
+STRUTTURA OBBLIGATORIA:
+1. Hero section: headline + sottotitolo + CTA button
+2. 3 benefit cards con icona emoji + titolo + descrizione 1 riga
+3. Social proof placeholder: "[NUMERO] clienti gia' iscritti"
+4. Form contatto: nome + email + messaggio + button
+5. Footer: "Prodotto da brAIn — AI-native organization"
+
+REGOLE COPYWRITING:
+- Headline: beneficio concreto in < 8 parole (NON il nome del prodotto)
+- CTA: verbo d'azione + beneficio
+- Nessun gergo tecnico
+
+Rispondi SOLO con il codice HTML, senza spiegazioni, senza blocchi markdown."""
+
+
+def run_landing_page_generator(project_id):
+    """Genera HTML landing page e salva in projects.landing_page_html."""
+    start = time.time()
+    logger.info(f"[LP] Avvio per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", "MVP")
+    spec_md = project.get("spec_md", "")
+
+    solution_desc = ""
+    target_customer = ""
+    problem_desc = ""
+    bos_id = project.get("bos_id")
+    if bos_id:
+        try:
+            sol = supabase.table("solutions").select("title,description,problem_id").eq("id", bos_id).execute()
+            if sol.data:
+                solution_desc = sol.data[0].get("description", "")[:400]
+                prob_id = sol.data[0].get("problem_id")
+                if prob_id:
+                    prob = supabase.table("problems").select("title,description,target_customer").eq("id", prob_id).execute()
+                    if prob.data:
+                        target_customer = prob.data[0].get("target_customer", "")
+                        problem_desc = prob.data[0].get("description", "")[:300]
+        except Exception as e:
+            logger.warning(f"[LP] Solution/problem load: {e}")
+
+    user_prompt = f"""Progetto: {name}
+Target customer: {target_customer or "professionisti e PMI"}
+Problema risolto: {problem_desc or "inefficienza nel flusso di lavoro"}
+Soluzione: {solution_desc or spec_md[:300]}
+Genera la landing page HTML completa."""
+
+    tokens_in = tokens_out = 0
+    html = ""
+    try:
+        response = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=3000,
+            system=LP_SYSTEM_PROMPT_AR,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        html = response.content[0].text.strip()
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+    except Exception as e:
+        logger.error(f"[LP] Claude error: {e}")
+        return {"status": "error", "error": str(e)}
+
+    cost = (tokens_in * 0.8 + tokens_out * 4.0) / 1_000_000
+
+    try:
+        supabase.table("projects").update({"landing_page_html": html}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.error(f"[LP] DB update error: {e}")
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("landing_page_generator", "lp_generate", 3,
+                    f"project={project_id}", f"HTML {len(html)} chars",
+                    "claude-haiku-4-5", tokens_in, tokens_out, cost, duration_ms)
+
+    logger.info(f"[LP] Completato project={project_id} in {duration_ms}ms")
+    return {"status": "ok", "project_id": project_id, "html_length": len(html), "cost_usd": round(cost, 6)}
+
+
+# ---- BUILD PROMPT GENERATOR ----
+
+def generate_build_prompt(project_id):
+    """Genera il prompt Claude Code per il build MVP e lo salva + invia al topic."""
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", "MVP")
+    slug = project.get("slug", "")
+    github_repo = project.get("github_repo", "")
+    stack = project.get("stack") or []
+    kpis = project.get("kpis") or {}
+    topic_id = project.get("topic_id")
+
+    if isinstance(stack, str):
+        try:
+            stack = json.loads(stack)
+        except:
+            stack = []
+    if isinstance(kpis, str):
+        try:
+            kpis = json.loads(kpis)
+        except:
+            kpis = {}
+
+    # Estrai env vars dal spec_md (sezione 7)
+    env_vars_section = ""
+    spec_md = project.get("spec_md", "")
+    if spec_md:
+        match = _re.search(r'## 7\. Variabili d.Ambiente.*?\n(.*?)(?=## 8\.)', spec_md, _re.DOTALL)
+        if match:
+            env_vars_section = match.group(1).strip()[:800]
+
+    service_name = f"{slug}-mvp" if slug else "mvp"
+    artifact_tag = f"europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/{service_name}:latest"
+
+    prompt = f"""Leggi il file SPEC.md nel repo GitHub: https://github.com/{github_repo}/blob/main/SPEC.md
+
+Costruisci l'MVP "{name}" seguendo esattamente le Fasi di Build nella sezione 8, in ordine (Fase 1 -> Fase 4).
+
+Dopo ogni fase, committa su GitHub con un messaggio descrittivo (es: "feat(fase-1): setup repo e struttura base").
+
+Dopo la Fase 4:
+  - Pusha su origin main
+  - Build Docker: gcloud builds submit --region=europe-west3 --tag {artifact_tag} .
+  - Deploy Cloud Run: gcloud run deploy {service_name} --image {artifact_tag} --region europe-west3 --platform managed --quiet
+
+Env vars necessarie (configurare prima del deploy):
+{env_vars_section if env_vars_section else "(vedi sezione 7 del SPEC.md)"}
+
+Stack: {", ".join(stack) if stack else "Python + Supabase + Cloud Run"}
+
+REGOLA ASSOLUTA: zero decisioni architetturali autonome.
+Se il SPEC e' ambiguo su qualcosa, FERMATI e chiedi a Mirco prima di procedere.
+Committa ogni file creato/modificato — mai lavorare in locale senza committare."""
+
+    # Salva in DB
+    try:
+        supabase.table("projects").update({"build_prompt": prompt}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.error(f"[BUILD_PROMPT] DB update error: {e}")
+
+    # Invia al topic del progetto in 2 messaggi
+    group_id = _get_telegram_group_id()
+    _send_to_topic(group_id, topic_id,
+                   f"\U0001f6e0\ufe0f BUILD PROMPT PRONTO — {name}\nCopia il prompt qui sotto in Claude Code:")
+    # Invia in chunks (limite Telegram 4096 chars)
+    chunk_size = 3800
+    for i in range(0, len(prompt), chunk_size):
+        _send_to_topic(group_id, topic_id, prompt[i:i + chunk_size])
+
+    logger.info(f"[BUILD_PROMPT] Generato per project={project_id}")
+    return {"status": "ok", "project_id": project_id, "prompt_length": len(prompt)}
+
+
+# ---- ENQUEUE SPEC REVIEW ACTION ----
+
+def enqueue_spec_review_action(project_id):
+    """Inserisce azione spec_review in action_queue e invia al topic con inline keyboard."""
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return
+        project = proj.data[0]
+    except Exception as e:
+        logger.error(f"[SPEC_REVIEW] DB load: {e}")
+        return
+
+    name = project.get("name", f"Progetto {project_id}")
+    bos_score = project.get("bos_score", 0) or 0
+    slug = project.get("slug", "")
+    github_repo = project.get("github_repo", "")
+    topic_id = project.get("topic_id")
+    stack = project.get("stack") or []
+    kpis = project.get("kpis") or {}
+    if isinstance(stack, str):
+        try:
+            stack = json.loads(stack)
+        except:
+            stack = []
+    if isinstance(kpis, str):
+        try:
+            kpis = json.loads(kpis)
+        except:
+            kpis = {}
+
+    stack_str = ", ".join(stack[:3]) if stack else "Python/Supabase"
+    build_days = kpis.get("mvp_build_time_days") if isinstance(kpis, dict) else 0
+    build_cost = kpis.get("mvp_cost_eur") if isinstance(kpis, dict) else 0
+
+    # Inserisci in action_queue
+    chat_id = get_telegram_chat_id()
+    action_db_id = None
+    if chat_id:
+        try:
+            result = supabase.table("action_queue").insert({
+                "user_id": int(chat_id),
+                "action_type": "spec_review",
+                "title": f"SPEC PRONTA \u2014 {name[:60]}",
+                "description": f"BOS score: {bos_score:.2f} | Stack: {stack_str} | Repo: {github_repo}",
+                "payload": json.dumps({
+                    "project_id": str(project_id),
+                    "slug": slug,
+                    "github_repo": github_repo,
+                }),
+                "priority": 8,
+                "urgency": 8,
+                "importance": 8,
+                "status": "pending",
+            }).execute()
+            if result.data:
+                action_db_id = result.data[0]["id"]
+        except Exception as e:
+            logger.error(f"[SPEC_REVIEW] action_queue insert: {e}")
+
+    # Messaggio con inline keyboard
+    sep = "\u2501" * 15
+    msg = (
+        f"\u26a1 AZIONE RICHIESTA\n"
+        f"{sep}\n"
+        f"\U0001f3d7\ufe0f SPEC PRONTA \u2014 {name}\n"
+        f"BOS score: {bos_score:.2f} | Stack: {stack_str}\n"
+        f"Tempo stimato: {build_days} giorni | Costo: \u20ac{build_cost}\n"
+        f"Repo: github.com/{github_repo}\n"
+        f"{sep}"
+    )
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\u2705 Lancia build", "callback_data": f"spec_build:{project_id}"},
+            {"text": "\U0001f50d Leggi SPEC", "callback_data": f"spec_read:{project_id}"},
+            {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
+        ]]
+    }
+
+    group_id = _get_telegram_group_id()
+    _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+
+    # Notifica anche in DM se topic non disponibile
+    if not group_id and chat_id:
+        notify_telegram(msg, level="critical", source="spec_generator")
+
+    logger.info(f"[SPEC_REVIEW] Enqueued action_id={action_db_id} per project={project_id}")
+
+
+# ---- INIT PROJECT ----
+
+def init_project(solution_id):
+    """Inizializza progetto da BOS approvato: DB, GitHub repo, Forum Topic, spec, landing, enqueue review."""
+    logger.info(f"[INIT] Avvio per solution_id={solution_id}")
+
+    # 1. Carica soluzione e problema
+    try:
+        sol = supabase.table("solutions").select("*").eq("id", solution_id).execute()
+        if not sol.data:
+            logger.error(f"[INIT] Solution {solution_id} non trovata")
+            return {"status": "error", "error": "solution not found"}
+        solution = sol.data[0]
+        sol_title = solution.get("title", f"Project {solution_id}")
+        bos_score = float(solution.get("bos_score") or 0)
+    except Exception as e:
+        logger.error(f"[INIT] Solution load error: {e}")
+        return {"status": "error", "error": str(e)}
+
+    # 2. Genera slug unico
+    base_slug = _slugify(sol_title)
+    slug = base_slug
+    # Controlla unicita'
+    try:
+        existing = supabase.table("projects").select("id").eq("slug", slug).execute()
+        if existing.data:
+            slug = f"{base_slug[:17]}-{solution_id}"
+    except:
+        pass
+
+    name = sol_title[:80]
+
+    # 3. Crea record in DB
+    project_id = None
+    try:
+        result = supabase.table("projects").insert({
+            "name": name,
+            "slug": slug,
+            "bos_id": int(solution_id),
+            "bos_score": bos_score,
+            "status": "init",
+        }).execute()
+        if result.data:
+            project_id = result.data[0]["id"]
+        else:
+            logger.error("[INIT] Inserimento projects fallito")
+            return {"status": "error", "error": "db insert failed"}
+    except Exception as e:
+        logger.error(f"[INIT] DB insert error: {e}")
+        return {"status": "error", "error": str(e)}
+
+    logger.info(f"[INIT] Progetto creato: id={project_id} slug={slug}")
+
+    # 4. Crea GitHub repo
+    github_repo = _create_github_repo(slug, name)
+    if github_repo:
+        try:
+            supabase.table("projects").update({"github_repo": github_repo}).eq("id", project_id).execute()
+        except:
+            pass
+        logger.info(f"[INIT] GitHub repo: {github_repo}")
+    else:
+        logger.warning(f"[INIT] GitHub repo creation fallita, procedo senza")
+
+    # 5. Crea Forum Topic
+    group_id = _get_telegram_group_id()
+    topic_id = None
+    if group_id:
+        topic_id = _create_forum_topic(group_id, name)
+        if topic_id:
+            try:
+                supabase.table("projects").update({"topic_id": topic_id}).eq("id", project_id).execute()
+            except:
+                pass
+            logger.info(f"[INIT] Forum Topic creato: topic_id={topic_id}")
+            # Messaggio di benvenuto nel topic
+            _send_to_topic(group_id, topic_id,
+                           f"\U0001f680 Progetto '{name}' avviato!\nBOS score: {bos_score:.2f} | Repo: github.com/{github_repo}\nGenerazione SPEC in corso...")
+    else:
+        logger.info("[INIT] telegram_group_id non configurato, Forum Topic non creato")
+
+    # 6. Genera SPEC
+    spec_result = run_spec_generator(project_id)
+    if spec_result.get("status") != "ok":
+        logger.error(f"[INIT] Spec generation fallita: {spec_result}")
+        if group_id and topic_id:
+            _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Errore generazione SPEC: {spec_result.get('error')}")
+        return {"status": "error", "error": "spec generation failed", "detail": spec_result}
+
+    logger.info(f"[INIT] SPEC generata: {spec_result.get('spec_length')} chars")
+
+    # 7. Genera Landing Page
+    lp_result = run_landing_page_generator(project_id)
+    if lp_result.get("status") == "ok":
+        logger.info(f"[INIT] Landing page generata: {lp_result.get('html_length')} chars")
+        if group_id and topic_id:
+            _send_to_topic(group_id, topic_id, "Landing page HTML generata. Pronta per deploy quando vuoi.")
+    else:
+        logger.warning(f"[INIT] Landing page generation fallita (non critico): {lp_result}")
+
+    # 8. Enqueue spec review action con inline keyboard
+    enqueue_spec_review_action(project_id)
+
+    logger.info(f"[INIT] Completato: project_id={project_id} slug={slug}")
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "slug": slug,
+        "github_repo": github_repo,
+        "topic_id": topic_id,
+    }
+
+
+# ---- VALIDATION AGENT (inlined) ----
+
+VALIDATION_SYSTEM_PROMPT_AR = """Sei il Portfolio Manager di brAIn. Analizza le metriche di un progetto MVP e dai un verdetto chiaro.
+
+VERDETTO (scegli uno solo):
+- SCALE: metriche >= target, crescita positiva, aumenta investimento
+- PIVOT: metriche < 50% target ma segnali positivi, cambia angolo
+- KILL: metriche < 30% target, 3+ settimane consecutive, nessun segnale, ferma e archivia
+
+FORMATO RISPOSTA (testo piano, max 8 righe):
+VERDETTO: [SCALE/PIVOT/KILL]
+KPI attuale: [valore] vs target [valore] ([percentuale]%)
+Trend: [crescente/stabile/decrescente]
+Revenue settimana corrente: EUR [valore]
+Motivo principale: [1 riga]
+Azione raccomandata: [1 riga concreta]"""
+
+
+def run_validation_agent():
+    """Report settimanale SCALE/PIVOT/KILL per tutti i progetti in stato 'validating'."""
+    start = time.time()
+    logger.info("[VALIDATION] Avvio ciclo settimanale")
+
+    group_id = _get_telegram_group_id()
+    chat_id = get_telegram_chat_id()
+
+    try:
+        projects_result = supabase.table("projects").select("*").eq("status", "validating").execute()
+        projects = projects_result.data or []
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if not projects:
+        logger.info("[VALIDATION] Nessun progetto in stato validating")
+        return {"status": "ok", "projects_analyzed": 0}
+
+    total_tokens_in = total_tokens_out = 0
+    analyzed = 0
+    sep = "\u2501" * 15
+
+    for project in projects:
+        project_id = project["id"]
+        name = project.get("name", f"Progetto {project_id}")
+        topic_id = project.get("topic_id")
+
+        try:
+            metrics_result = supabase.table("project_metrics").select("*")\
+                .eq("project_id", project_id)\
+                .order("week", desc=True)\
+                .limit(4)\
+                .execute()
+            metrics = list(reversed(metrics_result.data or []))
+        except:
+            metrics = []
+
+        kpis = project.get("kpis") or {}
+        if isinstance(kpis, str):
+            try:
+                kpis = json.loads(kpis)
+            except:
+                kpis = {}
+
+        primary_kpi = kpis.get("primary", "customers")
+        target_w4 = kpis.get("target_week4", 0)
+        target_w12 = kpis.get("target_week12", 0)
+        revenue_target = kpis.get("revenue_target_month3_eur", 0)
+
+        metrics_lines = []
+        total_revenue = 0.0
+        for m in metrics:
+            metrics_lines.append(
+                f"Week {m['week']}: customers={m.get('customers_count', 0)}, "
+                f"revenue={m.get('revenue_eur', 0):.2f} EUR, "
+                f"{m.get('key_metric_name', primary_kpi)}={m.get('key_metric_value', 0)}"
+            )
+            total_revenue += float(m.get("revenue_eur", 0) or 0)
+
+        current_week = max((m["week"] for m in metrics), default=0)
+
+        user_prompt = f"""Progetto: {name}
+KPI primario target: {primary_kpi} — settimana 4: {target_w4}, settimana 12: {target_w12}
+Revenue target mese 3: EUR {revenue_target}
+Settimana corrente: {current_week}
+Metriche: {chr(10).join(metrics_lines) if metrics_lines else "Nessuna metrica"}
+Revenue totale: EUR {total_revenue:.2f}
+Analizza e dai il verdetto."""
+
+        verdict_text = ""
+        try:
+            response = claude.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=1000,
+                system=VALIDATION_SYSTEM_PROMPT_AR,
+                messages=[{"role": "user", "content": user_prompt}],
+            )
+            verdict_text = response.content[0].text.strip()
+            total_tokens_in += response.usage.input_tokens
+            total_tokens_out += response.usage.output_tokens
+        except Exception as e:
+            logger.error(f"[VALIDATION] Claude error for {project_id}: {e}")
+            continue
+
+        if "KILL" in verdict_text.upper():
+            try:
+                supabase.table("projects").update({
+                    "status": "killed",
+                    "notes": f"KILL — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: {verdict_text[:200]}",
+                }).eq("id", project_id).execute()
+            except:
+                pass
+
+        report_msg = (
+            f"\U0001f4ca REPORT SETTIMANALE\n"
+            f"{sep}\n"
+            f"\U0001f3d7\ufe0f {name}\n"
+            f"{verdict_text}\n"
+            f"{sep}"
+        )
+
+        if group_id and topic_id:
+            _send_to_topic(group_id, topic_id, report_msg)
+        if chat_id:
+            notify_telegram(report_msg, level="info", source="validation_agent")
+
+        analyzed += 1
+        logger.info(f"[VALIDATION] {name}: report inviato")
+
+    duration_ms = int((time.time() - start) * 1000)
+    cost = (total_tokens_in * 0.8 + total_tokens_out * 4.0) / 1_000_000
+    log_to_supabase("validation_agent", "validation_weekly", 3,
+                    f"{len(projects)} progetti", f"{analyzed} analizzati",
+                    "claude-haiku-4-5", total_tokens_in, total_tokens_out, cost, duration_ms)
+
+    logger.info(f"[VALIDATION] Completato: {analyzed} progetti in {duration_ms}ms")
+    return {"status": "ok", "projects_analyzed": analyzed, "cost_usd": round(cost, 6)}
+
+
+# ---- SPEC UPDATE ----
+
+def run_spec_update(project_id, modification_instruction):
+    """Aggiorna lo SPEC di un progetto in base a un'istruzione di modifica."""
+    start = time.time()
+    logger.info(f"[SPEC_UPDATE] project={project_id} istruzione='{modification_instruction[:80]}'")
+
+    try:
+        proj = supabase.table("projects").select("spec_md,name,github_repo,bos_id,bos_score").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    old_spec = project.get("spec_md", "")
+    if not old_spec:
+        return {"status": "error", "error": "spec_md non disponibile, genera prima la SPEC"}
+
+    update_prompt = f"""Hai questo SPEC.md esistente:
+
+{old_spec[:6000]}
+
+Istruzione di modifica da Mirco:
+{modification_instruction}
+
+Applica la modifica richiesta mantenendo la struttura a 10 sezioni e il blocco JSON finale.
+Rispondi SOLO con il SPEC.md aggiornato completo."""
+
+    tokens_in = tokens_out = 0
+    new_spec = ""
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=8000,
+            system=SPEC_SYSTEM_PROMPT_AR,
+            messages=[{"role": "user", "content": update_prompt}],
+        )
+        new_spec = response.content[0].text
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+
+    stack = []
+    kpis = {}
+    try:
+        match = _re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', new_spec, _re.DOTALL)
+        if match:
+            spec_meta = json.loads(match.group(1))
+            stack = spec_meta.get("stack", [])
+            kpis = spec_meta.get("kpis", {})
+    except:
+        pass
+
+    try:
+        supabase.table("projects").update({
+            "spec_md": new_spec,
+            "stack": json.dumps(stack) if stack else None,
+            "kpis": json.dumps(kpis) if kpis else None,
+            "status": "spec_generated",
+        }).eq("id", project_id).execute()
+    except Exception as e:
+        logger.error(f"[SPEC_UPDATE] DB update error: {e}")
+
+    github_repo = project.get("github_repo", "")
+    if github_repo:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        _commit_to_project_repo(
+            github_repo, "SPEC.md", new_spec,
+            f"update: SPEC.md modificato da Mirco — {ts}",
+        )
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("spec_generator", "spec_update", 3,
+                    f"project={project_id}", f"SPEC aggiornato {len(new_spec)} chars",
+                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+
+    # Re-enqueue spec review
+    enqueue_spec_review_action(project_id)
+
+    return {"status": "ok", "project_id": project_id, "spec_length": len(new_spec), "cost_usd": round(cost, 5)}
+
+
+# ============================================================
 # HTTP ENDPOINTS
 # ============================================================
 
@@ -3856,6 +4797,44 @@ async def run_weekly_threshold_endpoint(request):
     result = run_weekly_threshold_update()
     return web.json_response(result)
 
+async def run_project_init_endpoint(request):
+    try:
+        data = await request.json()
+        solution_id = data.get("solution_id")
+        if not solution_id:
+            return web.json_response({"error": "missing solution_id"}, status=400)
+        result = init_project(solution_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_project_build_prompt_endpoint(request):
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        if not project_id:
+            return web.json_response({"error": "missing project_id"}, status=400)
+        result = generate_build_prompt(int(project_id))
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_spec_update_endpoint(request):
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        modification = data.get("modification")
+        if not project_id or not modification:
+            return web.json_response({"error": "missing project_id or modification"}, status=400)
+        result = run_spec_update(int(project_id), modification)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_validation_endpoint(request):
+    result = run_validation_agent()
+    return web.json_response(result)
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
@@ -3893,6 +4872,10 @@ async def main():
     app.router.add_post("/cycle/sources-cleanup", run_sources_cleanup_endpoint)
     app.router.add_post("/cycle/recycle", run_recycle_endpoint)
     app.router.add_post("/thresholds/weekly", run_weekly_threshold_endpoint)
+    app.router.add_post("/project/init", run_project_init_endpoint)
+    app.router.add_post("/project/build_prompt", run_project_build_prompt_endpoint)
+    app.router.add_post("/spec/update", run_spec_update_endpoint)
+    app.router.add_post("/validation", run_validation_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)
