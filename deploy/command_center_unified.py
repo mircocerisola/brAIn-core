@@ -35,13 +35,16 @@ claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
-MAX_HISTORY = 25  # turni di conversazione (ogni turno = user + assistant + tool calls)
 
-# Chat history per chat_id — include messaggi completi con tool results
-_chat_messages = {}  # chat_id -> [{"role": "user"|"assistant", "content": ...}, ...]
+# ---- CHAT HISTORY PERSISTENTE (Supabase) ----
+CHAT_HISTORY_TABLE = "chat_history"
+MAX_DB_MESSAGES = 30  # ultimi messaggi da caricare dal DB
+SUMMARY_INTERVAL = 20  # ogni N messaggi utente genera un riassunto
+USD_TO_EUR = 0.92
 
-# Session context per chat_id — traccia ultimo problema/soluzione discussi
+# Session context per chat_id — traccia ultimo problema/soluzione discussi (in-memory, ricostruito da DB)
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
+_chat_history_available = None  # None=not checked yet, True/False
 
 # ---- NOTIFICHE INTELLIGENTI ----
 # Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
@@ -127,7 +130,7 @@ def transcribe_voice(audio_bytes):
 
 # ---- SYSTEM PROMPT ----
 
-def build_system_prompt(chat_id=None):
+def build_system_prompt(chat_id=None, conversation_summary=None):
     ctx = get_minimal_context()
     session = ""
     if chat_id and chat_id in _session_context:
@@ -143,6 +146,10 @@ def build_system_prompt(chat_id=None):
             parts.append(f"Ultimo comando: {sc['last_command']}")
         if parts:
             session = "\nCONTESTO SESSIONE:\n" + "\n".join(parts) + "\n"
+
+    summary_section = ""
+    if conversation_summary:
+        summary_section = f"\nRIASSUNTO CONVERSAZIONI PRECEDENTI:\n{conversation_summary}\n"
 
     oggi = datetime.now().strftime("%d/%m/%Y")
 
@@ -164,6 +171,8 @@ CONTESTO CONVERSAZIONE:
 - NON chiedere informazioni che hai gia' nella conversazione o nel contesto sessione.
 
 TOOL: Hai accesso al database. Usa i tool SEMPRE per dati freschi. NON inventare numeri.
+
+COSTI: Rispondi SEMPRE in euro (EUR). Tasso: 1 USD = 0.92 EUR. Mostra dollari solo se Mirco lo chiede esplicitamente.
 
 FORMATO PROBLEMI (lista):
 1. TITOLO (italiano, max 8 parole)
@@ -194,7 +203,7 @@ FLUSSO:
 - "costi": get_cost_report.
 - Tema da esplorare: trigger_scan.
 
-{ctx}{session}"""
+{ctx}{session}{summary_section}"""
 
 
 def get_minimal_context():
@@ -206,7 +215,7 @@ def get_minimal_context():
         # Costi ultimi 24h
         yesterday = (datetime.now() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
-        cost_24h = round(sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])), 4)
+        cost_24h_eur = round(sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])) * USD_TO_EUR, 4)
         # Ultimi eventi pipeline
         events = supabase.table("agent_events").select("event_type,status,created_at") \
             .order("created_at", desc=True).limit(3).execute()
@@ -218,7 +227,7 @@ def get_minimal_context():
             f"\nSTATO ATTUALE: {p_count.count or 0} problemi "
             f"({p_new.count or 0} nuovi, {p_approved.count or 0} approvati), "
             f"{s_count.count or 0} soluzioni. "
-            f"Costi 24h: ${cost_24h}.{ev_summary}\n"
+            f"Costi 24h: {cost_24h_eur} EUR.{ev_summary}\n"
         )
     except:
         return ""
@@ -389,8 +398,8 @@ def get_system_status():
 
         yesterday = (datetime.now() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
-        status["costi_24h_usd"] = round(
-            sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])), 4
+        status["costi_24h_eur"] = round(
+            sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])) * USD_TO_EUR, 4
         )
 
         errors = supabase.table("agent_logs").select("agent_id,error,created_at") \
@@ -411,19 +420,19 @@ def get_cost_report(days=7):
         if not logs.data:
             return f"Nessun dato ultimi {days} giorni."
         by_agent = {}
-        total = 0
+        total_usd = 0
         for l in logs.data:
             aid = l["agent_id"]
             cost = float(l.get("cost_usd", 0) or 0)
-            total += cost
+            total_usd += cost
             if aid not in by_agent:
-                by_agent[aid] = {"usd": 0, "calls": 0}
-            by_agent[aid]["usd"] += cost
+                by_agent[aid] = {"eur": 0, "calls": 0}
+            by_agent[aid]["eur"] += cost * USD_TO_EUR
             by_agent[aid]["calls"] += 1
         for a in by_agent:
-            by_agent[a]["usd"] = round(by_agent[a]["usd"], 4)
+            by_agent[a]["eur"] = round(by_agent[a]["eur"], 4)
         return json.dumps(
-            {"giorni": days, "totale_usd": round(total, 4), "per_agente": by_agent},
+            {"giorni": days, "totale_eur": round(total_usd * USD_TO_EUR, 4), "per_agente": by_agent},
             indent=2, ensure_ascii=False,
         )
     except Exception as e:
@@ -615,35 +624,170 @@ def _serialize_content(content):
     return str(content)
 
 
-def _compress_old_history(messages):
-    """Comprimi messaggi vecchi: tieni ultimi ~10 turni completi, comprimi i precedenti a solo testo."""
-    if len(messages) <= 20:
-        return messages
-    # Ultimi 20 messaggi (circa 10 turni) restano completi
-    recent = messages[-20:]
-    old = messages[:-20]
-    compressed = []
-    for msg in old:
-        role = msg["role"]
-        content = msg["content"]
-        if isinstance(content, str):
-            compressed.append({"role": role, "content": content[:500]})
-        elif isinstance(content, list):
-            # Estrai solo testo, scarta tool_use/tool_result dettagli
-            texts = []
-            for block in content:
-                if isinstance(block, dict):
-                    if block.get("type") == "text":
-                        texts.append(block["text"][:300])
-                    elif block.get("type") == "tool_result":
-                        texts.append(f"[tool result: {block.get('content', '')[:100]}]")
-                    elif block.get("type") == "tool_use":
-                        texts.append(f"[tool: {block.get('name', '?')}]")
-            if texts:
-                compressed.append({"role": role, "content": " ".join(texts)[:500]})
-        else:
-            compressed.append({"role": role, "content": str(content)[:500]})
-    return compressed + recent
+def _check_chat_history_table():
+    """Verifica se la tabella chat_history esiste in Supabase."""
+    global _chat_history_available
+    if _chat_history_available is not None:
+        return _chat_history_available
+    try:
+        supabase.table(CHAT_HISTORY_TABLE).select("id").limit(1).execute()
+        _chat_history_available = True
+        logger.info("[CHAT_HISTORY] Tabella disponibile")
+    except Exception:
+        _chat_history_available = False
+        logger.warning("[CHAT_HISTORY] Tabella non trovata — fallback in-memory")
+    return _chat_history_available
+
+
+def _save_chat_message(chat_id, role, content, msg_type="message"):
+    """Salva un messaggio nella tabella chat_history."""
+    if not _check_chat_history_table():
+        return
+    try:
+        content_str = json.dumps(content, default=str, ensure_ascii=False) if not isinstance(content, str) else content
+        supabase.table(CHAT_HISTORY_TABLE).insert({
+            "chat_id": str(chat_id),
+            "role": role,
+            "content": content_str,
+            "msg_type": msg_type,
+        }).execute()
+    except Exception as e:
+        logger.error(f"[CHAT_HISTORY] save: {e}")
+
+
+def _load_chat_context(chat_id):
+    """Carica contesto da DB: ultimo summary + ultimi 30 messaggi."""
+    summary_text = ""
+    messages = []
+    if not _check_chat_history_table():
+        return summary_text, messages
+    try:
+        # 1. Ultimo summary
+        s = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("content") \
+            .eq("chat_id", str(chat_id)) \
+            .eq("msg_type", "summary") \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+        if s.data:
+            summary_text = s.data[0]["content"]
+
+        # 2. Ultimi 30 messaggi (non summary)
+        rows = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("role,content") \
+            .eq("chat_id", str(chat_id)) \
+            .neq("msg_type", "summary") \
+            .order("created_at", desc=True) \
+            .limit(MAX_DB_MESSAGES).execute()
+
+        if rows.data:
+            for row in reversed(rows.data):
+                try:
+                    content = json.loads(row["content"])
+                except (json.JSONDecodeError, TypeError):
+                    content = row["content"]
+                messages.append({"role": row["role"], "content": content})
+    except Exception as e:
+        logger.error(f"[CHAT_HISTORY] load: {e}")
+    return summary_text, messages
+
+
+def _count_user_messages_since_summary(chat_id):
+    """Conta messaggi utente dall'ultimo summary."""
+    if not _check_chat_history_table():
+        return 0
+    try:
+        # Timestamp ultimo summary
+        s = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("created_at") \
+            .eq("chat_id", str(chat_id)) \
+            .eq("msg_type", "summary") \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+
+        q = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("id", count="exact") \
+            .eq("chat_id", str(chat_id)) \
+            .eq("msg_type", "message") \
+            .eq("role", "user")
+
+        if s.data:
+            q = q.gt("created_at", s.data[0]["created_at"])
+
+        result = q.execute()
+        return result.count or 0
+    except Exception as e:
+        logger.error(f"[CHAT_HISTORY] count: {e}")
+        return 0
+
+
+def _generate_and_save_summary(chat_id):
+    """Genera un riassunto compatto della conversazione con Haiku e salvalo."""
+    if not _check_chat_history_table():
+        return
+    try:
+        # Carica messaggi dall'ultimo summary (max 60 righe)
+        s = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("created_at") \
+            .eq("chat_id", str(chat_id)) \
+            .eq("msg_type", "summary") \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+
+        q = supabase.table(CHAT_HISTORY_TABLE) \
+            .select("role,content,msg_type") \
+            .eq("chat_id", str(chat_id)) \
+            .neq("msg_type", "summary") \
+            .order("created_at", desc=True) \
+            .limit(60)
+
+        if s.data:
+            q = q.gt("created_at", s.data[0]["created_at"])
+
+        rows = q.execute()
+        if not rows.data or len(rows.data) < 5:
+            return
+
+        # Costruisci testo per il riassunto
+        lines = []
+        for row in reversed(rows.data):
+            role = row["role"]
+            raw = row["content"]
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    texts = [b.get("text", "") for b in parsed if isinstance(b, dict) and b.get("type") == "text"]
+                    text = " ".join(texts)[:200] if texts else raw[:200]
+                elif isinstance(parsed, str):
+                    text = parsed[:200]
+                else:
+                    text = str(parsed)[:200]
+            except:
+                text = raw[:200]
+            lines.append(f"{role}: {text}")
+
+        conversation_text = "\n".join(lines)[:3000]
+
+        # Genera con Haiku (economico)
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            system="Genera un riassunto compatto della conversazione in italiano. Includi: temi discussi, decisioni prese, problemi/soluzioni approvati/rifiutati con ID, preferenze espresse da Mirco. Max 250 parole. Testo piano, no markdown.",
+            messages=[{"role": "user", "content": f"Riassumi:\n\n{conversation_text}"}],
+        )
+        summary_text = resp.content[0].text
+
+        # Logga costo summary
+        s_cost = (resp.usage.input_tokens * 1.0 + resp.usage.output_tokens * 5.0) / 1_000_000
+        log_to_supabase("command_center", "summary_generation", f"chat_id={chat_id}",
+                        summary_text[:200], "claude-haiku-4-5-20251001",
+                        resp.usage.input_tokens, resp.usage.output_tokens, s_cost, 0)
+
+        # Salva come summary
+        _save_chat_message(chat_id, "assistant", summary_text, msg_type="summary")
+        logger.info(f"[SUMMARY] Generato per chat_id={chat_id}")
+    except Exception as e:
+        logger.error(f"[SUMMARY] {e}")
 
 
 def _update_session_context(chat_id, messages):
@@ -694,17 +838,17 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
     start = time.time()
     cid = chat_id or "default"
 
-    # Init history e session context per questo chat_id
-    if cid not in _chat_messages:
-        _chat_messages[cid] = []
     if cid not in _session_context:
         _session_context[cid] = {}
 
     try:
-        system = build_system_prompt(chat_id=cid)
+        # Carica contesto da DB (summary + ultimi 30 messaggi)
+        summary_text, history_messages = _load_chat_context(cid)
 
-        # Costruisci messaggi dalla storia
-        messages = list(_chat_messages[cid])
+        system = build_system_prompt(chat_id=cid, conversation_summary=summary_text)
+
+        # Costruisci messaggi dalla storia DB
+        messages = list(history_messages)
 
         # Aggiungi messaggio corrente
         if is_photo and image_b64:
@@ -727,7 +871,7 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
         total_in = 0
         total_out = 0
         final = ""
-        all_tool_messages = []  # messaggi tool da aggiungere alla storia
+        all_tool_messages = []  # tool exchanges da salvare in DB
 
         for _ in range(MAX_TOOL_LOOPS):
             resp = claude.messages.create(
@@ -756,7 +900,6 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
                             "tool_use_id": b.id,
                             "content": str(r)[:8000],
                         })
-                # Serializza content per storia
                 serialized_assistant = _serialize_content(resp.content)
                 messages.append({"role": "assistant", "content": serialized_assistant})
                 messages.append({"role": "user", "content": results})
@@ -771,21 +914,23 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
         dur = int((time.time() - start) * 1000)
         cost = (total_in * COST_INPUT_PER_M + total_out * COST_OUTPUT_PER_M) / 1_000_000
 
-        # Salva in storia: user message + tool exchanges + final assistant
-        history = _chat_messages[cid]
-        history.append({"role": "user", "content": _serialize_content(user_content)})
+        # Salva in DB nell'ordine corretto: user -> tool exchanges -> assistant finale
+        # Per foto: salva solo il caption, non il base64
+        user_to_save = f"[FOTO] {user_message}" if is_photo else _serialize_content(user_content)
+        _save_chat_message(cid, "user", user_to_save, msg_type="message")
         for tm in all_tool_messages:
-            history.append(tm)
-        history.append({"role": "assistant", "content": final})
+            _save_chat_message(cid, tm["role"], tm["content"], msg_type="tool")
+        _save_chat_message(cid, "assistant", final, msg_type="message")
 
-        # Comprimi storia se troppo lunga
-        if len(history) > MAX_HISTORY * 2:
-            _chat_messages[cid] = _compress_old_history(history)
-        else:
-            _chat_messages[cid] = history
+        # Aggiorna session context dai messaggi correnti
+        _update_session_context(cid, messages)
 
-        # Aggiorna session context
-        _update_session_context(cid, _chat_messages[cid])
+        # Check se serve generare un summary (ogni 20 messaggi utente, in background)
+        def _maybe_summarize():
+            count = _count_user_messages_since_summary(cid)
+            if count >= SUMMARY_INTERVAL:
+                _generate_and_save_summary(cid)
+        threading.Thread(target=_maybe_summarize, daemon=True).start()
 
         log_to_supabase(
             "command_center", "chat", user_message[:300], final[:300],
@@ -1270,8 +1415,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text:
             await update.message.reply_text("Non ho capito il vocale. Ripeti o scrivi?")
             return
-        await update.message.reply_text(f'Ho capito: "{text}"')
-        await update.message.chat.send_action("typing")
         reply = clean_reply(ask_claude(text, chat_id=chat_id))
         for i in range(0, len(reply), 4000):
             await update.message.reply_text(reply[i:i + 4000])
