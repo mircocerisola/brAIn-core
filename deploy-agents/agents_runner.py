@@ -690,7 +690,7 @@ def run_scan(queries, max_problems=None):
         start = time.time()
         try:
             response = claude.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=4096,
                 system=analysis_prompt,
                 messages=[{"role": "user", "content": f"Analizza e identifica problemi. SOLO JSON:\n\n{combined}"}]
@@ -700,7 +700,7 @@ def run_scan(queries, max_problems=None):
 
             log_to_supabase("world_scanner", "scan_v2", 1,
                 f"Batch {len(batch)} ricerche", reply[:500],
-                "claude-haiku-4-5-20251001",
+                "claude-haiku-4-5",
                 response.usage.input_tokens, response.usage.output_tokens,
                 (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
                 duration)
@@ -1066,7 +1066,7 @@ def research_problem(problem):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=3000,
             system=RESEARCH_PROMPT,
             messages=[{"role": "user", "content": f"{problem_context}\n\nRISULTATI RICERCA:\n{combined_research}\n\nCrea il dossier. SOLO JSON."}]
@@ -1076,7 +1076,7 @@ def research_problem(problem):
 
         log_to_supabase("solution_architect", "research", 2,
             f"Ricerca: {title[:100]}", reply[:500],
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -1122,7 +1122,7 @@ def generate_solutions_unconstrained(problem, dossier):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-5",
             max_tokens=4000,
             system=gen_prompt,
             messages=[{"role": "user", "content": f"{problem_context}\n\nDOSSIER COMPETITIVO:\n{dossier_text}\n\nGenera 3 soluzioni. SOLO JSON."}]
@@ -1132,7 +1132,7 @@ def generate_solutions_unconstrained(problem, dossier):
 
         log_to_supabase("solution_architect", "generate_unconstrained", 2,
             f"Soluzioni per: {problem['title'][:100]}", reply[:500],
-            "claude-sonnet-4-5-20250929",
+            "claude-sonnet-4-5",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000,
             duration)
@@ -1150,7 +1150,7 @@ def assess_feasibility(problem, solutions_data):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=2000,
             system=SA_FEASIBILITY_PROMPT,
             messages=[{"role": "user", "content": f"PROBLEMA: {problem['title']}\n\nSOLUZIONI:\n{solutions_text}\n\nValuta fattibilita. SOLO JSON."}]
@@ -1160,7 +1160,7 @@ def assess_feasibility(problem, solutions_data):
 
         log_to_supabase("solution_architect", "assess_feasibility", 2,
             f"Fattibilita: {problem['title'][:100]}", reply[:500],
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -1506,7 +1506,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
         start = time.time()
         try:
             response = claude.messages.create(
-                model="claude-haiku-4-5-20251001",
+                model="claude-haiku-4-5",
                 max_tokens=2048,
                 system=FEASIBILITY_ENGINE_PROMPT,
                 messages=[{"role": "user", "content": f"Valuta. SOLO JSON:\n\n{context}"}]
@@ -1516,7 +1516,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
             log_to_supabase("feasibility_engine", "analyze_feasibility", 2,
                 f"Feasibility: {title[:100]}", reply[:500],
-                "claude-haiku-4-5-20251001",
+                "claude-haiku-4-5",
                 response.usage.input_tokens, response.usage.output_tokens,
                 (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
                 duration)
@@ -2064,7 +2064,7 @@ def run_knowledge_keeper():
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=1024,
             system=KNOWLEDGE_PROMPT,
             messages=[{"role": "user", "content": f"Analizza SOLO JSON:\n\n{json.dumps(simple_logs, default=str)}"}]
@@ -2074,7 +2074,7 @@ def run_knowledge_keeper():
 
         log_to_supabase("knowledge_keeper", "analyze_logs", 5,
             f"Analizzati {len(logs)} log", reply[:500],
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -2148,7 +2148,7 @@ def run_capability_scout():
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=2048,
             system=SCOUT_PROMPT,
             messages=[{"role": "user", "content": f"Analizza SOLO JSON:\n\n{combined}"}]
@@ -2158,7 +2158,7 @@ def run_capability_scout():
 
         log_to_supabase("capability_scout", "analyze_discoveries", 5,
             f"Analizzati {len(search_results)} topic", reply[:500],
-            "claude-haiku-4-5-20251001",
+            "claude-haiku-4-5",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -3282,10 +3282,10 @@ def process_events():
                 mark_event_done(event["id"])
 
             elif event_type == "problems_found":
-                # Notify Mirco con top problemi
+                # Notifica pura informativa — pipeline continua in autonomia
                 problem_ids = payload.get("problem_ids", [])
                 count = payload.get("count", len(problem_ids))
-                notify_telegram(f"Trovati {count} nuovi problemi con score alto. Controllali sul bot!")
+                notify_telegram(f"Scanner: trovati {count} nuovi problemi sopra soglia. Pipeline in elaborazione automatica.")
                 mark_event_done(event["id"])
 
             elif event_type == "problem_approved":

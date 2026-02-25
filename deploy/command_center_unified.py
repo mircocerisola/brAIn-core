@@ -38,7 +38,7 @@ AUTHORIZED_USER_ID = None
 
 # ---- CHAT HISTORY PERSISTENTE (Supabase) ----
 CHAT_HISTORY_TABLE = "chat_history"
-MAX_DB_MESSAGES = 30  # ultimi messaggi da caricare dal DB
+MAX_DB_MESSAGES = 10  # ultimi messaggi da caricare dal DB
 SUMMARY_INTERVAL = 20  # ogni N messaggi utente genera un riassunto
 USD_TO_EUR = 0.92
 
@@ -230,8 +230,8 @@ La pipeline ora e' completamente automatica: Scanner -> SA -> FE -> BOS. Mirco r
 
 FLUSSO:
 - "problemi": query_supabase, table=problems, select=id,title,weighted_score,sector,urgency,status, order_by=weighted_score, order_desc=true, limit=10. (mostra solo active per default)
-- "approva" / "si vai": risponde a azione BOS in coda, o approve_problem manuale.
-- "rifiuta" / "skip" / "no": rifiuta azione BOS in coda, o reject_problem manuale.
+- "approva" / "si vai": risponde SOLO a azione BOS in coda (approve_bos). MAI approve_problem automatico.
+- "rifiuta" / "skip" / "no": rifiuta SOLO azione BOS in coda.
 - "soluzioni": query_supabase table=solutions. (mostra solo active per default)
 - "mostrami archiviati" / "vedi archivio": query_supabase con filters=status_detail=archived per vedere problemi/soluzioni archiviati.
 - "seleziona": select_solution.
@@ -246,6 +246,12 @@ FLUSSO:
 - "riattiva fonte [nome]": reactivate_source con source_name='nome'.
 - "soglie" / "thresholds": query_supabase table=pipeline_thresholds, select=*, order_by=id, order_desc=true, limit=1.
 - "modifica soglia X a Y": modify_thresholds con soglia e valore.
+REGOLA CRITICA — PIPELINE AUTOMATICA:
+MAI chiedere a Mirco di approvare problemi o soluzioni. La pipeline li processa automaticamente.
+Se mostri problemi o soluzioni -> lista informativa pura. MAI "quale approvo?" o "vuoi approfondire?" o "quale procedo?".
+L'UNICA approvazione manuale e' il BOS finale quando la pipeline lo propone.
+approve_problem esiste SOLO per override manuale esplicito tipo "approva problema 42".
+
 NOTA STATUS_DETAIL: problems e solutions hanno status_detail (active/archived/rejected). Default sempre active. Per vedere archiviati o rifiutati, specifica filters=status_detail=archived o filters=status_detail=rejected.
 CONTEGGI TRASPARENTI: quando Mirco chiede quanti problemi/soluzioni ci sono, rispondi SEMPRE con attivi + archiviati. Es: "Problemi attivi: 0 (archiviati: 117)". Se tutti i dati sono in archivio, spiega esplicitamente che il DB è stato ripulito e il sistema sta raccogliendo nuovi dati.
 
@@ -331,7 +337,7 @@ TOOLS = [
     },
     {
         "name": "approve_problem",
-        "description": "Approva un problema — cambia status a approved e notifica Solution Architect.",
+        "description": "Override manuale: approva un problema specifico. USA SOLO se Mirco chiede esplicitamente 'approva problema ID'. MAI invocare in autonomia.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1287,7 +1293,7 @@ def _load_chat_context(chat_id):
         if s.data:
             summary_text = s.data[0]["content"]
 
-        # 2. Ultimi 30 messaggi (non summary)
+        # 2. Ultimi 10 messaggi (non summary)
         rows = supabase.table(CHAT_HISTORY_TABLE) \
             .select("role,content") \
             .eq("chat_id", cid) \
@@ -1479,6 +1485,14 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
             user_content = user_message
 
         messages.append({"role": "user", "content": user_content})
+
+        # Token budget: stima rapida (~4 char/token). Se > 2000 token, tronca storico a ultimi 7 msg.
+        _est_tokens = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages) // 4
+        if _est_tokens > 2000 and len(messages) > 7:
+            messages = messages[-7:]
+            # Garantisce che il primo messaggio sia sempre "user"
+            while messages and messages[0]["role"] != "user":
+                messages.pop(0)
 
         # max_tokens dinamico
         lower_msg = user_message.lower()

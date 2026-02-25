@@ -216,7 +216,7 @@ def generate_for_problem(problem):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=3000,
             system=GENERATION_PROMPT,
             messages=[{
@@ -237,7 +237,7 @@ def generate_for_problem(problem):
             "layer": 2,
             "input_summary": f"Soluzioni per: {problem['title'][:100]}",
             "output_summary": reply[:500],
-            "model_used": "claude-haiku-4-5-20251001",
+            "model_used": "claude-haiku-4-5",
             "tokens_input": response.usage.input_tokens,
             "tokens_output": response.usage.output_tokens,
             "cost_usd": (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,

@@ -345,7 +345,7 @@ def analyze_batch(search_results):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=6000,
             system=ANALYSIS_PROMPT,
             messages=[{
@@ -367,7 +367,7 @@ def analyze_batch(search_results):
             "layer": 1,
             "input_summary": f"Batch {len(search_results)} ricerche",
             "output_summary": reply[:500],
-            "model_used": "claude-haiku-4-5-20251001",
+            "model_used": "claude-haiku-4-5",
             "tokens_input": response.usage.input_tokens,
             "tokens_output": response.usage.output_tokens,
             "cost_usd": (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,

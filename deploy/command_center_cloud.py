@@ -295,7 +295,7 @@ def get_db_context():
     return context
 
 
-def ask_claude(user_message, model="claude-haiku-4-5-20251001"):
+def ask_claude(user_message, model="claude-haiku-4-5"):
     global chat_history
 
     start = time.time()
@@ -508,7 +508,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
 
         response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=1000,
             system=full_system,
             messages=messages,
@@ -528,7 +528,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             action="photo_analysis",
             input_summary=f"Foto con caption: {caption[:200]}",
             output_summary=reply[:500],
-            model_used="claude-haiku-4-5-20251001",
+            model_used="claude-haiku-4-5",
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost=cost,
@@ -547,7 +547,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = int((time.time() - start) * 1000)
         logger.error(f"[PHOTO ERROR] {e}")
         log_to_supabase("command_center", "photo_analysis", f"Foto: {caption[:200]}", None,
-            "claude-haiku-4-5-20251001", duration_ms=duration, status="error", error=str(e))
+            "claude-haiku-4-5", duration_ms=duration, status="error", error=str(e))
         await update.message.reply_text(f"Non riesco ad analizzare la foto: {e}")
 
 

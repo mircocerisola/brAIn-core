@@ -123,7 +123,7 @@ def get_db_context():
     return context
 
 
-def ask_claude(user_message, model="claude-haiku-4-5-20251001"):
+def ask_claude(user_message, model="claude-haiku-4-5"):
     global chat_history
 
     start = time.time()
