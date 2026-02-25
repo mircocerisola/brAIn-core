@@ -677,6 +677,7 @@ def run_scan(queries, max_problems=None):
     total_saved = 0
     all_scores = []
     saved_problem_ids = []
+    source_problem_scores = {}  # {source_id: [weighted_score, ...]} per aggiornamento mirato
 
     batch_size = 4
     for i in range(0, len(search_results), batch_size):
@@ -793,6 +794,7 @@ def run_scan(queries, max_problems=None):
                             "evidence": prob.get("evidence", ""),
                             "why_now": prob.get("why_now", ""),
                             "fingerprint": fp, "source_id": source_id,
+                            "source_ids": json.dumps([source_id] if source_id else []),
                             "status": save_status,
                             "status_detail": "active" if save_status == "new" else "archived",
                             "created_by": "world_scanner_v3",
@@ -802,6 +804,9 @@ def run_scan(queries, max_problems=None):
                         if save_status == "new":
                             total_saved += 1
                             all_scores.append(weighted)
+                            # Traccia score per aggiornamento mirato del relevance_score
+                            if source_id is not None:
+                                source_problem_scores.setdefault(source_id, []).append(weighted)
                             if insert_result.data:
                                 saved_problem_ids.append(insert_result.data[0]["id"])
                         else:
@@ -829,26 +834,34 @@ def run_scan(queries, max_problems=None):
             logger.error(f"[BATCH ERROR] {e}")
         time.sleep(1)
 
-    # Aggiorna statistiche fonti
-    if all_scores and sources:
-        avg_score = sum(all_scores) / len(all_scores)
-        for source in sources:
-            try:
+    # Aggiorna statistiche fonti — solo quelle che hanno contribuito problemi
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for source in sources:
+        sid = source.get("id")
+        try:
+            if sid in source_problem_scores:
+                # Fonte che ha prodotto almeno un problema: aggiorna stats
+                scores = source_problem_scores[sid]
+                avg_score = sum(scores) / len(scores)
                 old_found = source.get("problems_found", 0)
-                old_avg = source.get("avg_problem_score", 0)
-                new_found = old_found + len(all_scores)
-                new_avg = (old_avg * old_found + avg_score * len(all_scores)) / new_found if old_found > 0 else avg_score
+                old_avg = source.get("avg_problem_score", 0) or 0
+                new_found = old_found + len(scores)
+                new_avg = (old_avg * old_found + sum(scores)) / new_found if new_found > 0 else avg_score
                 old_rel = source.get("relevance_score", 0.5)
                 new_rel = min(1.0, old_rel + 0.02) if avg_score > 0.6 else max(0.1, old_rel - 0.02) if avg_score < 0.4 else old_rel
-
                 supabase.table("scan_sources").update({
                     "problems_found": new_found,
                     "avg_problem_score": round(new_avg, 4),
                     "relevance_score": round(new_rel, 4),
-                    "last_scanned": datetime.now(timezone.utc).isoformat(),
-                }).eq("id", source["id"]).execute()
-            except:
-                pass
+                    "last_scanned": now_iso,
+                }).eq("id", sid).execute()
+            else:
+                # Fonte scansionata ma senza problemi: aggiorna solo last_scanned
+                supabase.table("scan_sources").update({
+                    "last_scanned": now_iso,
+                }).eq("id", sid).execute()
+        except:
+            pass
 
     # Emetti eventi
     if total_saved > 0:
@@ -3523,6 +3536,57 @@ def run_idea_recycler():
 
 
 # ============================================================
+# TARGETED SCAN — scansione mirata su fonte/settore specifico
+# ============================================================
+
+def run_targeted_scan(source_name=None, use_top=False, sector=None):
+    """
+    Scan mirato su una fonte specifica, le top fonti, o un settore.
+    Bypassa la rotazione normale del scan_schedule.
+    """
+    try:
+        q = supabase.table("scan_sources").select("*").eq("status", "active")
+        if source_name:
+            q = q.ilike("name", f"%{source_name}%")
+            sources_data = q.execute()
+        elif sector:
+            # Cerca fonti che coprono quel settore
+            q = q.ilike("sectors", f"%{sector}%")
+            sources_data = q.order("relevance_score", desc=True).limit(5).execute()
+        elif use_top:
+            sources_data = q.order("relevance_score", desc=True).limit(3).execute()
+        else:
+            sources_data = q.order("relevance_score", desc=True).limit(5).execute()
+        sources = sources_data.data or []
+    except Exception as e:
+        logger.error(f"[TARGETED SCAN] Errore fetch fonti: {e}")
+        sources = []
+
+    if not sources:
+        label = source_name or sector or "top"
+        logger.warning(f"[TARGETED SCAN] Nessuna fonte trovata per: {label}")
+        return {"status": "no_sources", "saved": 0, "message": f"Nessuna fonte trovata per: {label}"}
+
+    source_names_used = [s["name"] for s in sources]
+    logger.info(f"[TARGETED SCAN] Fonti usate: {source_names_used}")
+
+    queries = get_standard_queries(sources)[:4]
+    result = run_scan(queries, max_problems=1)
+
+    saved_ids = result.get("saved_ids", [])
+    if saved_ids:
+        import threading
+        threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
+
+    return {
+        "status": "completed",
+        "sources_used": source_names_used,
+        "saved": result.get("saved", 0),
+        "saved_ids": saved_ids,
+    }
+
+
+# ============================================================
 # SOURCE REFRESH
 # ============================================================
 
@@ -3569,6 +3633,109 @@ def run_source_refresh():
 
 
 # ============================================================
+# SOURCES CLEANUP WEEKLY — pulizia fonti con soglie dinamiche
+# ============================================================
+
+def run_sources_cleanup_weekly():
+    """
+    Pulizia fonti settimanale con soglie dinamiche.
+    - Archivia il 20% peggiore (per avg_problem_score) tra fonti con 5+ scan
+    - Archivia sempre fonti con avg_problem_score < 0.25 dopo 5+ scan
+    Eseguita ogni lunedì dal Cloud Scheduler.
+    """
+    logger.info("Sources cleanup weekly starting...")
+
+    try:
+        sources_result = supabase.table("scan_sources").select("*").eq("status", "active").execute()
+        all_sources = sources_result.data or []
+    except Exception as e:
+        logger.error(f"[CLEANUP] Errore fetch fonti: {e}")
+        return {"status": "error", "error": str(e)}
+
+    # Fonti qualificate: almeno 5 problemi trovati
+    qualified = [s for s in all_sources if (s.get("problems_found") or 0) >= 5]
+
+    archived_sources = []
+    dynamic_threshold = None
+    absolute_threshold = 0.25
+
+    if qualified:
+        # Ordina per avg_problem_score crescente (peggiori prima)
+        qualified_sorted = sorted(qualified, key=lambda x: x.get("avg_problem_score") or 0)
+
+        # Calcola soglia: archivia il 20% peggiore
+        bottom_count = max(1, int(len(qualified_sorted) * 0.20))
+        bottom_sources = qualified_sorted[:bottom_count]
+
+        if bottom_sources:
+            dynamic_threshold = bottom_sources[-1].get("avg_problem_score") or 0
+
+        # Archivia: nel 20% peggiore OPPURE sotto soglia assoluta
+        for s in qualified_sorted:
+            score = s.get("avg_problem_score") or 0
+            if s in bottom_sources or score < absolute_threshold:
+                try:
+                    threshold_used = min(dynamic_threshold or 0, absolute_threshold) if s in bottom_sources else absolute_threshold
+                    supabase.table("scan_sources").update({
+                        "status": "archived",
+                        "notes": f"Archiviata automaticamente {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: score {score:.2f} (soglia {threshold_used:.2f})",
+                    }).eq("id", s["id"]).execute()
+                    archived_sources.append({"name": s["name"], "score": round(score, 3)})
+                    logger.info(f"[CLEANUP] Archiviata: {s['name']} (score {score:.2f})")
+                except Exception as e:
+                    logger.warning(f"[CLEANUP] Errore archiviazione {s['name']}: {e}")
+
+    # Ricalcola conteggio attive dopo pulizia
+    active_count = len(all_sources) - len(archived_sources)
+
+    # Aggiorna source_thresholds
+    try:
+        supabase.table("source_thresholds").insert({
+            "dynamic_threshold": dynamic_threshold,
+            "absolute_threshold": absolute_threshold,
+            "active_sources_count": active_count,
+            "archived_this_week": len(archived_sources),
+            "target_active_pct": 0.80,
+            "update_reason": "pulizia settimanale automatica",
+        }).execute()
+    except Exception as e:
+        logger.warning(f"[CLEANUP] Errore salvataggio source_thresholds: {e}")
+
+    # Notifiche a Mirco
+    SEP = "━━━━━━━━━━━━━━━"
+    if archived_sources:
+        lines = [f"📦 Pulizia fonti settimanale: {len(archived_sources)} archiviate, soglia: {dynamic_threshold:.2f if dynamic_threshold else 'N/A'}"]
+        for a in archived_sources:
+            lines.append(f"- {a['name']} (score {a['score']:.2f})")
+        notify_telegram("\n".join(lines))
+
+    # Report settimanale soglie
+    dt_str = f"{dynamic_threshold:.2f}" if dynamic_threshold is not None else "N/A"
+    report = (
+        f"📊 AGGIORNAMENTO SOGLIE FONTI\n{SEP}\n"
+        f"Fonti attive: {active_count}/{len(all_sources)}\n"
+        f"Fonti archiviate questa settimana: {len(archived_sources)}\n"
+        f"Soglia dinamica attuale: {dt_str}\n"
+        f"Soglia assoluta: {absolute_threshold}\n"
+        f"{SEP}"
+    )
+    notify_telegram(report)
+
+    log_to_supabase("source_cleanup", "weekly_cleanup", 1,
+        f"{len(all_sources)} fonti analizzate",
+        f"{len(archived_sources)} archiviate, soglia={dt_str}",
+        "none")
+
+    return {
+        "status": "completed",
+        "total_sources": len(all_sources),
+        "archived": len(archived_sources),
+        "dynamic_threshold": dynamic_threshold,
+        "active_count": active_count,
+    }
+
+
+# ============================================================
 # HTTP ENDPOINTS
 # ============================================================
 
@@ -3586,6 +3753,17 @@ async def run_custom_scan_endpoint(request):
         if not topic:
             return web.json_response({"error": "missing topic"}, status=400)
         result = run_custom_scan(topic)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_targeted_scan_endpoint(request):
+    try:
+        data = await request.json()
+        source_name = data.get("source_name")
+        use_top = data.get("use_top", False)
+        sector = data.get("sector")
+        result = run_targeted_scan(source_name=source_name, use_top=use_top, sector=sector)
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -3670,6 +3848,10 @@ async def run_source_refresh_endpoint(request):
     result = run_source_refresh()
     return web.json_response(result)
 
+async def run_sources_cleanup_endpoint(request):
+    result = run_sources_cleanup_weekly()
+    return web.json_response(result)
+
 async def run_weekly_threshold_endpoint(request):
     result = run_weekly_threshold_update()
     return web.json_response(result)
@@ -3691,6 +3873,7 @@ async def main():
     app.router.add_get("/", health_check)
     app.router.add_post("/scanner", run_scanner_endpoint)
     app.router.add_post("/scanner/custom", run_custom_scan_endpoint)
+    app.router.add_post("/scanner/targeted", run_targeted_scan_endpoint)
     app.router.add_post("/architect", run_architect_endpoint)
     app.router.add_post("/knowledge", run_knowledge_endpoint)
     app.router.add_post("/scout", run_scout_endpoint)
@@ -3707,6 +3890,7 @@ async def main():
     app.router.add_post("/cycle/knowledge", run_knowledge_endpoint)
     app.router.add_post("/cycle/capability", run_scout_endpoint)
     app.router.add_post("/cycle/sources", run_source_refresh_endpoint)
+    app.router.add_post("/cycle/sources-cleanup", run_sources_cleanup_endpoint)
     app.router.add_post("/cycle/recycle", run_recycle_endpoint)
     app.router.add_post("/thresholds/weekly", run_weekly_threshold_endpoint)
     app.router.add_post("/all", run_all_endpoint)

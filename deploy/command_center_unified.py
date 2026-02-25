@@ -235,23 +235,31 @@ FLUSSO:
 - "soluzioni": query_supabase table=solutions. (mostra solo active per default)
 - "mostrami archiviati" / "vedi archivio": query_supabase con filters=status_detail=archived per vedere problemi/soluzioni archiviati.
 - "seleziona": select_solution.
-- "stato" / "status": get_system_status.
+- "stato" / "status": get_system_status. Mostra SEMPRE attivi + archiviati, mai solo "0" senza contesto.
 - "costi": get_cost_report.
-- Tema da esplorare: trigger_scan.
+- "cercami un problema": trigger_scan (scan normale).
+- "cercami un problema nelle migliori fonti": trigger_scan con use_top=true.
+- "cercami un problema su [fonte]": trigger_scan con source_name='nome fonte'.
+- "cercami un problema nel settore [X]": trigger_scan con sector_filter='settore'.
 - Problema per nome: search_problems con parole chiave.
+- "come vanno le fonti" / "report fonti" / "fonti attive": get_sources_report.
+- "riattiva fonte [nome]": reactivate_source con source_name='nome'.
 - "soglie" / "thresholds": query_supabase table=pipeline_thresholds, select=*, order_by=id, order_desc=true, limit=1.
 - "modifica soglia X a Y": modify_thresholds con soglia e valore.
 NOTA STATUS_DETAIL: problems e solutions hanno status_detail (active/archived/rejected). Default sempre active. Per vedere archiviati o rifiutati, specifica filters=status_detail=archived o filters=status_detail=rejected.
+CONTEGGI TRASPARENTI: quando Mirco chiede quanti problemi/soluzioni ci sono, rispondi SEMPRE con attivi + archiviati. Es: "Problemi attivi: 0 (archiviati: 117)". Se tutti i dati sono in archivio, spiega esplicitamente che il DB è stato ripulito e il sistema sta raccogliendo nuovi dati.
 
 {ctx}{session}{summary_section}"""
 
 
 def get_minimal_context():
     try:
-        p_count = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").execute()
+        p_active = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").execute()
+        p_archived = supabase.table("problems").select("id", count="exact").eq("status_detail", "archived").execute()
         p_new = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").eq("status", "new").execute()
         p_approved = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").eq("status", "approved").execute()
-        s_count = supabase.table("solutions").select("id", count="exact").eq("status_detail", "active").execute()
+        s_active = supabase.table("solutions").select("id", count="exact").eq("status_detail", "active").execute()
+        s_archived = supabase.table("solutions").select("id", count="exact").eq("status_detail", "archived").execute()
         # Costi ultimi 24h
         yesterday = (datetime.now() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
@@ -263,11 +271,25 @@ def get_minimal_context():
         if events.data:
             ev_parts = [f"{e['event_type']}({e['status']})" for e in events.data]
             ev_summary = f" Pipeline recente: {', '.join(ev_parts)}."
+
+        p_active_n = p_active.count or 0
+        p_archived_n = p_archived.count or 0
+        s_active_n = s_active.count or 0
+        s_archived_n = s_archived.count or 0
+
+        archive_note = ""
+        if p_active_n == 0 and p_archived_n > 0:
+            archive_note = (
+                f"\nNOTA IMPORTANTE: il DB è stato ripulito. I dati precedenti sono in archivio "
+                f"({p_archived_n} problemi, {s_archived_n} soluzioni). "
+                f"Il sistema sta raccogliendo nuovi dati con i criteri aggiornati."
+            )
+
         return (
-            f"\nSTATO ATTUALE: {p_count.count or 0} problemi "
-            f"({p_new.count or 0} nuovi, {p_approved.count or 0} approvati), "
-            f"{s_count.count or 0} soluzioni. "
-            f"Costi 24h: {cost_24h_eur} EUR.{ev_summary}\n"
+            f"\nSTATO ATTUALE: {p_active_n} problemi attivi (archiviati: {p_archived_n}), "
+            f"{p_new.count or 0} nuovi, {p_approved.count or 0} approvati. "
+            f"{s_active_n} soluzioni attive (archiviate: {s_archived_n}). "
+            f"Costi 24h: {cost_24h_eur} EUR.{ev_summary}{archive_note}\n"
         )
     except:
         return ""
@@ -342,13 +364,23 @@ TOOLS = [
     },
     {
         "name": "trigger_scan",
-        "description": "Lancia scan mirato su un argomento specifico via agents-runner.",
+        "description": (
+            "Lancia scan via agents-runner (autenticato). "
+            "Varianti: "
+            "scan normale → usa topic; "
+            "migliori fonti → usa use_top=true; "
+            "fonte specifica → usa source_name='nome parziale'; "
+            "settore specifico → usa sector_filter='settore'. "
+            "Usa quando Mirco chiede 'cercami un problema', 'scansiona', 'cerca su [fonte/settore]', 'migliori fonti'."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "topic": {"type": "string", "description": "Argomento/keywords da scansionare"},
+                "topic": {"type": "string", "description": "Keywords da scansionare (scan normale)"},
+                "source_name": {"type": "string", "description": "Nome parziale fonte specifica (es. 'Reddit', 'Hacker News')"},
+                "use_top": {"type": "boolean", "description": "Se true, usa le top 3 fonti per relevance_score"},
+                "sector_filter": {"type": "string", "description": "Settore da filtrare (es. 'healthcare', 'fintech', 'education')"},
             },
-            "required": ["topic"],
         },
     },
     {
@@ -374,6 +406,22 @@ TOOLS = [
             "required": ["soglia", "valore"],
         },
     },
+    {
+        "name": "get_sources_report",
+        "description": "Mostra report delle fonti di scan suddivise per categoria: ottime (>0.7), media (0.4-0.7), deboli (<0.4). Usa quando Mirco chiede 'come vanno le fonti', 'report fonti', 'che fonti abbiamo', 'fonti attive'.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "reactivate_source",
+        "description": "Riattiva una fonte di scan archiviata. Usa quando Mirco dice 'riattiva fonte [nome]' o 'sblocca fonte [nome]'.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_name": {"type": "string", "description": "Nome (parziale) della fonte da riattivare"},
+            },
+            "required": ["source_name"],
+        },
+    },
 ]
 
 
@@ -392,11 +440,20 @@ def execute_tool(tool_name, tool_input):
         elif tool_name == "select_solution":
             return select_solution(tool_input["solution_id"])
         elif tool_name == "trigger_scan":
-            return trigger_scan(tool_input["topic"])
+            return trigger_scan(
+                topic=tool_input.get("topic"),
+                source_name=tool_input.get("source_name"),
+                use_top=tool_input.get("use_top", False),
+                sector_filter=tool_input.get("sector_filter"),
+            )
         elif tool_name == "search_problems":
             return search_problems(tool_input["keywords"])
         elif tool_name == "modify_thresholds":
             return modify_thresholds(tool_input["soglia"], tool_input["valore"])
+        elif tool_name == "get_sources_report":
+            return get_sources_report()
+        elif tool_name == "reactivate_source":
+            return reactivate_source(tool_input["source_name"])
         else:
             return f"Tool sconosciuto: {tool_name}"
     except Exception as e:
@@ -407,7 +464,7 @@ ALLOWED_TABLES = [
     "problems", "solutions", "agent_logs", "org_knowledge", "scan_sources",
     "capability_log", "org_config", "solution_scores", "agent_events",
     "reevaluation_log", "authorization_matrix", "finance_metrics", "action_queue",
-    "pipeline_thresholds",
+    "pipeline_thresholds", "source_thresholds",
 ]
 
 
@@ -479,11 +536,21 @@ def get_system_status():
     try:
         status = {}
         problems = supabase.table("problems").select("id,status").eq("status_detail", "active").execute()
+        problems_archived = supabase.table("problems").select("id", count="exact").eq("status_detail", "archived").execute()
         solutions = supabase.table("solutions").select("id").eq("status_detail", "active").execute()
-        status["problemi_totali"] = len(problems.data) if problems.data else 0
+        solutions_archived = supabase.table("solutions").select("id", count="exact").eq("status_detail", "archived").execute()
+        status["problemi_attivi"] = len(problems.data) if problems.data else 0
+        status["problemi_archiviati"] = problems_archived.count or 0
         status["problemi_nuovi"] = len([p for p in (problems.data or []) if p.get("status") == "new"])
         status["problemi_approvati"] = len([p for p in (problems.data or []) if p.get("status") == "approved"])
-        status["soluzioni_totali"] = len(solutions.data) if solutions.data else 0
+        status["soluzioni_attive"] = len(solutions.data) if solutions.data else 0
+        status["soluzioni_archiviate"] = solutions_archived.count or 0
+        # Nota se DB vuoto ma archivio pieno
+        if status["problemi_attivi"] == 0 and status["problemi_archiviati"] > 0:
+            status["nota"] = (
+                f"DB ripulito. Archivio: {status['problemi_archiviati']} problemi, "
+                f"{status['soluzioni_archiviate']} soluzioni. Raccolta nuovi dati in corso."
+            )
 
         logs = supabase.table("agent_logs").select("agent_id,action,status,created_at") \
             .order("created_at", desc=True).limit(15).execute()
@@ -652,6 +719,80 @@ def select_solution(solution_id):
         return f"Errore selezione: {e}"
 
 
+def get_sources_report():
+    """Report completo sulle fonti di scan suddiviso per categoria."""
+    try:
+        sources_result = supabase.table("scan_sources").select(
+            "id,name,relevance_score,problems_found,avg_problem_score,status,last_scanned"
+        ).order("relevance_score", desc=True).execute()
+        all_sources = sources_result.data or []
+
+        # Soglia attuale
+        try:
+            thresh = supabase.table("source_thresholds").select(
+                "dynamic_threshold,updated_at"
+            ).order("updated_at", desc=True).limit(1).execute()
+            current_threshold = thresh.data[0].get("dynamic_threshold") or 0.35 if thresh.data else 0.35
+        except:
+            current_threshold = 0.35
+
+        active = [s for s in all_sources if s.get("status") == "active"]
+        archived_count = len([s for s in all_sources if s.get("status") != "active"])
+
+        great = [s for s in active if (s.get("relevance_score") or 0) > 0.7]
+        average = [s for s in active if 0.4 <= (s.get("relevance_score") or 0) <= 0.7]
+        weak = [s for s in active if (s.get("relevance_score") or 0) < 0.4]
+
+        SEP = "━━━━━━━━━━━━━━━"
+        NUMERI = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
+
+        def fmt_src(srcs, limit=5):
+            out = []
+            for i, s in enumerate(srcs[:limit]):
+                num = NUMERI[i] if i < len(NUMERI) else f"{i+1}."
+                score = s.get("relevance_score") or 0
+                pf = s.get("problems_found") or 0
+                out.append(f"{num} {s['name'][:28]} · score: {score:.2f} · problemi: {pf}")
+            return out
+
+        lines = ["📡 REPORT FONTI", SEP]
+        if great:
+            lines.append(f"\n🟢 OTTIME (score > 0.7)")
+            lines.extend(fmt_src(great))
+        if average:
+            lines.append(f"\n🟡 NELLA MEDIA (score 0.4–0.7)")
+            lines.extend(fmt_src(average))
+        if weak:
+            lines.append(f"\n🔴 DEBOLI (score < 0.4)")
+            lines.extend(fmt_src(weak))
+        lines.append(f"\n📦 ARCHIVIATE: {archived_count} fonti")
+        lines.append(f"Soglia archiviazione attuale: {current_threshold:.2f}")
+        lines.append(SEP)
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Errore report fonti: {e}"
+
+
+def reactivate_source(source_name):
+    """Riattiva una fonte archiviata."""
+    try:
+        result = supabase.table("scan_sources").select(
+            "id,name,status"
+        ).ilike("name", f"%{source_name}%").execute()
+        if not result.data:
+            return f"Fonte '{source_name}' non trovata."
+        source = result.data[0]
+        if source.get("status") == "active":
+            return f"Fonte '{source['name']}' è già attiva."
+        supabase.table("scan_sources").update({
+            "status": "active",
+            "notes": "Riattivata manualmente da Mirco",
+        }).eq("id", source["id"]).execute()
+        return f"Fonte '{source['name']}' riattivata."
+    except Exception as e:
+        return f"Errore riattivazione: {e}"
+
+
 def modify_thresholds(soglia, valore):
     """Modifica manualmente una soglia della pipeline e inserisce nuova riga in pipeline_thresholds."""
     try:
@@ -694,18 +835,71 @@ def modify_thresholds(soglia, valore):
         return f"Errore modifica soglia: {e}"
 
 
-def trigger_scan(topic):
-    if not AGENTS_RUNNER_URL:
-        return "AGENTS_RUNNER_URL non configurato. Scan non disponibile."
+def get_oidc_token(audience):
+    """Recupera token OIDC dalla metadata server di Cloud Run per auth service-to-service."""
     try:
-        r = http_requests.post(
-            f"{AGENTS_RUNNER_URL}/scanner/custom",
-            json={"topic": topic},
+        r = http_requests.get(
+            f"http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience={audience}",
+            headers={"Metadata-Flavor": "Google"},
             timeout=5,
         )
         if r.status_code == 200:
-            return f"Scan mirato avviato per: {topic}"
-        return f"Errore scan: HTTP {r.status_code}"
+            return r.text.strip()
+    except Exception as e:
+        logger.debug(f"[OIDC] metadata server non disponibile (locale?): {e}")
+    return None
+
+
+def trigger_scan(topic=None, source_name=None, use_top=False, sector_filter=None):
+    """
+    Lancia scan via agents-runner con autenticazione OIDC.
+    Varianti:
+    - scan normale: solo topic
+    - migliori fonti: use_top=True
+    - fonte specifica: source_name='nome'
+    - settore specifico: sector_filter='settore'
+    """
+    if not AGENTS_RUNNER_URL:
+        return "AGENTS_RUNNER_URL non configurato. Scan non disponibile."
+
+    # Autenticazione OIDC per Cloud Run service-to-service
+    token = get_oidc_token(AGENTS_RUNNER_URL)
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    try:
+        if source_name or use_top or sector_filter:
+            # Scan mirato su fonte/settore specifico
+            payload = {}
+            if source_name:
+                payload["source_name"] = source_name
+            if use_top:
+                payload["use_top"] = True
+            if sector_filter:
+                payload["sector"] = sector_filter
+            r = http_requests.post(
+                f"{AGENTS_RUNNER_URL}/scanner/targeted",
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                sources_used = data.get("sources_used", [])
+                saved = data.get("saved", 0)
+                label = f"fonti: {', '.join(sources_used)}" if sources_used else "scan mirato"
+                return f"Scan avviato ({label}). Problemi trovati: {saved}"
+            return f"Errore scan: HTTP {r.status_code}"
+        else:
+            # Scan normale con topic
+            r = http_requests.post(
+                f"{AGENTS_RUNNER_URL}/scanner/custom",
+                json={"topic": topic or "specific problems people pay to solve 2026"},
+                headers=headers,
+                timeout=30,
+            )
+            if r.status_code == 200:
+                return f"Scan avviato per: {topic or 'strategia corrente'}"
+            return f"Errore scan: HTTP {r.status_code}"
     except Exception as e:
         return f"Errore scan: {e}"
 
