@@ -1,5 +1,5 @@
 """
-brAIn Solution Architect Agent v1.3
+brAIn Solution Architect Agent v1.4
 Layer 2 — Genera soluzioni SOLO per i problemi approvati da Mirco.
 """
 
@@ -32,8 +32,16 @@ Per ogni soluzione specifica anche:
 - sector: macro-settore (es. food, health, finance)
 - sub_sector: sotto-livello specifico (es. food/delivery, finance/compliance)
 
+BOS SOLUTION QUALITY SCORES (0.0-1.0 per ognuno):
+- uniqueness: quanto e' unica questa soluzione rispetto a quelle esistenti
+- moat_potential: potenziale di creare un vantaggio difendibile (network effect, dati proprietari)
+- value_multiplier: quanto valore genera rispetto al prezzo (10x value = 1.0)
+- simplicity: quanto e' semplice da usare e capire per il cliente
+- revenue_clarity: quanto e' chiaro e diretto il modello di revenue
+- ai_nativeness: quanto la soluzione e' nativamente AI (core AI = 1.0)
+
 Rispondi SOLO con JSON:
-{"solutions":[{"title":"nome","description":"cosa fa","approach":"come si implementa","sector":"food","sub_sector":"food/waste","feasibility_score":0.8,"impact_score":0.7,"complexity":"low","time_to_market":"2 settimane","nocode_compatible":true,"cost_estimate":"50 euro/mese","revenue_model":"come genera soldi"}],"best_pick":"quale delle due e perche"}
+{"solutions":[{"title":"nome","description":"cosa fa","approach":"come si implementa","sector":"food","sub_sector":"food/waste","feasibility_score":0.8,"impact_score":0.7,"complexity":"low","time_to_market":"2 settimane","nocode_compatible":true,"cost_estimate":"50 euro/mese","revenue_model":"come genera soldi","uniqueness":0.7,"moat_potential":0.6,"value_multiplier":0.8,"simplicity":0.7,"revenue_clarity":0.8,"ai_nativeness":0.9}],"best_pick":"quale delle due e perche"}
 
 IMPORTANTE: complexity DEVE essere esattamente uno tra: low, medium, high.
 SOLO JSON."""
@@ -189,7 +197,7 @@ def save_solutions(analysis_text, problem_id, problem_sector):
 
 
 def run():
-    print("Solution Architect v1.3 avviato...")
+    print("Solution Architect v1.4 avviato...")
 
     problems = get_approved_problems()
 
@@ -215,7 +223,7 @@ def run():
         time.sleep(1)
 
     print(f"\n   Totale: {total_saved} soluzioni salvate")
-    print("Solution Architect v1.3 completato.")
+    print("Solution Architect v1.4 completato.")
 
 
 if __name__ == "__main__":

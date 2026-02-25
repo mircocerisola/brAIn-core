@@ -1,5 +1,5 @@
 """
-brAIn Feasibility Engine v1.0
+brAIn Feasibility Engine v1.1
 THINKING — Valuta fattibilita' economica e tecnica delle soluzioni proposte.
 Per ogni soluzione: costo MVP, tempo sviluppo, revenue 3 scenari, marginalita', competition, go/no-go.
 """
@@ -79,6 +79,15 @@ Per la soluzione, calcola:
    - biggest_risk: rischio principale
    - biggest_opportunity: opportunita' principale
 
+7. BOS FEASIBILITY SCORES (0.0-1.0 per ogni parametro):
+   - margin_potential: potenziale di margine alto (margine >70% = 1.0, <20% = 0.0)
+   - ai_buildability: quanto e' costruibile con AI/automazione (completamente AI-driven = 1.0)
+   - time_to_market_score: velocita' di lancio MVP (1 settimana = 1.0, 6+ mesi = 0.0)
+   - mvp_cost_score: costo MVP entro budget (sotto 50 EUR/mese = 1.0, sopra 300 = 0.0)
+   - recurring_revenue: potenziale di revenue ricorrente (subscription forte = 1.0, one-shot = 0.0)
+   - market_access: facilita' di raggiungere clienti (canale diretto/organico = 1.0, enterprise sales = 0.0)
+   - scalability: scalabilita' senza aggiunta risorse umane (auto-scaling = 1.0, richiede team = 0.0)
+
 REGOLE:
 - Sii REALISTICO, non ottimista. Meglio sottostimare revenue e sovrastimare costi.
 - Se il mercato e' saturo e non abbiamo un vantaggio chiaro, di' NO_GO.
@@ -86,7 +95,7 @@ REGOLE:
 - Considera che l'operatore ha competenza tecnica MINIMA — tempi di sviluppo piu' lunghi.
 
 Rispondi SOLO con JSON:
-{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""}}
+{"mvp_cost":{"dev_hours":0,"dev_cost_eur":0,"api_monthly_eur":0,"hosting_monthly_eur":0,"other_monthly_eur":0,"total_mvp_cost_eur":0,"total_monthly_cost_eur":0},"timeline":{"weeks_to_mvp":0,"weeks_to_revenue":0},"revenue":{"pessimistic_monthly_eur":0,"realistic_monthly_eur":0,"optimistic_monthly_eur":0,"pricing_model":"","price_point_eur":0},"margin":{"monthly_margin_pessimistic":0,"monthly_margin_realistic":0,"monthly_margin_optimistic":0,"margin_percentage_realistic":0,"breakeven_months":0},"competition":{"competition_score":0.0,"direct_competitors":0,"indirect_competitors":0,"our_advantage":""},"recommendation":{"decision":"GO","confidence":0.0,"reasoning":"","conditions":"","biggest_risk":"","biggest_opportunity":""},"bos_feasibility":{"margin_potential":0.0,"ai_buildability":0.0,"time_to_market_score":0.0,"mvp_cost_score":0.0,"recurring_revenue":0.0,"market_access":0.0,"scalability":0.0}}
 SOLO JSON."""
 
 
@@ -321,7 +330,7 @@ def save_feasibility(solution_id, analysis, feasibility_score):
 
 
 def run(solution_id=None):
-    print("Feasibility Engine v1.0 avviato...")
+    print("Feasibility Engine v1.1 avviato...")
 
     solutions = get_pending_solutions(solution_id)
 
@@ -407,7 +416,7 @@ def run(solution_id=None):
 
     print(f"\n   Totale: {evaluated} soluzioni valutate")
     print(f"   GO: {len(go_solutions)}, Conditional: {len(conditional_solutions)}, No-go: {evaluated - len(go_solutions) - len(conditional_solutions)}")
-    print("Feasibility Engine v1.0 completato.")
+    print("Feasibility Engine v1.1 completato.")
 
     return {
         "status": "completed",
