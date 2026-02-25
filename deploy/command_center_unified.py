@@ -229,10 +229,11 @@ PIPELINE AUTOMATICA (v3.4):
 La pipeline ora e' completamente automatica: Scanner -> SA -> FE -> BOS. Mirco riceve notifica SOLO per il BOS finale se supera soglia_bos. Non ci sono piu azioni review_problem/review_solution/review_feasibility. L'unica azione manuale e' approve_bos (si/no/dettagli).
 
 FLUSSO:
-- "problemi": query_supabase, table=problems, select=id,title,weighted_score,sector,urgency,status, order_by=weighted_score, order_desc=true, limit=10.
+- "problemi": query_supabase, table=problems, select=id,title,weighted_score,sector,urgency,status, order_by=weighted_score, order_desc=true, limit=10. (mostra solo active per default)
 - "approva" / "si vai": risponde a azione BOS in coda, o approve_problem manuale.
 - "rifiuta" / "skip" / "no": rifiuta azione BOS in coda, o reject_problem manuale.
-- "soluzioni": query_supabase table=solutions.
+- "soluzioni": query_supabase table=solutions. (mostra solo active per default)
+- "mostrami archiviati" / "vedi archivio": query_supabase con filters=status_detail=archived per vedere problemi/soluzioni archiviati.
 - "seleziona": select_solution.
 - "stato" / "status": get_system_status.
 - "costi": get_cost_report.
@@ -240,16 +241,17 @@ FLUSSO:
 - Problema per nome: search_problems con parole chiave.
 - "soglie" / "thresholds": query_supabase table=pipeline_thresholds, select=*, order_by=id, order_desc=true, limit=1.
 - "modifica soglia X a Y": modify_thresholds con soglia e valore.
+NOTA STATUS_DETAIL: problems e solutions hanno status_detail (active/archived/rejected). Default sempre active. Per vedere archiviati o rifiutati, specifica filters=status_detail=archived o filters=status_detail=rejected.
 
 {ctx}{session}{summary_section}"""
 
 
 def get_minimal_context():
     try:
-        p_count = supabase.table("problems").select("id", count="exact").execute()
-        p_new = supabase.table("problems").select("id", count="exact").eq("status", "new").execute()
-        p_approved = supabase.table("problems").select("id", count="exact").eq("status", "approved").execute()
-        s_count = supabase.table("solutions").select("id", count="exact").execute()
+        p_count = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").execute()
+        p_new = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").eq("status", "new").execute()
+        p_approved = supabase.table("problems").select("id", count="exact").eq("status_detail", "active").eq("status", "approved").execute()
+        s_count = supabase.table("solutions").select("id", count="exact").eq("status_detail", "active").execute()
         # Costi ultimi 24h
         yesterday = (datetime.now() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
@@ -415,7 +417,11 @@ def supabase_query(params):
         return f"BLOCCATO: tabella '{table}' non accessibile."
     try:
         q = supabase.table(table).select(params["select"])
-        filters_str = params.get("filters", "")
+        filters_str = params.get("filters", "") or ""
+        # Applica filtro status_detail=active di default per problems/solutions
+        # a meno che il filtro non specifichi già un valore di status_detail
+        if table in ("problems", "solutions") and "status_detail" not in filters_str:
+            q = q.eq("status_detail", "active")
         if filters_str:
             for f in filters_str.split(","):
                 f = f.strip()
@@ -447,11 +453,13 @@ def search_problems(keywords):
     try:
         pattern = f"%{keywords}%"
         r1 = supabase.table("problems") \
-            .select("id,title,weighted_score,sector,urgency,status,description") \
+            .select("id,title,weighted_score,sector,urgency,status,status_detail,description") \
+            .eq("status_detail", "active") \
             .ilike("title", pattern) \
             .order("weighted_score", desc=True).limit(5).execute()
         r2 = supabase.table("problems") \
-            .select("id,title,weighted_score,sector,urgency,status,description") \
+            .select("id,title,weighted_score,sector,urgency,status,status_detail,description") \
+            .eq("status_detail", "active") \
             .ilike("description", pattern) \
             .order("weighted_score", desc=True).limit(5).execute()
         seen = set()
@@ -470,8 +478,8 @@ def search_problems(keywords):
 def get_system_status():
     try:
         status = {}
-        problems = supabase.table("problems").select("id,status").execute()
-        solutions = supabase.table("solutions").select("id").execute()
+        problems = supabase.table("problems").select("id,status").eq("status_detail", "active").execute()
+        solutions = supabase.table("solutions").select("id").eq("status_detail", "active").execute()
         status["problemi_totali"] = len(problems.data) if problems.data else 0
         status["problemi_nuovi"] = len([p for p in (problems.data or []) if p.get("status") == "new"])
         status["problemi_approvati"] = len([p for p in (problems.data or []) if p.get("status") == "approved"])
@@ -586,7 +594,7 @@ def reject_problem(problem_id):
         if not check.data:
             return f"Problema ID {problem_id} non trovato."
 
-        supabase.table("problems").update({"status": "rejected"}).eq("id", problem_id).execute()
+        supabase.table("problems").update({"status": "rejected", "status_detail": "rejected"}).eq("id", problem_id).execute()
         title = check.data[0]["title"]
         sector = check.data[0].get("sector", "")
 

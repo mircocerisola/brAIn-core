@@ -204,7 +204,7 @@ def get_mirco_preferences():
 def get_sector_preference_modifier():
     """Calcola modifier per settore basato su approvazioni/rifiuti di Mirco."""
     try:
-        approved = supabase.table("problems").select("sector").eq("status", "approved").execute()
+        approved = supabase.table("problems").select("sector").eq("status", "approved").eq("status_detail", "active").execute()
         rejected = supabase.table("problems").select("sector").eq("status", "rejected").execute()
 
         sector_scores = {}
@@ -325,22 +325,90 @@ SOLO JSON."""
 
 
 def get_scan_strategy():
-    """Determina quale strategia usare basata su ora e giorno (rotazione 6 cicli)."""
+    """Determina quale strategia usare basata su ora (rotazione 6 cicli legacy, usata solo come fallback)."""
     now = datetime.now(timezone.utc)
-    # Ogni 4 ore = 6 cicli al giorno. Combiniamo giorno e ciclo per variazione.
     cycle_in_day = now.hour // 4  # 0-5
     day_offset = now.timetuple().tm_yday % 6
     strategy_index = (cycle_in_day + day_offset) % 6
-
     strategies = [
-        "top_sources",        # Ciclo 1: scan fonti top ranked
-        "low_ranked_gems",    # Ciclo 2: esplora fonti a basso ranking
-        "sector_deep_dive",   # Ciclo 3: deep dive settore con meno problemi
-        "correlated_problems",# Ciclo 4: problemi correlati ad approvati
-        "emerging_trends",    # Ciclo 5: trend emergenti e futuri
-        "source_refresh",     # Ciclo 6: rivaluta fonti, cerca nuove
+        "top_sources", "low_ranked_gems", "sector_deep_dive",
+        "correlated_problems", "emerging_trends", "source_refresh",
     ]
     return strategies[strategy_index], strategy_index
+
+
+def get_scan_schedule_strategy():
+    """
+    Legge la scan_schedule per l'ora corrente (UTC) e restituisce la strategia del slot.
+    Aggiorna last_used sulla riga corrispondente.
+    Ogni 2 ore un ciclo diverso: 12 slot al giorno.
+    """
+    now = datetime.now(timezone.utc)
+    current_hour = now.hour
+    # Arrotonda all'ora pari (0,2,4,...,22)
+    slot_hour = (current_hour // 2) * 2
+    try:
+        result = supabase.table("scan_schedule").select("*").eq("hour", slot_hour).execute()
+        if result.data:
+            row = result.data[0]
+            strategy = row.get("strategy", "top_sources")
+            # Aggiorna last_used
+            supabase.table("scan_schedule").update({
+                "last_used": now.isoformat()
+            }).eq("hour", slot_hour).execute()
+            logger.info(f"[SCANNER] Slot {slot_hour:02d}:00 → strategia: {strategy}")
+            return strategy
+    except Exception as e:
+        logger.warning(f"[SCANNER] scan_schedule non disponibile: {e}")
+    # Fallback: usa strategia legacy
+    strategy, _ = get_scan_strategy()
+    return strategy
+
+
+def get_sector_with_fewest_problems():
+    """Ritorna il settore con meno problemi attivi nel DB."""
+    sectors = [
+        "food", "health", "finance", "education", "legal",
+        "ecommerce", "hr", "real_estate", "sustainability",
+        "cybersecurity", "entertainment", "logistics",
+    ]
+    try:
+        result = supabase.table("problems").select("sector").eq("status_detail", "active").execute()
+        counts = {s: 0 for s in sectors}
+        for p in (result.data or []):
+            s = p.get("sector", "")
+            if s in counts:
+                counts[s] += 1
+        return min(counts, key=counts.get)
+    except:
+        return "logistics"
+
+
+def get_last_sector_rotation():
+    """Ritorna l'ultimo settore usato in slot sector_rotation."""
+    try:
+        result = supabase.table("scan_schedule").select("notes").eq("strategy", "sector_rotation").execute()
+        for row in (result.data or []):
+            notes = row.get("notes", "")
+            if notes.startswith("last_sector:"):
+                return notes.split(":")[1].strip()
+    except:
+        pass
+    return None
+
+
+def get_high_bos_problem_sectors():
+    """Ritorna i settori dei problemi con BOS > 0.7."""
+    try:
+        result = supabase.table("solutions").select(
+            "problems(sector)"
+        ).gte("bos_score", 0.7).eq("status_detail", "active").limit(5).execute()
+        return list({
+            sol.get("problems", {}).get("sector", "") for sol in (result.data or [])
+            if sol.get("problems", {}).get("sector")
+        })
+    except:
+        return []
 
 
 def build_strategy_queries(strategy):
@@ -557,9 +625,11 @@ def get_standard_queries(sources):
     return queries
 
 
-def run_scan(queries):
-    """Core scan logic con soglie dinamiche da DB."""
-    # Leggi soglie dinamiche all'inizio di ogni scan
+def run_scan(queries, max_problems=None):
+    """
+    Core scan logic con soglie dinamiche da DB.
+    max_problems: se impostato, si ferma dopo aver salvato N problemi di qualità.
+    """
     thresholds = get_pipeline_thresholds()
     soglia_problema = thresholds["problema"]
 
@@ -723,7 +793,9 @@ def run_scan(queries):
                             "evidence": prob.get("evidence", ""),
                             "why_now": prob.get("why_now", ""),
                             "fingerprint": fp, "source_id": source_id,
-                            "status": save_status, "created_by": "world_scanner_v3",
+                            "status": save_status,
+                            "status_detail": "active" if save_status == "new" else "archived",
+                            "created_by": "world_scanner_v3",
                         }).execute()
 
                         existing_fps.add(fp)
@@ -783,7 +855,6 @@ def run_scan(queries):
         emit_event("world_scanner", "scan_completed", None,
             {"problems_saved": total_saved, "problem_ids": saved_problem_ids,
              "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
-        # Notifica problemi trovati
         high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= MIN_SCORE_THRESHOLD]
         if high_score_ids:
             emit_event("world_scanner", "problems_found", "command_center",
@@ -793,27 +864,49 @@ def run_scan(queries):
         emit_event("world_scanner", "batch_scan_complete", "knowledge_keeper",
             {"problems_saved": total_saved, "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
 
-    return {"status": "completed", "saved": total_saved, "saved_ids": saved_problem_ids}
+    return {"status": "completed", "saved": total_saved, "saved_ids": saved_problem_ids, "max_hit": max_problems is not None and total_saved >= max_problems}
 
 
 def run_world_scanner():
-    """Scan con strategia variabile automatica."""
-    strategy, idx = get_scan_strategy()
-    logger.info(f"World Scanner v2.3 starting — strategy: {strategy} (cycle {idx})")
+    """
+    Scan ogni 2 ore con rotazione intelligente da scan_schedule.
+    Obiettivo: esattamente 1 problema di alta qualità per scan.
+    Se il primo tentativo non trova un problema valido, riprova con una fonte alternativa.
+    """
+    strategy = get_scan_schedule_strategy()
+    logger.info(f"World Scanner v3.0 starting — strategia: {strategy}")
 
-    log_to_supabase("world_scanner", f"scan_strategy_{strategy}", 1,
+    log_to_supabase("world_scanner", f"scan_v3_{strategy}", 1,
         f"Strategia: {strategy}", None, "none")
 
-    queries, strategy_label = build_strategy_queries(strategy)
-    result = run_scan(queries)
-    logger.info(f"World Scanner completato ({strategy_label}): {result}")
+    # Costruisci query basate sulla strategia
+    queries_primary, _ = build_strategy_queries(strategy)
+
+    # Tenta con strategia primaria — limita a max 4 query per scan
+    queries_primary = queries_primary[:4]
+    result = run_scan(queries_primary, max_problems=1)
+
+    # Se non trovato nulla, riprova con top_sources come fallback
+    if result.get("saved", 0) == 0 and strategy != "top_sources":
+        logger.info(f"[SCANNER] Nessun problema valido con '{strategy}', ritento con top_sources")
+        log_to_supabase("world_scanner", "scan_retry_fallback", 1,
+            f"Retry da {strategy}", "top_sources", "none")
+        try:
+            sources = supabase.table("scan_sources").select("*").eq("status", "active")\
+                .order("relevance_score", desc=True).limit(5).execute()
+            fallback_queries = get_standard_queries(sources.data or [])[:3]
+        except:
+            fallback_queries = [("cross", "specific niche professional problem concrete evidence 2026")]
+        result = run_scan(fallback_queries, max_problems=1)
 
     # Pipeline automatica in background
     saved_ids = result.get("saved_ids", [])
     if saved_ids:
         import threading
         threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
-        logger.info(f"[PIPELINE] Avviata in background per {len(saved_ids)} problemi")
+        logger.info(f"[PIPELINE] Avviata per {len(saved_ids)} problemi")
+    else:
+        logger.info(f"[SCANNER] Nessun problema salvato questo ciclo (qualità insufficiente — OK)")
 
     return result
 
@@ -1822,7 +1915,7 @@ def run_auto_pipeline(saved_problem_ids):
             # STEP 1: verifica soglia problema (già filtrata in run_scan, ricontrollo difensivo)
             if problem_score < thresholds["problema"]:
                 logger.info(f"[PIPELINE] '{problem_title[:50]}': score={problem_score:.2f} < soglia_problema={thresholds['problema']:.2f} → archived")
-                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                supabase.table("problems").update({"status": "archived", "status_detail": "archived"}).eq("id", pid).execute()
                 continue
 
             # STEP 2: Solution Architect — genera 3 soluzioni
@@ -1865,7 +1958,7 @@ def run_auto_pipeline(saved_problem_ids):
             # Verifica soglia soluzione (best overall_score)
             if not best_sol_id or best_overall < thresholds["soluzione"]:
                 logger.info(f"[PIPELINE] '{problem_title[:50]}': best_overall={best_overall:.2f} < soglia_soluzione={thresholds['soluzione']:.2f} → archived silenziosamente")
-                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                supabase.table("problems").update({"status": "archived", "status_detail": "archived"}).eq("id", pid).execute()
                 time.sleep(1)
                 continue
 
@@ -1884,7 +1977,7 @@ def run_auto_pipeline(saved_problem_ids):
 
             if fe_score < thresholds["feasibility"]:
                 logger.info(f"[PIPELINE] '{sol_title[:50]}': fe_score={fe_score:.2f} < soglia_feasibility={thresholds['feasibility']:.2f} → archived silenziosamente")
-                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                supabase.table("problems").update({"status": "archived", "status_detail": "archived"}).eq("id", pid).execute()
                 time.sleep(1)
                 continue
 
@@ -1901,7 +1994,7 @@ def run_auto_pipeline(saved_problem_ids):
                 enqueue_bos_action(pid, best_sol_id, problem_title, sol_title, sol_desc, bos_score, bos_data)
             else:
                 logger.info(f"[PIPELINE] '{sol_title[:50]}': BOS={bos_score:.2f} < soglia_bos={thresholds['bos']:.2f} → archived silenziosamente")
-                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                supabase.table("problems").update({"status": "archived", "status_detail": "archived"}).eq("id", pid).execute()
 
             time.sleep(2)
 
@@ -2108,12 +2201,48 @@ FIXED_COSTS_DAILY_EUR = round(FIXED_COSTS_TOTAL_EUR / 30, 2)   # ~4.67 EUR/giorn
 # ---------- DATA FETCHING ----------
 
 def finance_get_usd_to_eur():
+    """Ritorna tasso USD→EUR. Cache mensile in exchange_rates. Fallback 0.92."""
     try:
-        result = supabase.table("org_config").select("value").eq("key", "usd_to_eur_rate").execute()
+        # Controlla cache in exchange_rates (valida 30 giorni)
+        result = supabase.table("exchange_rates").select("rate,fetched_at").eq(
+            "from_currency", "USD").eq("to_currency", "EUR").order(
+            "fetched_at", desc=True).limit(1).execute()
         if result.data:
-            return float(json.loads(result.data[0]["value"]))
-    except:
-        pass
+            fetched_at = result.data[0]["fetched_at"]
+            # Parsifica e controlla se < 30 giorni
+            if isinstance(fetched_at, str):
+                fetched_dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+            else:
+                fetched_dt = fetched_at
+            age_days = (datetime.now(timezone.utc) - fetched_dt).days
+            if age_days < 30:
+                return float(result.data[0]["rate"])
+    except Exception as e:
+        logger.warning(f"[FINANCE] Lettura exchange_rates fallita: {e}")
+
+    # Fetch da frankfurter.app
+    try:
+        resp = requests.get(
+            "https://api.frankfurter.app/latest?from=USD&to=EUR",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            rate = float(data["rates"]["EUR"])
+            # Salva in exchange_rates
+            try:
+                supabase.table("exchange_rates").insert({
+                    "from_currency": "USD",
+                    "to_currency": "EUR",
+                    "rate": rate,
+                }).execute()
+            except Exception as save_err:
+                logger.warning(f"[FINANCE] Salvataggio exchange_rates fallito: {save_err}")
+            logger.info(f"[FINANCE] Tasso USD→EUR aggiornato: {rate}")
+            return rate
+    except Exception as e:
+        logger.warning(f"[FINANCE] Fetch frankfurter.app fallito: {e}")
+
     return DEFAULT_USD_TO_EUR
 
 
@@ -2976,115 +3105,129 @@ def run_finance_agent(target_date=None):
 # ============================================================
 
 def generate_daily_report():
-    """Report giornaliero completo: scan, problemi, soluzioni, BOS, costi, lezioni."""
+    """Report giornaliero — italiano, solo EUR, formato con ━ separatori."""
     logger.info("Generating daily report...")
     now = datetime.now(timezone.utc)
     today = now.strftime("%Y-%m-%d")
     day_start = f"{today}T00:00:00+00:00"
 
-    report_lines = [f"REPORT GIORNALIERO {today}", ""]
+    # Data in italiano (es. "25 feb 2026")
+    MESI_IT = {1:"gen",2:"feb",3:"mar",4:"apr",5:"mag",6:"giu",
+               7:"lug",8:"ago",9:"set",10:"ott",11:"nov",12:"dic"}
+    data_it = f"{now.day} {MESI_IT[now.month]} {now.year}"
 
-    # Scan fatti oggi
+    SEP = "━━━━━━━━━━━━━━━━━━━━"
+
+    def _shorten(title, max_words=6):
+        """Tronca titolo a max_words parole italiane."""
+        words = title.split()
+        return " ".join(words[:max_words]) + ("…" if len(words) > max_words else "")
+
+    # --- DATI ---
     try:
-        scans = supabase.table("agent_logs").select("id", count="exact").eq("agent_id", "world_scanner").gte("created_at", day_start).execute()
+        scans = supabase.table("agent_logs").select("id", count="exact").eq(
+            "agent_id", "world_scanner").gte("created_at", day_start).execute()
         scan_count = scans.count or 0
     except:
         scan_count = 0
 
-    # Problemi trovati oggi
     try:
-        problems = supabase.table("problems").select("id, title, weighted_score, sector", count="exact").gte("created_at", day_start).execute()
-        problem_count = problems.count or 0
+        problems = supabase.table("problems").select(
+            "id, title, weighted_score, sector").eq(
+            "status_detail", "active").gte("created_at", day_start).execute()
+        problem_count = len(problems.data or [])
         problem_data = problems.data or []
     except:
         problem_count = 0
         problem_data = []
 
-    # Soluzioni generate oggi
     try:
-        solutions = supabase.table("solutions").select("id, title, bos_score, bos_details", count="exact").gte("created_at", day_start).execute()
-        solution_count = solutions.count or 0
+        solutions = supabase.table("solutions").select(
+            "id, title, bos_score, bos_details").eq(
+            "status_detail", "active").gte("created_at", day_start).execute()
+        solution_count = len(solutions.data or [])
         solution_data = solutions.data or []
     except:
         solution_count = 0
         solution_data = []
 
-    # BOS calcolati oggi
     bos_count = sum(1 for s in solution_data if s.get("bos_score") is not None)
 
-    # Costi oggi
     daily_costs = finance_get_daily_costs(today)
     usd_to_eur = finance_get_usd_to_eur()
-
-    report_lines.append(f"Scan: {scan_count}")
-    report_lines.append(f"Problemi trovati: {problem_count}")
-    report_lines.append(f"Soluzioni generate: {solution_count}")
-    report_lines.append(f"BOS calcolati: {bos_count}")
-
+    cost_eur = 0.0
     if daily_costs:
-        cost_eur = round(daily_costs["total_cost_usd"] * usd_to_eur, 4)
-        report_lines.append(f"Costi oggi: ${daily_costs['total_cost_usd']:.4f} ({cost_eur:.4f} EUR)")
-    report_lines.append("")
+        cost_eur = round(daily_costs["total_cost_usd"] * usd_to_eur, 2)
+
+    # --- COMPOSIZIONE ---
+    lines = [
+        SEP,
+        f"📋 REPORT GIORNALIERO — {data_it}",
+        SEP,
+        "",
+        "📡 ATTIVITÀ",
+        f"- Scansioni: {scan_count} | Problemi trovati: {problem_count}",
+        f"- Soluzioni generate: {solution_count} | BOS calcolati: {bos_count}",
+        f"- Costo giornata: €{cost_eur:.2f}",
+    ]
 
     # Top 3 problemi
     if problem_data:
-        top_problems = sorted(problem_data, key=lambda x: float(x.get("weighted_score", 0) or 0), reverse=True)[:3]
-        report_lines.append("TOP PROBLEMI:")
-        for p in top_problems:
-            report_lines.append(f"  Score: {float(p.get('weighted_score', 0)):.2f} | {p.get('sector', '?')} | {p['title']}")
-        report_lines.append("")
+        top_problems = sorted(
+            problem_data,
+            key=lambda x: float(x.get("weighted_score", 0) or 0),
+            reverse=True
+        )[:3]
+        NUMERI = ["①", "②", "③"]
+        lines.append("")
+        lines.append("🔝 PROBLEMI TOP")
+        for i, p in enumerate(top_problems):
+            score = float(p.get("weighted_score", 0) or 0)
+            sector = (p.get("sector") or "?").split("/")[0].strip()[:12]
+            title = _shorten(p.get("title", "?"))
+            lines.append(f"{NUMERI[i]} {score:.2f} · {sector} · {title}")
 
     # Top 3 soluzioni per BOS
-    if solution_data:
-        top_solutions = sorted([s for s in solution_data if s.get("bos_score")],
-            key=lambda x: float(x.get("bos_score", 0) or 0), reverse=True)[:3]
-        if top_solutions:
-            report_lines.append("TOP SOLUZIONI (BOS):")
-            for s in top_solutions:
-                bos = float(s.get("bos_score", 0))
-                details = s.get("bos_details", {})
-                if isinstance(details, str):
-                    try:
-                        details = json.loads(details)
-                    except:
-                        details = {}
-                verdict = details.get("verdict", "?")
-                report_lines.append(f"  Score: {bos:.2f} | {verdict} | {s['title']}")
-            report_lines.append("")
+    top_solutions = sorted(
+        [s for s in solution_data if s.get("bos_score") is not None],
+        key=lambda x: float(x.get("bos_score", 0) or 0),
+        reverse=True
+    )[:3]
+    if top_solutions:
+        NUMERI = ["①", "②", "③"]
+        lines.append("")
+        lines.append("🎯 SOLUZIONI TOP")
+        for i, s in enumerate(top_solutions):
+            bos = float(s.get("bos_score", 0) or 0)
+            details = s.get("bos_details", {})
+            if isinstance(details, str):
+                try:
+                    details = json.loads(details)
+                except:
+                    details = {}
+            verdict = details.get("verdict", "?")
+            title = _shorten(s.get("title", "?"))
+            lines.append(f"{NUMERI[i]} {bos:.2f} · {verdict} · {title}")
 
-    # Target dinamico settimanale BOS
+    # Obiettivo settimanale BOS
     bos_target = check_bos_weekly_target()
+    lines.append("")
+    lines.append("📊 OBIETTIVO SETTIMANALE")
     if bos_target:
-        status_emoji = "OK" if bos_target["on_target"] else "ATTENZIONE"
-        report_lines.append(f"TARGET BOS SETTIMANALE: {status_emoji}")
-        report_lines.append(f"  {bos_target['above_threshold']}/{bos_target['total_bos']} sopra {PIPELINE_THRESHOLDS['bos']} ({bos_target['pct_above']}%, target: 10%)")
-        report_lines.append(f"  Media BOS: {bos_target['avg_bos']}")
-        report_lines.append("")
+        thresholds = get_pipeline_thresholds()
+        soglia = thresholds.get("bos", PIPELINE_THRESHOLDS["bos"])
+        above = bos_target["above_threshold"]
+        total = bos_target["total_bos"]
+        pct = bos_target["pct_above"]
+        avg = bos_target["avg_bos"]
+        lines.append(f"BOS sopra soglia: {above}/{total} ({pct}% · target: 10%)")
+        lines.append(f"Media BOS: {avg}")
+    else:
+        lines.append("Nessun BOS questa settimana")
 
-    # Lezioni apprese oggi
-    try:
-        lessons = supabase.table("org_knowledge").select("title").gte("created_at", day_start).limit(3).execute()
-        if lessons.data:
-            report_lines.append("LEZIONI APPRESE:")
-            for l in lessons.data:
-                report_lines.append(f"  - {l['title'][:60]}")
-            report_lines.append("")
-    except:
-        pass
+    lines.append(SEP)
 
-    # Azioni pianificate domani
-    report_lines.append("DOMANI:")
-    strategy, idx = get_scan_strategy()
-    report_lines.append(f"  Prossimo scan: strategia {strategy}")
-    try:
-        pending_events = supabase.table("agent_events").select("event_type", count="exact").eq("status", "pending").execute()
-        pending_count = pending_events.count or 0
-        if pending_count > 0:
-            report_lines.append(f"  Eventi pending: {pending_count}")
-    except:
-        pass
-
-    report = "\n".join(report_lines)
+    report = "\n".join(lines)
     notify_telegram(report)
 
     log_to_supabase("daily_report", "generate", 0,
@@ -3338,7 +3481,7 @@ def run_idea_recycler():
 
     try:
         archived = supabase.table("problems").select("id, title, sector, weighted_score, created_at") \
-            .eq("status", "archived").order("weighted_score", desc=True).limit(10).execute()
+            .eq("status_detail", "archived").order("weighted_score", desc=True).limit(10).execute()
         archived = archived.data or []
     except:
         archived = []
