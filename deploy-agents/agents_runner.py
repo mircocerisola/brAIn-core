@@ -892,7 +892,7 @@ def generate_solutions_unconstrained(problem, dossier):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5-20250514",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=4000,
             system=gen_prompt,
             messages=[{"role": "user", "content": f"{problem_context}\n\nDOSSIER COMPETITIVO:\n{dossier_text}\n\nGenera 3 soluzioni. SOLO JSON."}]
@@ -902,7 +902,7 @@ def generate_solutions_unconstrained(problem, dossier):
 
         log_to_supabase("solution_architect", "generate_unconstrained", 2,
             f"Soluzioni per: {problem['title'][:100]}", reply[:500],
-            "claude-sonnet-4-5-20250514",
+            "claude-sonnet-4-5-20250929",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000,
             duration)
