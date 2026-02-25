@@ -59,7 +59,7 @@ NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 GITHUB_API = "https://api.github.com"
-CODE_AGENT_MODEL = "claude-sonnet-4-5-20250929"
+CODE_AGENT_MODEL = "claude-sonnet-4-5"
 
 pending_deploys = {}  # chat_id -> {"files": [...], "summary": ..., "timestamp": ...}
 
@@ -164,13 +164,27 @@ PERSONALITA':
 - Proattivo: se Mirco approva, agisci subito. Se chiede dati, fai la query. Mai dire "non ho accesso".
 - UNA domanda alla volta. Frasi corte. Mai ripetere cose gia' dette.
 
+REGOLA CRITICA — RISPONDI ALLA DOMANDA SPECIFICA:
+- Se Mirco chiede di UN problema specifico, rispondi SOLO su quello. NON elencare tutti i problemi.
+- Se Mirco chiede "parlami del problema X" o "che ne pensi di X" — usa search_problems per trovarlo, poi rispondi su QUELLO.
+- Se Mirco fa una domanda specifica (es. "come funziona lo scanner?") rispondi a QUELLA domanda, non cambiare argomento.
+- NON rispondere mai con una lista di problemi se Mirco non ha chiesto una lista.
+- Mai rispondere con informazioni generiche quando la domanda e' specifica.
+
+REGOLA CRITICA — MAI CHIEDERE ID:
+- NON chiedere MAI a Mirco un ID numerico. Mirco non sa gli ID.
+- Se Mirco menziona un problema con nome/parole chiave, usa search_problems per trovarlo.
+- Se dal contesto sai quale problema/soluzione sta discutendo, usa quello direttamente.
+- Quando Mirco dice "il primo", "quello", "spiegami meglio" — CAPISCI dal CONTESTO SESSIONE sotto.
+
 CONTESTO CONVERSAZIONE:
-- Quando Mirco dice "il primo", "quello", "spiegami meglio" — CAPISCI dal contesto. Usa il CONTESTO SESSIONE sotto.
 - Se Mirco risponde "si", "ok", "avanti", "approva" — AGISCI senza chiedere altro.
-- Se dice un numero — interpretalo come ID del problema/soluzione dal contesto.
+- Se dice un numero — interpretalo come ID dal contesto.
 - NON chiedere informazioni che hai gia' nella conversazione o nel contesto sessione.
 
 TOOL: Hai accesso al database. Usa i tool SEMPRE per dati freschi. NON inventare numeri.
+- Usa search_problems quando Mirco menziona un problema per nome/parole chiave/settore.
+- Usa query_supabase per query precise con filtri.
 
 COSTI: Rispondi SEMPRE in euro (EUR). Tasso: 1 USD = 0.92 EUR. Mostra dollari solo se Mirco lo chiede esplicitamente.
 
@@ -202,6 +216,7 @@ FLUSSO:
 - "stato" / "status": get_system_status.
 - "costi": get_cost_report.
 - Tema da esplorare: trigger_scan.
+- Problema per nome: search_problems con parole chiave.
 
 {ctx}{session}{summary_section}"""
 
@@ -311,6 +326,17 @@ TOOLS = [
             "required": ["topic"],
         },
     },
+    {
+        "name": "search_problems",
+        "description": "Cerca problemi per parole chiave nel titolo o descrizione. Usa quando Mirco menziona un problema con nome parziale, parole vaghe, settore o descrizione. NON chiedere mai l'ID, cerca direttamente.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "keywords": {"type": "string", "description": "Parole chiave da cercare (italiano o inglese)"},
+            },
+            "required": ["keywords"],
+        },
+    },
 ]
 
 
@@ -330,6 +356,8 @@ def execute_tool(tool_name, tool_input):
             return select_solution(tool_input["solution_id"])
         elif tool_name == "trigger_scan":
             return trigger_scan(tool_input["topic"])
+        elif tool_name == "search_problems":
+            return search_problems(tool_input["keywords"])
         else:
             return f"Tool sconosciuto: {tool_name}"
     except Exception as e:
@@ -359,6 +387,9 @@ def supabase_query(params):
                 elif ".lte=" in f:
                     col, val = f.split(".lte=")
                     q = q.lte(col.strip(), val.strip())
+                elif ".ilike=" in f:
+                    col, val = f.split(".ilike=", 1)
+                    q = q.ilike(col.strip(), val.strip())
                 elif "=" in f:
                     col, val = f.split("=", 1)
                     q = q.eq(col.strip(), val.strip())
@@ -371,6 +402,31 @@ def supabase_query(params):
         return "Nessun risultato."
     except Exception as e:
         return f"Errore query: {e}"
+
+
+def search_problems(keywords):
+    """Cerca problemi per parole chiave nel titolo o descrizione con ILIKE."""
+    try:
+        pattern = f"%{keywords}%"
+        r1 = supabase.table("problems") \
+            .select("id,title,weighted_score,sector,urgency,status,description") \
+            .ilike("title", pattern) \
+            .order("weighted_score", desc=True).limit(5).execute()
+        r2 = supabase.table("problems") \
+            .select("id,title,weighted_score,sector,urgency,status,description") \
+            .ilike("description", pattern) \
+            .order("weighted_score", desc=True).limit(5).execute()
+        seen = set()
+        results = []
+        for row in (r1.data or []) + (r2.data or []):
+            if row["id"] not in seen:
+                seen.add(row["id"])
+                results.append(row)
+        if not results:
+            return f"Nessun problema trovato per '{keywords}'."
+        return json.dumps(results[:5], indent=2, default=str, ensure_ascii=False)[:4000]
+    except Exception as e:
+        return f"Errore ricerca: {e}"
 
 
 def get_system_status():
@@ -594,7 +650,7 @@ def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
 
 # ---- CLAUDE (Sonnet 4.5 + tool_use) ----
 
-MODEL = "claude-sonnet-4-5-20250929"
+MODEL = "claude-sonnet-4-5"
 COST_INPUT_PER_M = 3.0
 COST_OUTPUT_PER_M = 15.0
 MAX_TOOL_LOOPS = 5
@@ -625,31 +681,31 @@ def _serialize_content(content):
 
 
 def _check_chat_history_table():
-    """Verifica se la tabella chat_history esiste in Supabase."""
+    """Verifica se la tabella chat_history esiste. Cacha solo successi, riprova su fallimento."""
     global _chat_history_available
-    if _chat_history_available is not None:
-        return _chat_history_available
+    if _chat_history_available is True:
+        return True
     try:
         supabase.table(CHAT_HISTORY_TABLE).select("id").limit(1).execute()
         _chat_history_available = True
         logger.info("[CHAT_HISTORY] Tabella disponibile")
-    except Exception:
-        _chat_history_available = False
-        logger.warning("[CHAT_HISTORY] Tabella non trovata — fallback in-memory")
-    return _chat_history_available
+        return True
+    except Exception as e:
+        logger.warning(f"[CHAT_HISTORY] Tabella non disponibile: {e}")
+        return False
 
 
-def _save_chat_message(chat_id, role, content, msg_type="message"):
-    """Salva un messaggio nella tabella chat_history."""
+def _save_chat_message(chat_id, role, content):
+    """Salva un messaggio nella tabella chat_history. role: user/assistant/summary."""
     if not _check_chat_history_table():
         return
     try:
         content_str = json.dumps(content, default=str, ensure_ascii=False) if not isinstance(content, str) else content
+        cid = int(chat_id) if str(chat_id).lstrip('-').isdigit() else 0
         supabase.table(CHAT_HISTORY_TABLE).insert({
-            "chat_id": str(chat_id),
+            "chat_id": cid,
             "role": role,
             "content": content_str,
-            "msg_type": msg_type,
         }).execute()
     except Exception as e:
         logger.error(f"[CHAT_HISTORY] save: {e}")
@@ -662,11 +718,12 @@ def _load_chat_context(chat_id):
     if not _check_chat_history_table():
         return summary_text, messages
     try:
+        cid = int(chat_id) if str(chat_id).lstrip('-').isdigit() else 0
         # 1. Ultimo summary
         s = supabase.table(CHAT_HISTORY_TABLE) \
             .select("content") \
-            .eq("chat_id", str(chat_id)) \
-            .eq("msg_type", "summary") \
+            .eq("chat_id", cid) \
+            .eq("role", "summary") \
             .order("created_at", desc=True) \
             .limit(1).execute()
         if s.data:
@@ -675,8 +732,8 @@ def _load_chat_context(chat_id):
         # 2. Ultimi 30 messaggi (non summary)
         rows = supabase.table(CHAT_HISTORY_TABLE) \
             .select("role,content") \
-            .eq("chat_id", str(chat_id)) \
-            .neq("msg_type", "summary") \
+            .eq("chat_id", cid) \
+            .neq("role", "summary") \
             .order("created_at", desc=True) \
             .limit(MAX_DB_MESSAGES).execute()
 
@@ -697,18 +754,18 @@ def _count_user_messages_since_summary(chat_id):
     if not _check_chat_history_table():
         return 0
     try:
+        cid = int(chat_id) if str(chat_id).lstrip('-').isdigit() else 0
         # Timestamp ultimo summary
         s = supabase.table(CHAT_HISTORY_TABLE) \
             .select("created_at") \
-            .eq("chat_id", str(chat_id)) \
-            .eq("msg_type", "summary") \
+            .eq("chat_id", cid) \
+            .eq("role", "summary") \
             .order("created_at", desc=True) \
             .limit(1).execute()
 
         q = supabase.table(CHAT_HISTORY_TABLE) \
             .select("id", count="exact") \
-            .eq("chat_id", str(chat_id)) \
-            .eq("msg_type", "message") \
+            .eq("chat_id", cid) \
             .eq("role", "user")
 
         if s.data:
@@ -726,18 +783,19 @@ def _generate_and_save_summary(chat_id):
     if not _check_chat_history_table():
         return
     try:
+        cid = int(chat_id) if str(chat_id).lstrip('-').isdigit() else 0
         # Carica messaggi dall'ultimo summary (max 60 righe)
         s = supabase.table(CHAT_HISTORY_TABLE) \
             .select("created_at") \
-            .eq("chat_id", str(chat_id)) \
-            .eq("msg_type", "summary") \
+            .eq("chat_id", cid) \
+            .eq("role", "summary") \
             .order("created_at", desc=True) \
             .limit(1).execute()
 
         q = supabase.table(CHAT_HISTORY_TABLE) \
-            .select("role,content,msg_type") \
-            .eq("chat_id", str(chat_id)) \
-            .neq("msg_type", "summary") \
+            .select("role,content") \
+            .eq("chat_id", cid) \
+            .neq("role", "summary") \
             .order("created_at", desc=True) \
             .limit(60)
 
@@ -770,7 +828,7 @@ def _generate_and_save_summary(chat_id):
 
         # Genera con Haiku (economico)
         resp = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-haiku-4-5",
             max_tokens=500,
             system="Genera un riassunto compatto della conversazione in italiano. Includi: temi discussi, decisioni prese, problemi/soluzioni approvati/rifiutati con ID, preferenze espresse da Mirco. Max 250 parole. Testo piano, no markdown.",
             messages=[{"role": "user", "content": f"Riassumi:\n\n{conversation_text}"}],
@@ -780,11 +838,11 @@ def _generate_and_save_summary(chat_id):
         # Logga costo summary
         s_cost = (resp.usage.input_tokens * 1.0 + resp.usage.output_tokens * 5.0) / 1_000_000
         log_to_supabase("command_center", "summary_generation", f"chat_id={chat_id}",
-                        summary_text[:200], "claude-haiku-4-5-20251001",
+                        summary_text[:200], "claude-haiku-4-5",
                         resp.usage.input_tokens, resp.usage.output_tokens, s_cost, 0)
 
-        # Salva come summary
-        _save_chat_message(chat_id, "assistant", summary_text, msg_type="summary")
+        # Salva come summary (role="summary" per distinguerlo)
+        _save_chat_message(chat_id, "summary", summary_text)
         logger.info(f"[SUMMARY] Generato per chat_id={chat_id}")
     except Exception as e:
         logger.error(f"[SUMMARY] {e}")
@@ -917,10 +975,10 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
         # Salva in DB nell'ordine corretto: user -> tool exchanges -> assistant finale
         # Per foto: salva solo il caption, non il base64
         user_to_save = f"[FOTO] {user_message}" if is_photo else _serialize_content(user_content)
-        _save_chat_message(cid, "user", user_to_save, msg_type="message")
+        _save_chat_message(cid, "user", user_to_save)
         for tm in all_tool_messages:
-            _save_chat_message(cid, tm["role"], tm["content"], msg_type="tool")
-        _save_chat_message(cid, "assistant", final, msg_type="message")
+            _save_chat_message(cid, tm["role"], tm["content"])
+        _save_chat_message(cid, "assistant", final)
 
         # Aggiorna session context dai messaggi correnti
         _update_session_context(cid, messages)
@@ -937,7 +995,21 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
             MODEL, total_in, total_out, cost, dur,
         )
 
-        return final or "Operazione completata."
+        # Se final e' vuoto (es. dopo tool loops che non producono testo), forza una risposta
+        if not final.strip():
+            try:
+                followup = claude.messages.create(
+                    model=MODEL, max_tokens=1000, system=system,
+                    messages=messages,
+                )
+                for b in followup.content:
+                    if hasattr(b, "text"):
+                        final += b.text
+                total_in += followup.usage.input_tokens
+                total_out += followup.usage.output_tokens
+            except:
+                pass
+        return final or "Ho eseguito le operazioni richieste."
     except Exception as e:
         dur = int((time.time() - start) * 1000)
         log_to_supabase(
