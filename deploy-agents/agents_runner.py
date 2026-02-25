@@ -4272,8 +4272,16 @@ Committa ogni file creato/modificato — mai lavorare in locale senza committare
     return {"status": "ok", "project_id": project_id, "prompt_length": len(prompt)}
 
 
+FASE_DESCRIPTIONS = {
+    1: "Struttura progetto (main.py, requirements.txt, Dockerfile, .env.example)",
+    2: "Logica core e integrazione DB",
+    3: "API endpoints e business logic",
+    4: "Deploy, monitoring e ottimizzazioni",
+}
+
+
 def run_build_agent(project_id):
-    """Build agent autonomo: legge SPEC, genera codice, committa su GitHub, notifica risultato."""
+    """Build agent autonomo: genera Fase 1 (struttura base), committa su GitHub, notifica per review."""
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
@@ -4302,25 +4310,26 @@ def run_build_agent(project_id):
 
     stack_str = ", ".join(stack) if stack else "Python, Supabase, Cloud Run"
 
-    # Prompt per generazione codice struttura progetto
-    build_prompt = f"""Sei un senior Python developer. Genera il codice completo per la Fase 1 dell'MVP "{name}".
+    # Genera solo Fase 1: struttura base
+    build_prompt = f"""Sei un senior Python developer. Genera il codice per la Fase 1 (struttura base) dell'MVP "{name}".
 
-SPEC.md (estratto pertinente):
+SPEC.md (estratto):
 {spec_md[:5000]}
 
-REQUISITI:
+REQUISITI FASE 1:
 - Stack: {stack_str}
 - Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), NON OpenAI/GPT
-- Crea struttura progetto completa: main.py (o app.py), requirements.txt, Dockerfile, .env.example, README.md
+- Genera: main.py (o app.py), requirements.txt, Dockerfile, .env.example
 - Il codice deve essere funzionante e deployabile su Google Cloud Run europe-west3
 - Usa Supabase per il database (variabili SUPABASE_URL, SUPABASE_KEY)
+- Struttura pulita: solo file essenziali per far partire il progetto
 
-FORMATO OUTPUT: per ogni file, usa esattamente questo formato:
-=== FILE: nome_file.py ===
+FORMATO OUTPUT per ogni file:
+=== FILE: nome_file ===
 [contenuto del file]
 === END FILE ===
 
-Genera TUTTI i file necessari per la struttura base funzionante."""
+Genera SOLO i file della struttura base."""
 
     try:
         response = claude.messages.create(
@@ -4357,33 +4366,58 @@ Genera TUTTI i file necessari per la struttura base funzionante."""
         _commit_to_project_repo(github_repo, "main.py", code_output, "feat(fase-1): MVP structure")
         files_committed = 1
 
-    # Aggiorna status
+    # Salva log iterazione su GitHub
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
+    iter_content = f"# Fase 1 — {FASE_DESCRIPTIONS[1]}\n\nData: {datetime.now(timezone.utc).isoformat()}\n\nFile generati: {files_committed}\n\n---\n\n{code_output}"
+    _commit_to_project_repo(github_repo, f"iterations/{ts}_fase1.md", iter_content, "log(fase-1): iterazione salvata")
+
+    # Aggiorna status e build_phase
     try:
-        supabase.table("projects").update({"status": "building"}).eq("id", project_id).execute()
-    except:
-        pass
+        supabase.table("projects").update({
+            "status": "review_phase1",
+            "build_phase": 1,
+        }).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[BUILD_AGENT] DB update status: {e}")
 
     cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
     log_to_supabase("build_agent", "build_fase1", 3,
                     f"project={project_id}", f"{files_committed} file committati",
                     "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
 
-    sep = "\u2501" * 15
     result_msg = (
-        f"\u2705 Build Fase 1 completata!\n"
-        f"{sep}\n"
-        f"\U0001f3d7\ufe0f {name}\n"
-        f"File committati: {files_committed}\n"
-        f"Repo: github.com/{github_repo}\n"
-        f"{sep}\n"
-        f"Fasi 2-4: apri Claude Code con il repo e continua.\n"
-        f"Prompt completo: projects.build_prompt (id={project_id})"
+        f"\u2705 Fase 1 completata \u2014 Struttura progetto\n"
+        f"\U0001f517 github.com/{github_repo}\n"
+        f"Come si comporta? Cosa vuoi cambiare?"
     )
     _send_to_topic(group_id, topic_id, result_msg)
-    logger.info(f"[BUILD_AGENT] Completato project={project_id}, {files_committed} file committati")
+    logger.info(f"[BUILD_AGENT] Fase 1 completata project={project_id}, {files_committed} file committati")
 
 
 # ---- ENQUEUE SPEC REVIEW ACTION ----
+
+def _extract_spec_bullets(spec_md):
+    """Estrae 3 bullet points dalla SPEC usando Claude Haiku. Max 60 chars ciascuno."""
+    try:
+        response = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=200,
+            messages=[{"role": "user", "content": (
+                "Analizza questo SPEC e ritorna SOLO 3 bullet points in italiano, "
+                "max 60 caratteri ciascuno, separati da newline. "
+                "Solo i 3 bullet, niente altro.\n\n" + spec_md[:3000]
+            )}],
+        )
+        text = response.content[0].text.strip()
+        bullets = [b.strip().lstrip("\u2022-* ").strip() for b in text.split("\n") if b.strip()]
+        bullets = [b[:60] for b in bullets if b][:3]
+        while len(bullets) < 3:
+            bullets.append("Vedi SPEC per dettagli")
+        return bullets
+    except Exception as e:
+        logger.warning(f"[SPEC_BULLETS] {e}")
+        return ["Vedi SPEC per dettagli"] * 3
+
 
 def enqueue_spec_review_action(project_id):
     """Inserisce azione spec_review in action_queue e invia al topic con inline keyboard."""
@@ -4401,22 +4435,7 @@ def enqueue_spec_review_action(project_id):
     slug = project.get("slug", "")
     github_repo = project.get("github_repo", "")
     topic_id = project.get("topic_id")
-    stack = project.get("stack") or []
-    kpis = project.get("kpis") or {}
-    if isinstance(stack, str):
-        try:
-            stack = json.loads(stack)
-        except:
-            stack = []
-    if isinstance(kpis, str):
-        try:
-            kpis = json.loads(kpis)
-        except:
-            kpis = {}
-
-    stack_str = ", ".join(stack[:3]) if stack else "Python/Supabase"
-    build_days = kpis.get("mvp_build_time_days") if isinstance(kpis, dict) else 0
-    build_cost = kpis.get("mvp_cost_eur") if isinstance(kpis, dict) else 0
+    spec_md = project.get("spec_md", "")
 
     # Inserisci in action_queue
     chat_id = get_telegram_chat_id()
@@ -4427,7 +4446,7 @@ def enqueue_spec_review_action(project_id):
                 "user_id": int(chat_id),
                 "action_type": "spec_review",
                 "title": f"SPEC PRONTA \u2014 {name[:60]}",
-                "description": f"BOS score: {bos_score:.2f} | Stack: {stack_str} | Repo: {github_repo}",
+                "description": f"BOS score: {bos_score:.2f} | Repo: {github_repo}",
                 "payload": json.dumps({
                     "project_id": str(project_id),
                     "slug": slug,
@@ -4443,21 +4462,23 @@ def enqueue_spec_review_action(project_id):
         except Exception as e:
             logger.error(f"[SPEC_REVIEW] action_queue insert: {e}")
 
+    # Estrai bullets dalla SPEC
+    bullets = _extract_spec_bullets(spec_md) if spec_md else ["Vedi SPEC per dettagli"] * 3
+
     # Messaggio con inline keyboard
     sep = "\u2501" * 15
     msg = (
-        f"\u26a1 AZIONE RICHIESTA\n"
-        f"{sep}\n"
-        f"\U0001f3d7\ufe0f SPEC PRONTA \u2014 {name}\n"
-        f"BOS score: {bos_score:.2f} | Stack: {stack_str}\n"
-        f"Tempo stimato: {build_days} giorni | Costo: \u20ac{build_cost}\n"
-        f"Repo: github.com/{github_repo}\n"
+        f"\U0001f4cb SPEC pronta \u2014 {name}\n"
+        f"Punti chiave:\n"
+        f"\u2022 {bullets[0]}\n"
+        f"\u2022 {bullets[1]}\n"
+        f"\u2022 {bullets[2]}\n"
         f"{sep}"
     )
     reply_markup = {
         "inline_keyboard": [[
-            {"text": "\u2705 Lancia build", "callback_data": f"spec_build:{project_id}"},
-            {"text": "\U0001f50d Leggi SPEC", "callback_data": f"spec_read:{project_id}"},
+            {"text": "\U0001f4c4 Scarica SPEC", "callback_data": f"spec_download:{project_id}"},
+            {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
             {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
         ]]
     }
@@ -4718,6 +4739,186 @@ Analizza e dai il verdetto."""
     return {"status": "ok", "projects_analyzed": analyzed, "cost_usd": round(cost, 6)}
 
 
+# ---- CONTINUE BUILD AGENT ----
+
+def continue_build_agent(project_id, feedback, current_phase):
+    """Genera la fase successiva del build integrando il feedback di Mirco."""
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            logger.error(f"[CONTINUE_BUILD] project {project_id} non trovato")
+            return
+        project = proj.data[0]
+    except Exception as e:
+        logger.error(f"[CONTINUE_BUILD] DB load: {e}")
+        return
+
+    name = project.get("name", "MVP")
+    github_repo = project.get("github_repo", "")
+    spec_md = project.get("spec_md", "")
+    topic_id = project.get("topic_id")
+    group_id = _get_telegram_group_id()
+    next_phase = current_phase + 1
+
+    if not github_repo:
+        _send_to_topic(group_id, topic_id, f"\u274c Continue build {name}: repo mancante.")
+        return
+
+    # Leggi file iterations/ da GitHub per contesto fasi precedenti
+    prev_iterations = []
+    try:
+        contents = _github_project_api("GET", github_repo, "/contents/iterations")
+        if contents and isinstance(contents, list):
+            for f in sorted(contents, key=lambda x: x.get("name", ""))[:3]:
+                file_data = _github_project_api("GET", github_repo, f"/contents/{f['path']}")
+                if file_data and file_data.get("content"):
+                    import base64 as _b64
+                    decoded = _b64.b64decode(file_data["content"]).decode("utf-8", errors="replace")
+                    prev_iterations.append(f"### {f['name']}\n{decoded[:2000]}")
+    except Exception as e:
+        logger.warning(f"[CONTINUE_BUILD] lettura iterations: {e}")
+
+    context_prev = "\n\n".join(prev_iterations) if prev_iterations else "Nessuna iterazione precedente trovata."
+    fase_desc = FASE_DESCRIPTIONS.get(next_phase, f"Fase {next_phase}")
+
+    build_prompt = f"""Sei un senior Python developer. Continua il build dell'MVP "{name}".
+
+SPEC.md (estratto):
+{spec_md[:3000]}
+
+FASI PRECEDENTI (iterazioni su GitHub):
+{context_prev}
+
+FEEDBACK DI MIRCO sulla fase {current_phase}:
+{feedback}
+
+REQUISITI FASE {next_phase} — {fase_desc}:
+- Integra il feedback ricevuto
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), NON OpenAI/GPT
+- Usa Supabase per il database
+
+FORMATO OUTPUT per ogni file:
+=== FILE: nome_file ===
+[contenuto del file]
+=== END FILE ===
+
+Genera il codice per la Fase {next_phase}."""
+
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=8000,
+            messages=[{"role": "user", "content": build_prompt}],
+        )
+        code_output = response.content[0].text
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+    except Exception as e:
+        logger.error(f"[CONTINUE_BUILD] Claude error: {e}")
+        _send_to_topic(group_id, topic_id, f"\u274c Fase {next_phase} fallita: {e}")
+        return
+
+    # Parse e commit dei file generati
+    file_pattern = _re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', _re.DOTALL)
+    matches = list(file_pattern.finditer(code_output))
+    files_committed = 0
+
+    for match in matches:
+        filepath = match.group(1).strip()
+        content = match.group(2).strip()
+        if content and filepath:
+            ok = _commit_to_project_repo(
+                github_repo, filepath, content,
+                f"feat(fase-{next_phase}): {filepath}",
+            )
+            if ok:
+                files_committed += 1
+
+    if files_committed == 0 and code_output:
+        _commit_to_project_repo(github_repo, f"fase_{next_phase}.py", code_output, f"feat(fase-{next_phase}): codice")
+        files_committed = 1
+
+    # Salva log iterazione
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
+    iter_content = f"# Fase {next_phase} — {fase_desc}\n\nData: {datetime.now(timezone.utc).isoformat()}\nFeedback: {feedback}\n\n---\n\n{code_output}"
+    _commit_to_project_repo(github_repo, f"iterations/{ts}_fase{next_phase}.md", iter_content, f"log(fase-{next_phase}): iterazione salvata")
+
+    cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+    log_to_supabase("build_agent", f"build_fase{next_phase}", 3,
+                    f"project={project_id} feedback={feedback[:100]}", f"{files_committed} file committati",
+                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
+
+    # Aggiorna DB e notifica
+    if next_phase < 4:
+        try:
+            supabase.table("projects").update({
+                "status": f"review_phase{next_phase}",
+                "build_phase": next_phase,
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning(f"[CONTINUE_BUILD] DB update: {e}")
+
+        result_msg = (
+            f"\u2705 Fase {next_phase} completata \u2014 {fase_desc}\n"
+            f"\U0001f517 github.com/{github_repo}\n"
+            f"Come si comporta? Cosa vuoi cambiare?"
+        )
+        _send_to_topic(group_id, topic_id, result_msg)
+
+    else:
+        # Fase 4 = build completo
+        try:
+            supabase.table("projects").update({
+                "status": "build_complete",
+                "build_phase": next_phase,
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning(f"[CONTINUE_BUILD] DB update build_complete: {e}")
+
+        sep = "\u2501" * 15
+        result_msg = (
+            f"\U0001f3c1 Build completo \u2014 {name}\n"
+            f"{sep}\n"
+            f"Repo: github.com/{github_repo}\n"
+            f"{sep}"
+        )
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "\U0001f680 Lancia", "callback_data": f"launch_confirm:{project_id}"},
+            ]]
+        }
+        _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
+
+    logger.info(f"[CONTINUE_BUILD] Fase {next_phase} completata project={project_id}")
+
+
+# ---- GENERATE TEAM INVITE LINK ----
+
+def _generate_team_invite_link_sync(project_id):
+    """Crea invite link Telegram per il gruppo (member_limit=1, scade 24h). Ritorna URL o None."""
+    group_id = _get_telegram_group_id()
+    if not group_id or not TELEGRAM_BOT_TOKEN:
+        return None
+    try:
+        expire_date = int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink",
+            json={
+                "chat_id": group_id,
+                "member_limit": 1,
+                "expire_date": expire_date,
+            },
+            timeout=15,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return data.get("result", {}).get("invite_link")
+        logger.warning(f"[INVITE_LINK] {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"[INVITE_LINK] {e}")
+    return None
+
+
 # ---- SPEC UPDATE ----
 
 def run_spec_update(project_id, modification_instruction):
@@ -4963,6 +5164,53 @@ async def run_validation_endpoint(request):
     result = run_validation_agent()
     return web.json_response(result)
 
+async def run_continue_build_endpoint(request):
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        feedback = data.get("feedback", "ok")
+        phase = data.get("phase")
+        if not project_id or phase is None:
+            return web.json_response({"error": "missing project_id or phase"}, status=400)
+        # Esegui in thread daemon
+        import threading as _threading
+        _threading.Thread(
+            target=continue_build_agent,
+            args=(int(project_id), str(feedback), int(phase)),
+            daemon=True,
+        ).start()
+        return web.json_response({"status": "started", "project_id": project_id, "next_phase": int(phase) + 1})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_generate_invite_endpoint(request):
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        phone = data.get("phone")
+        if not project_id or not phone:
+            return web.json_response({"error": "missing project_id or phone"}, status=400)
+        pid = int(project_id)
+        # Insert project_members
+        mirco_chat_id = get_telegram_chat_id()
+        try:
+            supabase.table("project_members").insert({
+                "project_id": pid,
+                "telegram_phone": phone,
+                "role": "manager",
+                "added_by": int(mirco_chat_id) if mirco_chat_id else None,
+                "active": True,
+            }).execute()
+        except Exception as e:
+            logger.warning(f"[INVITE] project_members insert: {e}")
+        # Genera invite link
+        invite_link = _generate_team_invite_link_sync(pid)
+        if invite_link:
+            return web.json_response({"status": "ok", "invite_link": invite_link})
+        return web.json_response({"status": "error", "invite_link": None}, status=500)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
@@ -5004,6 +5252,8 @@ async def main():
     app.router.add_post("/project/build_prompt", run_project_build_prompt_endpoint)
     app.router.add_post("/spec/update", run_spec_update_endpoint)
     app.router.add_post("/validation", run_validation_endpoint)
+    app.router.add_post("/project/continue_build", run_continue_build_endpoint)
+    app.router.add_post("/project/generate_invite", run_generate_invite_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)

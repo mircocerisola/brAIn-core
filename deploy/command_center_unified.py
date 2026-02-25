@@ -1815,6 +1815,148 @@ def build_approved_action(project_id, target_chat_id, thread_id=None):
         logger.error(f"[BUILD_APPROVED] {e}")
 
 
+def is_project_collaborator(user_id, project_id):
+    """Verifica se user_id è un collaboratore attivo del progetto."""
+    try:
+        r = supabase.table("project_members").select("id") \
+            .eq("telegram_user_id", user_id).eq("project_id", project_id) \
+            .eq("active", True).execute()
+        return bool(r.data)
+    except:
+        return False
+
+
+def try_register_collaborator(user_id, username, project_id):
+    """Se esiste una riga project_members con user_id NULL, la aggiorna con user_id e username."""
+    try:
+        r = supabase.table("project_members").select("id") \
+            .is_("telegram_user_id", "null").eq("project_id", project_id) \
+            .eq("active", True).execute()
+        if r.data:
+            row_id = r.data[0]["id"]
+            supabase.table("project_members").update({
+                "telegram_user_id": user_id,
+                "telegram_username": username or "",
+            }).eq("id", row_id).execute()
+            return True
+    except Exception as e:
+        logger.warning(f"[REGISTER_COLLAB] {e}")
+    return False
+
+
+def _notify_mirco_silently(project_id, sender_name, message):
+    """Invia DM silenzioso a Mirco con un messaggio arrivato da un collaboratore."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    mirco_id = AUTHORIZED_USER_ID
+    if not token or not mirco_id:
+        return
+    try:
+        proj = supabase.table("projects").select("name").eq("id", project_id).execute()
+        proj_name = proj.data[0]["name"] if proj.data else f"Progetto {project_id}"
+    except:
+        proj_name = f"Progetto {project_id}"
+    text = f"\U0001f4e9 [{sender_name}] nel Cantiere {proj_name}: {message[:200]}"
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": mirco_id, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning(f"[NOTIFY_MIRCO] {e}")
+
+
+def handle_launch(project_id, chat_id, thread_id=None):
+    """Aggiorna status a launch_approved, notifica nel topic, avvia validation in background."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    try:
+        proj = supabase.table("projects").select("name,github_repo").eq("id", project_id).execute()
+        project = proj.data[0] if proj.data else {}
+        name = project.get("name", f"Progetto {project_id}")
+        github_repo = project.get("github_repo", "")
+    except:
+        name = f"Progetto {project_id}"
+        github_repo = ""
+
+    try:
+        supabase.table("projects").update({"status": "launch_approved"}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[LAUNCH] DB update: {e}")
+
+    # Notifica nel topic
+    msg = (
+        f"\U0001f680 {name} approvato per il lancio!\n"
+        f"Repo: github.com/{github_repo}\n"
+        f"Avvia deploy manualmente su Cloud Run."
+    )
+    if token:
+        payload = {"chat_id": chat_id, "text": msg}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        try:
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+        except Exception as e:
+            logger.warning(f"[LAUNCH] notifica: {e}")
+
+    # Avvia validation in background
+    import threading as _threading
+    if AGENTS_RUNNER_URL:
+        def _trigger_validation():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(f"{AGENTS_RUNNER_URL}/validation", headers=headers, timeout=10)
+            except Exception as e:
+                logger.warning(f"[LAUNCH] validation trigger: {e}")
+        _threading.Thread(target=_trigger_validation, daemon=True).start()
+
+
+def start_team_setup(project_id, chat_id, thread_id=None):
+    """Invia messaggio FASE A2 nel topic: aggiungi collaboratori o salta."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return
+    try:
+        supabase.table("projects").update({"status": "team_setup"}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[TEAM_SETUP] DB update: {e}")
+
+    msg = (
+        "\U0001f465 SPEC validata! Vuoi aggiungere collaboratori al Cantiere?\n"
+        "Potranno scrivere nel topic e riceverai una copia di ogni loro messaggio.\n"
+        "\u2501" * 15
+    )
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\u2795 Aggiungi collaboratore", "callback_data": f"team_add:{project_id}"},
+            {"text": "\u23ed\ufe0f Salta, avvia build", "callback_data": f"team_skip:{project_id}"},
+        ]]
+    }
+    payload = {"chat_id": chat_id, "text": msg, "reply_markup": reply_markup}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    try:
+        http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+    except Exception as e:
+        logger.warning(f"[TEAM_SETUP] messaggio: {e}")
+
+
+def trigger_build_start(project_id, chat_id, thread_id=None):
+    """Chiama /project/build_prompt su agents_runner con OIDC auth."""
+    if AGENTS_RUNNER_URL:
+        try:
+            oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+            headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+            http_requests.post(
+                f"{AGENTS_RUNNER_URL}/project/build_prompt",
+                json={"project_id": str(project_id)},
+                headers=headers,
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"[BUILD_START] {e}")
+
+
 async def handle_project_message(update, project):
     """Handler per messaggi arrivati in un Forum Topic di progetto."""
     msg = update.message.text or ""
@@ -1822,9 +1964,126 @@ async def handle_project_message(update, project):
     thread_id = update.message.message_thread_id
     project_id = project["id"]
     name = project.get("name", "")
+    project_status = project.get("status", "")
+    build_phase = project.get("build_phase", 0) or 0
+    user_id = update.effective_user.id if update.effective_user else None
+    username = update.effective_user.username or "" if update.effective_user else ""
 
-    # Controlla stato spec_edit
+    # 1. Identifica mittente
+    _is_mirco = is_authorized(update)
+    _is_collab = is_project_collaborator(user_id, project_id) if user_id else False
+
+    # 2. Mittente sconosciuto: tenta registrazione collaboratore
+    if not _is_mirco and not _is_collab and user_id:
+        registered = try_register_collaborator(user_id, username, project_id)
+        if registered:
+            _is_collab = True
+            sender_name = username or str(user_id)
+            await update.message.reply_text(f"Benvenuto nel Cantiere {name}!")
+            _notify_mirco_silently(project_id, sender_name, f"[nuovo collaboratore registrato] {msg}")
+            return
+
+    # 3. Se collaboratore: gira il messaggio a Mirco silenziosamente
+    if _is_collab and not _is_mirco:
+        sender_name = username or str(user_id)
+        _notify_mirco_silently(project_id, sender_name, msg)
+
     ctx = _session_context.get(chat_id, {})
+
+    # 4. awaiting_phone: salva telefono + genera invite link
+    if ctx.get("awaiting_phone") == project_id and _is_mirco:
+        phone = msg.strip()
+        _session_context[chat_id]["awaiting_phone"] = None
+        if AGENTS_RUNNER_URL:
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                resp = http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/project/generate_invite",
+                    json={"project_id": str(project_id), "phone": phone},
+                    headers=headers,
+                    timeout=20,
+                )
+                if resp.status_code == 200:
+                    invite_link = resp.json().get("invite_link")
+                    if invite_link:
+                        await update.message.reply_text(
+                            f"Manda questo link al collaboratore: {invite_link}\n"
+                            f"Scade in 24h.\n\n"
+                            f"Vuoi aggiungere altri? Rispondi 'aggiungi' o 'basta'."
+                        )
+                    else:
+                        await update.message.reply_text("Collaboratore salvato. Invite link non generato (controlla i permessi del bot nel gruppo).")
+                else:
+                    await update.message.reply_text(f"Errore generazione invite: {resp.text[:200]}")
+            except Exception as e:
+                await update.message.reply_text(f"Errore: {e}")
+        else:
+            await update.message.reply_text("agents_runner non raggiungibile.")
+        return
+
+    # Gestione "aggiungi altri" / "basta" dopo invite
+    if _is_mirco:
+        msg_lower = msg.lower().strip()
+        if msg_lower in ("aggiungi", "aggiungi altro", "aggiungi altri"):
+            if chat_id not in _session_context:
+                _session_context[chat_id] = {}
+            _session_context[chat_id]["awaiting_phone"] = project_id
+            await update.message.reply_text("Inviami il numero di telefono del collaboratore (es. +39...)")
+            return
+        if msg_lower in ("basta", "ok basta", "nessun altro"):
+            import threading as _thr
+            _thr.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
+            await update.message.reply_text("Avvio build...")
+            return
+
+    # 5. "ok lanciamo" / "lancia" / "lanciamo"
+    if msg.lower().strip() in ("ok lanciamo", "lancia", "lanciamo", "lancio", "ok lancia"):
+        if _is_collab and not _is_mirco:
+            # Notifica Mirco con pulsante conferma
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token and AUTHORIZED_USER_ID:
+                try:
+                    proj = supabase.table("projects").select("name").eq("id", project_id).execute()
+                    proj_name = proj.data[0]["name"] if proj.data else name
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={
+                            "chat_id": AUTHORIZED_USER_ID,
+                            "text": f"Il responsabile vuole lanciare '{proj_name}'. Confermi?",
+                            "reply_markup": {"inline_keyboard": [[
+                                {"text": "\U0001f680 Lancia", "callback_data": f"launch_confirm:{project_id}"}
+                            ]]}
+                        },
+                        timeout=10,
+                    )
+                except Exception as e:
+                    logger.warning(f"[LAUNCH_NOTIFY] {e}")
+            await update.message.reply_text("Ho avvisato Mirco. In attesa della sua conferma.")
+        elif _is_mirco:
+            import threading as _thr
+            _thr.Thread(target=handle_launch, args=(project_id, chat_id, thread_id), daemon=True).start()
+            await update.message.reply_text("Lancio confermato!")
+        return
+
+    # 6. Feedback durante review fasi
+    if project_status in ("review_phase1", "review_phase2", "review_phase3") and (_is_mirco or _is_collab):
+        if AGENTS_RUNNER_URL:
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/project/continue_build",
+                    json={"project_id": str(project_id), "feedback": msg, "phase": build_phase},
+                    headers=headers,
+                    timeout=10,
+                )
+                await update.message.reply_text("Aggiornando... ti avviso appena la prossima fase è pronta.")
+            except Exception as e:
+                await update.message.reply_text(f"Errore: {e}")
+        return
+
+    # 7. awaiting_spec_edit: comportamento esistente
     if ctx.get("awaiting_spec_edit") == project_id:
         _session_context[chat_id]["awaiting_spec_edit"] = None
         await update.message.reply_text(f"Aggiornando SPEC per '{name}'...")
@@ -1843,15 +2102,16 @@ async def handle_project_message(update, project):
                 await update.message.reply_text(f"Errore: {e}")
         return
 
-    # Risposta generica con contesto progetto
-    context_note = f"[Progetto: {name} | Status: {project.get('status')} | BOS: {project.get('bos_score', 0):.2f}]"
-    reply = clean_reply(ask_claude(f"{context_note}\n{msg}", chat_id=chat_id))
-    for i in range(0, len(reply), 4000):
-        await update.message.reply_text(reply[i:i + 4000])
+    # 8. Fallback: risposta generica con contesto progetto
+    if _is_mirco or _is_collab:
+        context_note = f"[Progetto: {name} | Status: {project_status} | BOS: {project.get('bos_score', 0):.2f}]"
+        reply = clean_reply(ask_claude(f"{context_note}\n{msg}", chat_id=chat_id))
+        for i in range(0, len(reply), 4000):
+            await update.message.reply_text(reply[i:i + 4000])
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler per callback query dei pulsanti inline (spec review)."""
+    """Handler per callback query dei pulsanti inline (spec review, team setup, launch)."""
     query = update.callback_query
     if not query or not query.data:
         return
@@ -1860,20 +2120,40 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     chat_id = update.effective_chat.id
     thread_id = query.message.message_thread_id if query.message else None
 
-    if data.startswith("spec_build:"):
+    if data.startswith("spec_download:"):
         project_id = int(data.split(":")[1])
-        await query.answer("Avvio build...")
-        threading.Thread(
-            target=build_approved_action,
-            args=(project_id, chat_id, thread_id),
-            daemon=True,
-        ).start()
+        await query.answer("Invio SPEC...")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            try:
+                proj = supabase.table("projects").select("spec_md,name").eq("id", project_id).execute()
+                if proj.data and proj.data[0].get("spec_md"):
+                    spec_md = proj.data[0]["spec_md"]
+                    proj_name = proj.data[0].get("name", f"progetto_{project_id}")
+                    safe_name = proj_name.replace(" ", "_").replace("/", "_")[:40]
+                    tg_data = {"chat_id": chat_id}
+                    if thread_id:
+                        tg_data["message_thread_id"] = str(thread_id)
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendDocument",
+                        data=tg_data,
+                        files={"document": (f"SPEC_{safe_name}.md", spec_md.encode("utf-8"), "text/plain")},
+                        timeout=30,
+                    )
+                else:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": "SPEC non ancora disponibile."},
+                        timeout=10,
+                    )
+            except Exception as e:
+                logger.error(f"[SPEC_DOWNLOAD] {e}")
 
-    elif data.startswith("spec_read:"):
+    elif data.startswith("spec_validate:"):
         project_id = int(data.split(":")[1])
-        await query.answer("Carico SPEC...")
+        await query.answer("SPEC validata!")
         threading.Thread(
-            target=send_spec_chunks,
+            target=start_team_setup,
             args=(project_id, chat_id, thread_id),
             daemon=True,
         ).start()
@@ -1896,6 +2176,57 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 json=payload, timeout=10,
             )
+
+    elif data.startswith("team_add:"):
+        project_id = int(data.split(":")[1])
+        await query.answer()
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_phone"] = project_id
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id, "text": "Inviami il numero di telefono del collaboratore (es. +39...)"}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("team_skip:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio build...")
+        threading.Thread(
+            target=trigger_build_start,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
+    elif data.startswith("launch_confirm:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Lancio!")
+        threading.Thread(
+            target=handle_launch,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
+    # Callback legacy (spec_build, spec_read) mantenuti per compatibilità
+    elif data.startswith("spec_build:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio build...")
+        threading.Thread(
+            target=build_approved_action,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
+    elif data.startswith("spec_read:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Carico SPEC...")
+        threading.Thread(
+            target=send_spec_chunks,
+            args=(project_id, chat_id, thread_id),
+            daemon=True,
+        ).start()
+
     else:
         await query.answer()
 
