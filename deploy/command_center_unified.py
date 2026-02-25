@@ -55,6 +55,10 @@ _notification_lock = threading.Lock()
 MIRCO_ACTIVE_WINDOW = 120  # secondi (2 minuti)
 NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 
+# ---- CODA AZIONI PRIORITIZZATA ----
+ACTION_QUEUE_TABLE = "action_queue"
+_current_action = {}  # chat_id -> action dict (azione in attesa di risposta)
+
 # ---- CODE AGENT ----
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = "mircocerisola/brAIn-core"
@@ -381,7 +385,7 @@ def execute_tool(tool_name, tool_input):
 ALLOWED_TABLES = [
     "problems", "solutions", "agent_logs", "org_knowledge", "scan_sources",
     "capability_log", "org_config", "solution_scores", "agent_events",
-    "reevaluation_log", "authorization_matrix", "finance_metrics",
+    "reevaluation_log", "authorization_matrix", "finance_metrics", "action_queue",
 ]
 
 
@@ -634,6 +638,221 @@ def trigger_scan(topic):
         return f"Errore scan: HTTP {r.status_code}"
     except Exception as e:
         return f"Errore scan: {e}"
+
+
+# ---- CODA AZIONI ----
+
+def enqueue_action(user_id, action_type, title, description, payload=None,
+                   priority=5, urgency=5, importance=5):
+    """Inserisce un'azione nella coda. Ritorna l'ID dell'azione."""
+    try:
+        row = {
+            "user_id": int(user_id),
+            "action_type": action_type,
+            "title": title,
+            "description": description,
+            "payload": json.dumps(payload) if payload else None,
+            "priority": priority,
+            "urgency": urgency,
+            "importance": importance,
+            "status": "pending",
+        }
+        result = supabase.table(ACTION_QUEUE_TABLE).insert(row).execute()
+        if result.data:
+            action_id = result.data[0]["id"]
+            logger.info(f"[ACTION_QUEUE] Azione {action_id} inserita: {title}")
+            return action_id
+        return None
+    except Exception as e:
+        logger.error(f"[ACTION_QUEUE] enqueue: {e}")
+        return None
+
+
+def get_next_action(user_id):
+    """Ritorna la prossima azione pending con priority_score piu' alto."""
+    try:
+        result = supabase.table(ACTION_QUEUE_TABLE) \
+            .select("*") \
+            .eq("user_id", int(user_id)) \
+            .eq("status", "pending") \
+            .order("priority_score", desc=True) \
+            .limit(1).execute()
+        if result.data:
+            return result.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"[ACTION_QUEUE] get_next: {e}")
+        return None
+
+
+def count_pending_actions(user_id):
+    """Conta azioni pending per un utente."""
+    try:
+        result = supabase.table(ACTION_QUEUE_TABLE) \
+            .select("id", count="exact") \
+            .eq("user_id", int(user_id)) \
+            .eq("status", "pending") \
+            .execute()
+        return result.count or 0
+    except Exception as e:
+        logger.error(f"[ACTION_QUEUE] count: {e}")
+        return 0
+
+
+def complete_action(action_id, new_status="completed"):
+    """Marca un'azione come completata o skippata."""
+    try:
+        supabase.table(ACTION_QUEUE_TABLE).update({
+            "status": new_status,
+            "completed_at": datetime.now().isoformat(),
+        }).eq("id", action_id).execute()
+        logger.info(f"[ACTION_QUEUE] Azione {action_id} -> {new_status}")
+        return True
+    except Exception as e:
+        logger.error(f"[ACTION_QUEUE] complete: {e}")
+        return False
+
+
+def list_pending_actions(user_id):
+    """Lista compatta azioni pending ordinate per priority_score."""
+    try:
+        result = supabase.table(ACTION_QUEUE_TABLE) \
+            .select("id,action_type,title,priority_score,created_at") \
+            .eq("user_id", int(user_id)) \
+            .eq("status", "pending") \
+            .order("priority_score", desc=True) \
+            .limit(20).execute()
+        return result.data or []
+    except Exception as e:
+        logger.error(f"[ACTION_QUEUE] list: {e}")
+        return []
+
+
+def format_action_message(action, pending_count):
+    """Formatta un'azione nel formato Telegram standard."""
+    title = action.get("title", "Azione")
+    desc = action.get("description", "")
+    # Tronca descrizione a 3 righe
+    desc_lines = desc.split("\n")[:3]
+    desc_short = "\n".join(desc_lines)
+
+    return (
+        f"AZIONE RICHIESTA [{pending_count} in coda]\n"
+        f"{'_' * 30}\n"
+        f"{title}\n"
+        f"{desc_short}\n"
+        f"{'_' * 30}\n"
+        f"Si  |  No  |  Dettagli"
+    )
+
+
+def send_next_action(chat_id):
+    """Invia la prossima azione in coda a Mirco. Ritorna True se inviata."""
+    user_id = chat_id
+    action = get_next_action(user_id)
+    if not action:
+        return False
+
+    pending = count_pending_actions(user_id)
+    msg = format_action_message(action, pending)
+    _current_action[chat_id] = action
+    _send_notification_now(msg)
+    return True
+
+
+def handle_action_response(chat_id, response_text):
+    """Gestisce la risposta di Mirco a un'azione in coda. Ritorna (handled, reply_text)."""
+    if chat_id not in _current_action:
+        return False, None
+
+    action = _current_action[chat_id]
+    action_id = action["id"]
+    action_type = action.get("action_type", "")
+    payload = action.get("payload")
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except:
+            payload = {}
+    payload = payload or {}
+
+    lower = response_text.strip().lower()
+
+    # Risposte affermative
+    if lower in ("si", "sì", "ok", "yes", "vai", "approva", "confermo"):
+        complete_action(action_id, "completed")
+        del _current_action[chat_id]
+
+        # Esegui operazione in base al tipo
+        result_msg = _execute_action(action_type, payload, approved=True)
+
+        # Manda prossima azione automaticamente
+        threading.Thread(target=_send_next_action_delayed, args=(chat_id,), daemon=True).start()
+        return True, result_msg
+
+    # Risposte negative
+    elif lower in ("no", "rifiuta", "skip", "salta", "annulla"):
+        complete_action(action_id, "rejected" if lower in ("no", "rifiuta") else "skipped")
+        del _current_action[chat_id]
+
+        # Manda prossima azione automaticamente
+        threading.Thread(target=_send_next_action_delayed, args=(chat_id,), daemon=True).start()
+
+        if lower in ("no", "rifiuta"):
+            result_msg = _execute_action(action_type, payload, approved=False)
+            return True, result_msg
+        return True, "Azione saltata."
+
+    # Richiesta dettagli
+    elif lower in ("dettagli", "spiega", "approfondisci", "dimmi di piu"):
+        detail = action.get("description", "Nessun dettaglio aggiuntivo.")
+        payload_info = ""
+        if payload:
+            payload_info = f"\n\nDati: {json.dumps(payload, indent=2, ensure_ascii=False, default=str)[:1000]}"
+        return True, f"{detail}{payload_info}"
+
+    return False, None
+
+
+def _execute_action(action_type, payload, approved):
+    """Esegue l'operazione conseguente a un'azione approvata/rifiutata."""
+    try:
+        if action_type == "approve_problem":
+            pid = payload.get("problem_id")
+            if pid:
+                if approved:
+                    return approve_problem(int(pid))
+                else:
+                    return reject_problem(int(pid))
+
+        elif action_type == "review_solution":
+            sid = payload.get("solution_id")
+            if sid and approved:
+                return select_solution(int(sid))
+            elif sid and not approved:
+                return f"Soluzione ID {sid} non selezionata."
+
+        elif action_type == "confirm_deploy":
+            if approved:
+                return "Deploy confermato."
+            else:
+                return "Deploy annullato."
+
+        # Tipo generico
+        if approved:
+            return "Azione confermata."
+        else:
+            return "Azione rifiutata."
+    except Exception as e:
+        return f"Errore esecuzione azione: {e}"
+
+
+def _send_next_action_delayed(chat_id):
+    """Attende 2 secondi e poi invia la prossima azione."""
+    time.sleep(2)
+    had_action = send_next_action(chat_id)
+    if not had_action:
+        _send_notification_now("Nessuna altra azione in coda.")
 
 
 # ---- LOGGING ----
@@ -1454,9 +1673,62 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("STOP ricevuto. Tutto fermo.")
         return
 
+    lower_msg = msg.strip().lower()
+
+    # ---- COMANDI CODA AZIONI ----
+    if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
+        n = count_pending_actions(chat_id)
+        if n == 0:
+            await update.message.reply_text("Nessuna azione in coda.")
+        else:
+            await update.message.reply_text(f"{n} azioni in coda.")
+            if chat_id not in _current_action:
+                send_next_action(chat_id)
+        return
+
+    if lower_msg in ("vedi tutte le azioni", "lista azioni", "tutte le azioni", "mostra azioni"):
+        actions = list_pending_actions(chat_id)
+        if not actions:
+            await update.message.reply_text("Nessuna azione in coda.")
+        else:
+            lines = [f"AZIONI IN CODA ({len(actions)})"]
+            for i, a in enumerate(actions, 1):
+                score = a.get("priority_score", 0) or 0
+                lines.append(f"{i}. {a['title']} (score: {score:.1f})")
+            await update.message.reply_text("\n".join(lines))
+        return
+
+    if lower_msg in ("salta", "salta questa", "salta questa azione", "skip"):
+        if chat_id in _current_action:
+            action = _current_action.pop(chat_id)
+            complete_action(action["id"], "skipped")
+            remaining = count_pending_actions(chat_id)
+            if remaining > 0:
+                await update.message.reply_text("Azione saltata.")
+                send_next_action(chat_id)
+            else:
+                await update.message.reply_text("Azione saltata. Nessuna altra azione in coda.")
+        else:
+            await update.message.reply_text("Nessuna azione attiva da saltare.")
+        return
+
+    if lower_msg in ("prossima azione", "prossima", "next"):
+        if send_next_action(chat_id):
+            pass  # send_next_action manda il messaggio
+        else:
+            await update.message.reply_text("Nessuna azione in coda.")
+        return
+
+    # ---- RISPOSTA A AZIONE IN CORSO ----
+    if chat_id in _current_action:
+        handled, reply_text = handle_action_response(chat_id, msg)
+        if handled:
+            if reply_text:
+                await update.message.reply_text(clean_reply(reply_text))
+            return
+
     # Check pending deploy
     if chat_id in pending_deploys:
-        lower_msg = msg.strip().lower()
         if lower_msg in ("si", "sì", "ok", "vai", "yes", "deploy", "builda", "deploya"):
             deploy_info = pending_deploys.pop(chat_id)
             await update.message.reply_text("Avvio build e deploy...")
@@ -1589,12 +1861,49 @@ async def handle_alert(request):
         return web.Response(text=str(e), status=500)
 
 
+async def handle_enqueue_action(request):
+    """Endpoint per agenti: inserisce un'azione nella coda di Mirco."""
+    try:
+        data = await request.json()
+        action_type = data.get("action_type")
+        title = data.get("title")
+        description = data.get("description", "")
+        payload = data.get("payload")
+        priority = data.get("priority", 5)
+        urgency = data.get("urgency", 5)
+        importance = data.get("importance", 5)
+
+        if not action_type or not title:
+            return web.Response(text="Missing action_type or title", status=400)
+
+        # Usa AUTHORIZED_USER_ID o il user_id dal payload
+        user_id = data.get("user_id") or AUTHORIZED_USER_ID
+        if not user_id:
+            return web.Response(text="No user_id available", status=400)
+
+        action_id = enqueue_action(
+            user_id, action_type, title, description,
+            payload=payload, priority=priority, urgency=urgency, importance=importance,
+        )
+        if action_id:
+            # Se Mirco non ha un'azione attiva, manda subito la prossima
+            chat_id = int(user_id)
+            if chat_id not in _current_action:
+                send_next_action(chat_id)
+
+            return web.json_response({"status": "queued", "action_id": action_id})
+        return web.Response(text="Failed to enqueue", status=500)
+    except Exception as e:
+        logger.error(f"[ENQUEUE] {e}")
+        return web.Response(text=str(e), status=500)
+
+
 # ---- MAIN ----
 
 async def main():
     global tg_app
 
-    logger.info("brAIn Command Center v3.0 — Sonnet 4.5 + Context + Smart Chat")
+    logger.info("brAIn Command Center v3.3 — Sonnet 4.5 + Action Queue")
 
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
@@ -1615,6 +1924,7 @@ async def main():
     app.router.add_get("/", health_check)
     app.router.add_post("/", telegram_webhook)
     app.router.add_post("/alert", handle_alert)
+    app.router.add_post("/action", handle_enqueue_action)
 
     runner = web.AppRunner(app)
     await runner.setup()
