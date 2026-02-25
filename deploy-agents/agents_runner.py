@@ -232,7 +232,41 @@ SCANNER_WEIGHTS = {
     "recurring_potential": 0.05,
 }
 
-MIN_SCORE_THRESHOLD = 0.55
+# ---- PIPELINE THRESHOLDS (scala 0-1, armonizzati) — default, sovrascritti da DB ----
+# Tutti gli score nel sistema sono su scala 0-1 coerente:
+#   weighted_score (problems): sum(val * weight), sum(weights)=1.0 → 0-1
+#   overall_score (solutions): (impact + feasibility) / 2 → 0-1
+#   feasibility_score (FE): sum(val * weight), sum(weights)=1.0 → 0-1
+#   bos_score: pq*0.30 + sq*0.30 + fe*0.40 → 0-1
+PIPELINE_THRESHOLDS = {
+    "problema": 0.65,       # weighted_score minimo per auto-approvare il problema
+    "soluzione": 0.70,      # overall_score minimo della migliore soluzione per proseguire
+    "feasibility": 0.70,    # feasibility_score FE minimo per proseguire
+    "bos": 0.80,            # BOS minimo per notificare Mirco (approve_bos action)
+}
+# Target: solo il 10% dei BOS generati deve superare soglia_bos.
+# Le soglie si aggiornano automaticamente ogni lunedi via /thresholds/weekly.
+
+MIN_SCORE_THRESHOLD = PIPELINE_THRESHOLDS["problema"]
+
+
+def get_pipeline_thresholds():
+    """Legge soglie dinamiche dalla tabella pipeline_thresholds. Fallback ai default."""
+    try:
+        result = supabase.table("pipeline_thresholds").select(
+            "soglia_problema, soglia_soluzione, soglia_feasibility, soglia_bos"
+        ).order("id", desc=True).limit(1).execute()
+        if result.data:
+            row = result.data[0]
+            return {
+                "problema": float(row.get("soglia_problema") or PIPELINE_THRESHOLDS["problema"]),
+                "soluzione": float(row.get("soglia_soluzione") or PIPELINE_THRESHOLDS["soluzione"]),
+                "feasibility": float(row.get("soglia_feasibility") or PIPELINE_THRESHOLDS["feasibility"]),
+                "bos": float(row.get("soglia_bos") or PIPELINE_THRESHOLDS["bos"]),
+            }
+    except Exception as e:
+        logger.warning(f"[THRESHOLDS] DB read failed, uso default: {e}")
+    return dict(PIPELINE_THRESHOLDS)
 
 SCANNER_SECTORS = [
     "food", "health", "finance", "education", "legal",
@@ -483,7 +517,11 @@ def get_standard_queries(sources):
 
 
 def run_scan(queries):
-    """Core scan logic."""
+    """Core scan logic con soglie dinamiche da DB."""
+    # Leggi soglie dinamiche all'inizio di ogni scan
+    thresholds = get_pipeline_thresholds()
+    soglia_problema = thresholds["problema"]
+
     try:
         sources = supabase.table("scan_sources").select("*").eq("status", "active").order("relevance_score", desc=True).limit(10).execute()
         sources = sources.data or []
@@ -595,8 +633,10 @@ def run_scan(queries):
                     fp = bp["_fp"]
                     weighted = bp["_weighted"]
 
-                    if weighted < MIN_SCORE_THRESHOLD:
-                        continue
+                    # Determina status in base alla soglia dinamica
+                    # Sotto soglia: archiviato (nessuna notifica, nessuna pipeline)
+                    # Sopra soglia: new (va in pipeline automatica)
+                    save_status = "new" if weighted >= soglia_problema else "archived"
 
                     urgency_text = scanner_normalize_urgency(prob.get("urgency", 0.5))
 
@@ -630,14 +670,17 @@ def run_scan(queries):
                             "real_world_example": prob.get("real_world_example", ""),
                             "why_it_matters": prob.get("why_it_matters", ""),
                             "fingerprint": fp, "source_id": source_id,
-                            "status": "new", "created_by": "world_scanner_v2",
+                            "status": save_status, "created_by": "world_scanner_v2",
                         }).execute()
 
-                        total_saved += 1
-                        all_scores.append(weighted)
                         existing_fps.add(fp)
-                        if insert_result.data:
-                            saved_problem_ids.append(insert_result.data[0]["id"])
+                        if save_status == "new":
+                            total_saved += 1
+                            all_scores.append(weighted)
+                            if insert_result.data:
+                                saved_problem_ids.append(insert_result.data[0]["id"])
+                        else:
+                            logger.debug(f"[SCAN] '{title[:50]}': score={weighted:.2f} < soglia {soglia_problema} → archived")
 
                     except Exception as e:
                         if "idx_problems_fingerprint" not in str(e):
@@ -688,7 +731,7 @@ def run_scan(queries):
             {"problems_saved": total_saved, "problem_ids": saved_problem_ids,
              "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
         # Notifica problemi trovati
-        high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= 0.55]
+        high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= MIN_SCORE_THRESHOLD]
         if high_score_ids:
             emit_event("world_scanner", "problems_found", "command_center",
                 {"problem_ids": high_score_ids, "count": len(high_score_ids)})
@@ -1084,6 +1127,8 @@ def run_solution_architect(problem_id=None):
 
             sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
             if sol_id:
+                if overall < PIPELINE_THRESHOLDS["soluzione"]:
+                    logger.info(f"[SA] {title[:40]}: overall={overall:.2f} sotto soglia {PIPELINE_THRESHOLDS['soluzione']}, salvata ma non prioritaria")
                 total_saved += 1
                 problem_solution_ids.append(sol_id)
                 all_solution_ids.append(sol_id)
@@ -1262,6 +1307,9 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
         feasibility_score = feasibility_calculate_score(analysis)
 
+        if feasibility_score < PIPELINE_THRESHOLDS["feasibility"]:
+            logger.info(f"[FE] {title[:40]}: feasibility={feasibility_score:.2f} sotto soglia {PIPELINE_THRESHOLDS['feasibility']}")
+
         try:
             supabase.table("solutions").update({
                 "feasibility_score": feasibility_score,
@@ -1407,10 +1455,10 @@ def calculate_bos(solution_id):
     bos = round(problem_quality * 0.30 + solution_quality * 0.30 + feasibility_score * 0.40, 4)
     bos = min(1.0, max(0.0, bos))
 
-    if bos >= 0.75:
+    # Soglia dinamica da DB: >= soglia_bos → AUTO-GO (notifica Mirco), altrimenti ARCHIVE
+    thresholds = get_pipeline_thresholds()
+    if bos >= thresholds["bos"]:
         verdict = "AUTO-GO"
-    elif bos >= 0.55:
-        verdict = "REVIEW"
     else:
         verdict = "ARCHIVE"
 
@@ -1443,6 +1491,42 @@ def calculate_bos(solution_id):
 
     logger.info(f"[BOS] {sol.get('title', '?')[:40]}: {bos:.2f} {verdict}")
     return bos_details
+
+
+def check_bos_weekly_target():
+    """Verifica target dinamico: solo il 10% dei BOS deve superare soglia_bos."""
+    try:
+        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        result = supabase.table("solutions").select(
+            "bos_score"
+        ).not_.is_("bos_score", "null").gte("created_at", week_ago).execute()
+
+        if not result.data:
+            return None
+
+        thresholds = get_pipeline_thresholds()
+        scores = [float(s["bos_score"]) for s in result.data]
+        total = len(scores)
+        above_threshold = sum(1 for s in scores if s >= thresholds["bos"])
+        pct_above = round(above_threshold / total * 100, 1) if total > 0 else 0
+
+        stats = {
+            "total_bos": total,
+            "above_threshold": above_threshold,
+            "pct_above": pct_above,
+            "target_pct": 10.0,
+            "on_target": pct_above <= 10.0,
+            "avg_bos": round(sum(scores) / total, 3) if total else 0,
+        }
+
+        if not stats["on_target"]:
+            logger.warning(f"[BOS TARGET] {pct_above}% sopra soglia (target: 10%). "
+                f"{above_threshold}/{total} BOS >= {thresholds['bos']}")
+
+        return stats
+    except Exception as e:
+        logger.error(f"[BOS TARGET] Errore: {e}")
+        return None
 
 
 def format_bos_card(solution_title, bos_details):
@@ -1508,10 +1592,93 @@ def run_bos_endpoint_logic(solution_id=None):
 
 
 # ============================================================
-# PIPELINE AUTOMATICA
+# PIPELINE AUTOMATICA v2.0 — 4 step con soglie dinamiche
+# Mirco vede SOLO il BOS finale se supera la soglia.
+# Nessuna notifica intermedia per problema, soluzione, feasibility.
 # ============================================================
 
+def enqueue_bos_action(problem_id, solution_id, problem_title, sol_title, sol_desc, bos_score, bos_data):
+    """Inserisce azione approve_bos in action_queue e notifica Mirco con il formato BOS standard."""
+    chat_id = get_telegram_chat_id()
+    if not chat_id:
+        logger.warning("[BOS ACTION] telegram_chat_id non trovato in org_config")
+        return
+
+    # Conta azioni pending per determinare [N in coda]
+    try:
+        pending = supabase.table("action_queue").select("id", count="exact") \
+            .eq("user_id", int(chat_id)).eq("status", "pending").execute()
+        pending_count = (pending.count or 0) + 1
+    except:
+        pending_count = 1
+
+    # Descrizione per action_queue (dettagliata, usata da "Dettagli")
+    desc_detail = (
+        f"Soluzione: {sol_title}\n"
+        f"Score BOS: {bos_score:.2f}/1\n"
+        f"Problem quality: {bos_data.get('problem_quality', 0):.2f} | "
+        f"Solution quality: {bos_data.get('solution_quality', 0):.2f} | "
+        f"Feasibility: {bos_data.get('feasibility_score', 0):.2f}\n"
+        f"{(sol_desc or '')[:400]}"
+    )
+
+    # Inserisci in action_queue
+    action_db_id = None
+    try:
+        result = supabase.table("action_queue").insert({
+            "user_id": int(chat_id),
+            "action_type": "approve_bos",
+            "title": f"BOS PRONTO \u2014 {problem_title[:60]}",
+            "description": desc_detail,
+            "payload": json.dumps({
+                "problem_id": str(problem_id),
+                "solution_id": str(solution_id),
+                "bos_score": bos_score,
+                "problem_title": problem_title[:80],
+                "sol_title": sol_title[:80],
+            }),
+            "priority": 9,
+            "urgency": 9,
+            "importance": 9,
+            "status": "pending",
+        }).execute()
+        if result.data:
+            action_db_id = result.data[0]["id"]
+    except Exception as e:
+        logger.error(f"[BOS ACTION] enqueue error: {e}")
+        return
+
+    # Notifica Mirco con formato speciale BOS — solo il messaggio, lui risponde si/no/dettagli
+    sep = "\u2501" * 15
+    desc_2lines = "\n".join((sol_desc or "Descrizione non disponibile").split("\n")[:2])[:200]
+    msg = (
+        f"\u26a1 AZIONE RICHIESTA [{pending_count} in coda]\n"
+        f"{sep}\n"
+        f"\U0001f3af BOS PRONTO \u2014 {problem_title[:60]}\n"
+        f"Score: {bos_score:.2f}/1 | Soluzione: {sol_title[:50]}\n"
+        f"{desc_2lines}\n"
+        f"{sep}\n"
+        f"\u2705 Avvia esecuzione  |  \u274c Scarta  |  \U0001f50d Dettagli"
+    )
+    notify_telegram(msg, level="critical", source="pipeline")
+
+    # Informa il Command Center di caricare questa azione come current_action
+    if COMMAND_CENTER_URL and action_db_id:
+        try:
+            requests.post(
+                f"{COMMAND_CENTER_URL}/action/set",
+                json={"chat_id": str(chat_id), "action_id": str(action_db_id)},
+                timeout=5,
+            )
+        except Exception as e:
+            logger.warning(f"[BOS ACTION] /action/set error (non critico): {e}")
+
+    logger.info(f"[BOS ACTION] Enqueued id={action_db_id} per '{problem_title[:50]}' BOS={bos_score:.2f}")
+
+
 def run_auto_pipeline(saved_problem_ids):
+    """Pipeline automatica: problema → SA (best solution) → FE → BOS → approve_bos action.
+    Mirco riceve notifica SOLO se BOS >= soglia_bos. Zero notifiche intermedie."""
     if not saved_problem_ids:
         return
 
@@ -1519,10 +1686,10 @@ def run_auto_pipeline(saved_problem_ids):
     log_to_supabase("pipeline", "auto_pipeline_start", 0,
         f"{len(saved_problem_ids)} problemi", None, "none")
 
+    thresholds = get_pipeline_thresholds()
     pipeline_start = time.time()
-    total_solutions = 0
-    new_solution_ids = []
-    problems_processed = []
+    bos_generated = 0
+    bos_approved = 0
 
     for pid in saved_problem_ids:
         try:
@@ -1530,7 +1697,16 @@ def run_auto_pipeline(saved_problem_ids):
             if not prob_result.data:
                 continue
             problem = prob_result.data[0]
+            problem_score = float(problem.get("weighted_score", 0) or 0)
+            problem_title = problem.get("title", "?")
 
+            # STEP 1: verifica soglia problema (già filtrata in run_scan, ricontrollo difensivo)
+            if problem_score < thresholds["problema"]:
+                logger.info(f"[PIPELINE] '{problem_title[:50]}': score={problem_score:.2f} < soglia_problema={thresholds['problema']:.2f} → archived")
+                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                continue
+
+            # STEP 2: Solution Architect — genera 3 soluzioni
             dossier = research_problem(problem)
             if not dossier:
                 dossier = {"existing_solutions": [], "market_gaps": ["nessun dato"],
@@ -1539,8 +1715,7 @@ def run_auto_pipeline(saved_problem_ids):
 
             solutions_data = generate_solutions_unconstrained(problem, dossier)
             if not solutions_data or not solutions_data.get("solutions"):
-                logger.warning(f"[PIPELINE] SA generazione fallita per '{problem['title'][:60]}'. "
-                    f"Risposta: {str(solutions_data)[:200] if solutions_data else 'None'}")
+                logger.warning(f"[PIPELINE] SA generazione fallita per '{problem_title[:50]}'")
                 continue
 
             ranking_rationale = solutions_data.get("ranking_rationale", "")
@@ -1552,88 +1727,76 @@ def run_auto_pipeline(saved_problem_ids):
             for a in feasibility_data.get("assessments", []):
                 feas_map[a.get("solution_title", "")] = a
 
-            problem_solutions = 0
+            # Salva tutte e 3 le soluzioni, trova quella con overall_score più alto
+            best_sol_id = None
+            best_overall = 0.0
             for sol in solutions_data.get("solutions", []):
-                title = sol.get("title", "")
-                assessment = feas_map.get(title, {
+                sol_title = sol.get("title", "")
+                assessment = feas_map.get(sol_title, {
                     "feasibility_score": 0.5, "complexity": "medium",
                     "time_to_mvp": "sconosciuto", "cost_estimate": "sconosciuto",
                     "tech_stack_fit": 0.5, "biggest_risk": "non valutato",
                     "recommended_mvp": "non valutato", "nocode_compatible": True,
                 })
-
                 sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
-                if sol_id:
-                    total_solutions += 1
-                    problem_solutions += 1
-                    new_solution_ids.append(sol_id)
+                if sol_id and overall > best_overall:
+                    best_overall = overall
+                    best_sol_id = sol_id
 
-            problems_processed.append({
-                "title": problem["title"],
-                "score": problem.get("weighted_score", 0),
-                "solutions": problem_solutions,
-            })
+            # Verifica soglia soluzione (best overall_score)
+            if not best_sol_id or best_overall < thresholds["soluzione"]:
+                logger.info(f"[PIPELINE] '{problem_title[:50]}': best_overall={best_overall:.2f} < soglia_soluzione={thresholds['soluzione']:.2f} → archived silenziosamente")
+                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                time.sleep(1)
+                continue
+
+            # STEP 3: Feasibility Engine — solo sulla migliore soluzione
+            run_feasibility_engine(solution_id=best_sol_id, notify=False)
+
+            # Rileggi feasibility_score aggiornato
+            sol_row = supabase.table("solutions").select(
+                "feasibility_score, title, description"
+            ).eq("id", best_sol_id).execute()
+            if not sol_row.data:
+                continue
+            fe_score = float(sol_row.data[0].get("feasibility_score", 0) or 0)
+            sol_title = sol_row.data[0].get("title", "?")
+            sol_desc = sol_row.data[0].get("description", "")
+
+            if fe_score < thresholds["feasibility"]:
+                logger.info(f"[PIPELINE] '{sol_title[:50]}': fe_score={fe_score:.2f} < soglia_feasibility={thresholds['feasibility']:.2f} → archived silenziosamente")
+                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
+                time.sleep(1)
+                continue
+
+            # STEP 4: BOS — calcola e notifica Mirco solo se >= soglia_bos
+            bos_data = calculate_bos(best_sol_id)
+            if not bos_data:
+                continue
+
+            bos_score = bos_data["bos_score"]
+            bos_generated += 1
+
+            if bos_score >= thresholds["bos"]:
+                bos_approved += 1
+                enqueue_bos_action(pid, best_sol_id, problem_title, sol_title, sol_desc, bos_score, bos_data)
+            else:
+                logger.info(f"[PIPELINE] '{sol_title[:50]}': BOS={bos_score:.2f} < soglia_bos={thresholds['bos']:.2f} → archived silenziosamente")
+                supabase.table("problems").update({"status": "archived"}).eq("id", pid).execute()
 
             time.sleep(2)
+
         except Exception as e:
-            logger.error(f"[PIPELINE] SA error pid={pid}: {e}")
-
-    # FASE 2: Feasibility Engine
-    go_count = 0
-    conditional_count = 0
-    no_go_count = 0
-    bos_results = []
-
-    for sid in new_solution_ids:
-        try:
-            result = run_feasibility_engine(solution_id=sid, notify=False)
-            if result:
-                go_count += result.get("go", 0)
-                conditional_count += result.get("conditional_go", 0)
-                no_go_count += result.get("no_go", 0)
-        except Exception as e:
-            logger.error(f"[PIPELINE] FE error sid={sid}: {e}")
-
-    # FASE 3: BOS per tutte
-    for sid in new_solution_ids:
-        bos_data = calculate_bos(sid)
-        if bos_data:
-            try:
-                sol_data = supabase.table("solutions").select("title").eq("id", sid).execute()
-                title = sol_data.data[0]["title"] if sol_data.data else "?"
-            except:
-                title = "?"
-            bos_results.append({"title": title, "bos": bos_data})
+            logger.error(f"[PIPELINE] Error pid={pid}: {e}")
 
     pipeline_duration = int(time.time() - pipeline_start)
 
-    # RIEPILOGO — formato decimale
-    msg = f"PIPELINE COMPLETATA ({pipeline_duration}s)\n\n"
-    msg += f"Problemi analizzati: {len(problems_processed)}\n"
-    for pp in problems_processed:
-        msg += f"  Score: {pp['score']:.2f} | {pp['title']} -> {pp['solutions']} sol.\n"
-    msg += f"\nSoluzioni: {total_solutions}\n"
-    msg += f"Feasibility: {go_count} GO, {conditional_count} conditional, {no_go_count} no-go\n"
-
-    if bos_results:
-        bos_sorted = sorted(bos_results, key=lambda x: x["bos"]["bos_score"], reverse=True)
-        msg += "\nBOS RANKING:\n"
-        for br in bos_sorted[:5]:
-            b = br["bos"]
-            msg += f"  Score: {b['bos_score']:.2f} | {b['verdict']} | {br['title']}\n"
-
-    msg += "\nChiedimi i dettagli sul Command Center!"
-    notify_telegram(msg)
-
-    for br in bos_results:
-        if br["bos"]["verdict"] in ("AUTO-GO", "REVIEW"):
-            card = format_bos_card(br["title"], br["bos"])
-            notify_telegram(card)
-
     log_to_supabase("pipeline", "auto_pipeline_complete", 0,
-        f"{len(saved_problem_ids)} problemi -> {total_solutions} soluzioni",
-        f"GO:{go_count} COND:{conditional_count} NO:{no_go_count}",
+        f"{len(saved_problem_ids)} problemi → {bos_generated} BOS → {bos_approved} notifiche Mirco",
+        f"soglie: P={thresholds['problema']} S={thresholds['soluzione']} F={thresholds['feasibility']} BOS={thresholds['bos']}",
         "none", 0, 0, 0, pipeline_duration * 1000)
+
+    logger.info(f"[PIPELINE] Completata in {pipeline_duration}s: {bos_approved}/{bos_generated} BOS notificati a Mirco")
 
 
 # ============================================================
@@ -2770,6 +2933,15 @@ def generate_daily_report():
                 report_lines.append(f"  Score: {bos:.2f} | {verdict} | {s['title']}")
             report_lines.append("")
 
+    # Target dinamico settimanale BOS
+    bos_target = check_bos_weekly_target()
+    if bos_target:
+        status_emoji = "OK" if bos_target["on_target"] else "ATTENZIONE"
+        report_lines.append(f"TARGET BOS SETTIMANALE: {status_emoji}")
+        report_lines.append(f"  {bos_target['above_threshold']}/{bos_target['total_bos']} sopra {PIPELINE_THRESHOLDS['bos']} ({bos_target['pct_above']}%, target: 10%)")
+        report_lines.append(f"  Media BOS: {bos_target['avg_bos']}")
+        report_lines.append("")
+
     # Lezioni apprese oggi
     try:
         lessons = supabase.table("org_knowledge").select("title").gte("created_at", day_start).limit(3).execute()
@@ -2822,12 +2994,12 @@ def process_events():
 
         try:
             if event_type == "scan_completed":
-                # Trigger solution generation per problemi con score >= 0.65
+                # Trigger solution generation per problemi con score >= soglia_problema
                 problem_ids = payload.get("problem_ids", [])
                 for pid in problem_ids:
                     try:
                         prob = supabase.table("problems").select("weighted_score").eq("id", pid).execute()
-                        if prob.data and float(prob.data[0].get("weighted_score", 0) or 0) >= 0.55:
+                        if prob.data and float(prob.data[0].get("weighted_score", 0) or 0) >= MIN_SCORE_THRESHOLD:
                             emit_event("event_processor", "problem_ready", "solution_architect",
                                 {"problem_id": str(pid)})
                     except:
@@ -2863,13 +3035,12 @@ def process_events():
                 verdict = payload.get("verdict", "ARCHIVE")
                 solution_id = payload.get("solution_id")
 
+                # Solo AUTO-GO viene processato. REVIEW eliminato — la pipeline
+                # decide direttamente tramite enqueue_bos_action se BOS >= soglia_bos.
                 if verdict == "AUTO-GO":
                     emit_event("event_processor", "auto_go", "project_builder",
                         {"solution_id": solution_id, "bos": bos_score}, "high")
-                elif verdict == "REVIEW":
-                    emit_event("event_processor", "review_request", "command_center",
-                        {"solution_id": solution_id, "bos": bos_score}, "high")
-                # ARCHIVE: no action needed
+                # ARCHIVE: nessuna azione
 
                 mark_event_done(event["id"])
 
@@ -2902,15 +3073,8 @@ def process_events():
                 mark_event_done(event["id"])
 
             elif event_type == "review_request":
-                sol_id = payload.get("solution_id")
-                bos = payload.get("bos", 0)
-                if sol_id:
-                    try:
-                        sol = supabase.table("solutions").select("title").eq("id", sol_id).execute()
-                        title = sol.data[0]["title"] if sol.data else "?"
-                        notify_telegram(f"REVIEW RICHIESTA\n\nSoluzione: {title}\nBOS: {bos:.2f}\n\nVuoi procedere? Rispondi sul Command Center.")
-                    except:
-                        pass
+                # Tipo obsoleto — la pipeline v2 usa solo approve_bos action.
+                # Gestiamo silenziosamente per compatibilità con eventi esistenti in DB.
                 mark_event_done(event["id"])
 
             elif event_type == "error_pattern_detected":
@@ -2931,6 +3095,118 @@ def process_events():
             mark_event_done(event["id"], "failed")
 
     return {"processed": processed}
+
+
+# ============================================================
+# THRESHOLD MANAGER — Aggiornamento settimanale soglie dinamiche
+# ============================================================
+
+def run_weekly_threshold_update():
+    """Aggiorna le soglie della pipeline in base al bos_approval_rate settimanale.
+    Chiamato ogni lunedi alle 08:00 via Cloud Scheduler → /thresholds/weekly.
+    Target: bos_approval_rate <= 10%."""
+    logger.info("[THRESHOLDS] Weekly update starting...")
+
+    thresholds = get_pipeline_thresholds()
+    soglia_bos = thresholds["bos"]
+
+    # BOS calcolati nell'ultima settimana
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    try:
+        result = supabase.table("solutions").select("bos_score") \
+            .not_.is_("bos_score", "null").gte("created_at", week_ago).execute()
+        scores = [float(s["bos_score"]) for s in (result.data or [])]
+    except Exception as e:
+        logger.error(f"[THRESHOLDS] DB read error: {e}")
+        scores = []
+
+    total = len(scores)
+    above_threshold = sum(1 for s in scores if s >= soglia_bos) if scores else 0
+    bos_approval_rate = round(above_threshold / total * 100, 1) if total > 0 else 0.0
+
+    # Calcola factor di aggiustamento
+    factor = 1.0
+    reason = f"bos_approval_rate={bos_approval_rate:.1f}% nel target (<=10%), soglie invariate"
+
+    if bos_approval_rate > 20:
+        factor = 1.05
+        reason = f"bos_approval_rate={bos_approval_rate:.1f}% > 20%, alzo soglie del 5%"
+    elif bos_approval_rate > 10:
+        factor = 1.02
+        reason = f"bos_approval_rate={bos_approval_rate:.1f}% > 10%, alzo soglie del 2%"
+    elif total == 0 or bos_approval_rate == 0.0:
+        # Controlla se anche la settimana precedente aveva 0 BOS
+        try:
+            prev_rows = supabase.table("pipeline_thresholds").select("bos_approval_rate") \
+                .order("id", desc=True).limit(2).execute()
+            prev_data = prev_rows.data or []
+            consecutive_zero = (
+                len(prev_data) >= 1 and
+                (prev_data[0].get("bos_approval_rate") or 0.0) == 0.0
+            )
+        except:
+            consecutive_zero = False
+
+        if consecutive_zero:
+            factor = 0.95
+            reason = "bos_approval_rate=0% per 2+ settimane consecutive, abbasso soglie del 5%"
+        else:
+            reason = "bos_approval_rate=0% (prima settimana senza BOS), soglie invariate in attesa"
+
+    new_problema = round(min(0.95, max(0.30, thresholds["problema"] * factor)), 3)
+    new_soluzione = round(min(0.95, max(0.30, thresholds["soluzione"] * factor)), 3)
+    new_feasibility = round(min(0.95, max(0.30, thresholds["feasibility"] * factor)), 3)
+    new_bos = round(min(0.95, max(0.30, thresholds["bos"] * factor)), 3)
+
+    # Salva nuove soglie in DB
+    try:
+        supabase.table("pipeline_thresholds").insert({
+            "soglia_problema": new_problema,
+            "soglia_soluzione": new_soluzione,
+            "soglia_feasibility": new_feasibility,
+            "soglia_bos": new_bos,
+            "bos_approval_rate": bos_approval_rate,
+            "update_reason": reason,
+        }).execute()
+    except Exception as e:
+        logger.error(f"[THRESHOLDS] Save error: {e}")
+
+    # Report a Mirco con formato standard
+    sep = "\u2501" * 15
+    changed = factor != 1.0
+    msg = (
+        f"AGGIORNAMENTO SOGLIE SETTIMANALE\n"
+        f"{sep}\n"
+        f"BOS approvati questa settimana: {above_threshold}/{total} ({bos_approval_rate:.1f}%)\n"
+        f"Soglie aggiornate:\n"
+        f"- Problema: {thresholds['problema']:.2f} \u2192 {new_problema:.2f}" + (" (=" if not changed else "") + "\n"
+        f"- Soluzione: {thresholds['soluzione']:.2f} \u2192 {new_soluzione:.2f}\n"
+        f"- Feasibility: {thresholds['feasibility']:.2f} \u2192 {new_feasibility:.2f}\n"
+        f"- BOS: {thresholds['bos']:.2f} \u2192 {new_bos:.2f}\n"
+        f"Motivo: {reason}\n"
+        f"{sep}\n"
+        f"Vuoi modificare manualmente le soglie?"
+    )
+    notify_telegram(msg, level="info", source="threshold_manager")
+
+    log_to_supabase("threshold_manager", "weekly_update", 0,
+        f"bos_rate={bos_approval_rate}% total={total}", reason, "none")
+
+    logger.info(f"[THRESHOLDS] Weekly update done. factor={factor} bos_rate={bos_approval_rate}%")
+    return {
+        "status": "completed",
+        "total_bos": total,
+        "above_threshold": above_threshold,
+        "bos_approval_rate": bos_approval_rate,
+        "new_thresholds": {
+            "problema": new_problema,
+            "soluzione": new_soluzione,
+            "feasibility": new_feasibility,
+            "bos": new_bos,
+        },
+        "factor": factor,
+        "reason": reason,
+    }
 
 
 # ============================================================
@@ -3132,6 +3408,10 @@ async def run_source_refresh_endpoint(request):
     result = run_source_refresh()
     return web.json_response(result)
 
+async def run_weekly_threshold_endpoint(request):
+    result = run_weekly_threshold_update()
+    return web.json_response(result)
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
@@ -3166,6 +3446,7 @@ async def main():
     app.router.add_post("/cycle/capability", run_scout_endpoint)
     app.router.add_post("/cycle/sources", run_source_refresh_endpoint)
     app.router.add_post("/cycle/recycle", run_recycle_endpoint)
+    app.router.add_post("/thresholds/weekly", run_weekly_threshold_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)

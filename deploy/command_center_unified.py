@@ -225,16 +225,21 @@ Cosa fa | Per chi | Revenue | Costo mensile | TTM
 
 DEEP DIVE: solo se Mirco chiede "approfondisci" o "dettagli". Max 15 righe.
 
+PIPELINE AUTOMATICA (v3.4):
+La pipeline ora e' completamente automatica: Scanner -> SA -> FE -> BOS. Mirco riceve notifica SOLO per il BOS finale se supera soglia_bos. Non ci sono piu azioni review_problem/review_solution/review_feasibility. L'unica azione manuale e' approve_bos (si/no/dettagli).
+
 FLUSSO:
 - "problemi": query_supabase, table=problems, select=id,title,weighted_score,sector,urgency,status, order_by=weighted_score, order_desc=true, limit=10.
-- "approva" / "si vai": approve_problem con ID dal contesto.
-- "rifiuta" / "skip" / "no": reject_problem.
+- "approva" / "si vai": risponde a azione BOS in coda, o approve_problem manuale.
+- "rifiuta" / "skip" / "no": rifiuta azione BOS in coda, o reject_problem manuale.
 - "soluzioni": query_supabase table=solutions.
 - "seleziona": select_solution.
 - "stato" / "status": get_system_status.
 - "costi": get_cost_report.
 - Tema da esplorare: trigger_scan.
 - Problema per nome: search_problems con parole chiave.
+- "soglie" / "thresholds": query_supabase table=pipeline_thresholds, select=*, order_by=id, order_desc=true, limit=1.
+- "modifica soglia X a Y": modify_thresholds con soglia e valore.
 
 {ctx}{session}{summary_section}"""
 
@@ -355,6 +360,18 @@ TOOLS = [
             "required": ["keywords"],
         },
     },
+    {
+        "name": "modify_thresholds",
+        "description": "Modifica manualmente una soglia della pipeline automatica. Usa quando Mirco vuole cambiare soglia_problema, soglia_soluzione, soglia_feasibility o soglia_bos.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "soglia": {"type": "string", "description": "Quale soglia modificare: problema, soluzione, feasibility, bos"},
+                "valore": {"type": "number", "description": "Nuovo valore tra 0.0 e 1.0"},
+            },
+            "required": ["soglia", "valore"],
+        },
+    },
 ]
 
 
@@ -376,6 +393,8 @@ def execute_tool(tool_name, tool_input):
             return trigger_scan(tool_input["topic"])
         elif tool_name == "search_problems":
             return search_problems(tool_input["keywords"])
+        elif tool_name == "modify_thresholds":
+            return modify_thresholds(tool_input["soglia"], tool_input["valore"])
         else:
             return f"Tool sconosciuto: {tool_name}"
     except Exception as e:
@@ -386,6 +405,7 @@ ALLOWED_TABLES = [
     "problems", "solutions", "agent_logs", "org_knowledge", "scan_sources",
     "capability_log", "org_config", "solution_scores", "agent_events",
     "reevaluation_log", "authorization_matrix", "finance_metrics", "action_queue",
+    "pipeline_thresholds",
 ]
 
 
@@ -624,6 +644,48 @@ def select_solution(solution_id):
         return f"Errore selezione: {e}"
 
 
+def modify_thresholds(soglia, valore):
+    """Modifica manualmente una soglia della pipeline e inserisce nuova riga in pipeline_thresholds."""
+    try:
+        valore = float(valore)
+        if valore < 0.0 or valore > 1.0:
+            return "Valore non valido. Deve essere tra 0.0 e 1.0."
+
+        field_map = {
+            "problema": "soglia_problema",
+            "soluzione": "soglia_soluzione",
+            "feasibility": "soglia_feasibility",
+            "bos": "soglia_bos",
+        }
+        if soglia not in field_map:
+            return f"Soglia non valida. Usa: {', '.join(field_map.keys())}"
+
+        # Leggi riga corrente
+        current = supabase.table("pipeline_thresholds").select("*").order("id", desc=True).limit(1).execute()
+        if current.data:
+            row = current.data[0]
+            new_row = {
+                "soglia_problema": float(row.get("soglia_problema") or 0.65),
+                "soglia_soluzione": float(row.get("soglia_soluzione") or 0.70),
+                "soglia_feasibility": float(row.get("soglia_feasibility") or 0.70),
+                "soglia_bos": float(row.get("soglia_bos") or 0.80),
+                "bos_approval_rate": row.get("bos_approval_rate"),
+                "update_reason": f"Modifica manuale da Mirco: {field_map[soglia]} = {valore:.3f}",
+            }
+        else:
+            new_row = {
+                "soglia_problema": 0.65, "soglia_soluzione": 0.70,
+                "soglia_feasibility": 0.70, "soglia_bos": 0.80,
+                "update_reason": f"Modifica manuale da Mirco: {field_map[soglia]} = {valore:.3f}",
+            }
+
+        new_row[field_map[soglia]] = round(valore, 3)
+        supabase.table("pipeline_thresholds").insert(new_row).execute()
+        return f"Soglia {soglia} aggiornata a {valore:.3f}. Effettiva dal prossimo ciclo di scan."
+    except Exception as e:
+        return f"Errore modifica soglia: {e}"
+
+
 def trigger_scan(topic):
     if not AGENTS_RUNNER_URL:
         return "AGENTS_RUNNER_URL non configurato. Scan non disponibile."
@@ -730,12 +792,36 @@ def list_pending_actions(user_id):
 
 def format_action_message(action, pending_count):
     """Formatta un'azione nel formato Telegram standard."""
+    action_type = action.get("action_type", "")
     title = action.get("title", "Azione")
     desc = action.get("description", "")
-    # Tronca descrizione a 3 righe
+    sep = "\u2501" * 15
+
+    if action_type == "approve_bos":
+        # Formato speciale per BOS — 2 righe descrizione essenziale
+        payload = action.get("payload") or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except:
+                payload = {}
+        bos_score = float(payload.get("bos_score", 0))
+        sol_title = payload.get("sol_title", "?")
+        problem_title = payload.get("problem_title", title.replace("BOS PRONTO \u2014 ", ""))
+        desc_lines = "\n".join(desc.split("\n")[:2])
+        return (
+            f"\u26a1 AZIONE RICHIESTA [{pending_count} in coda]\n"
+            f"{sep}\n"
+            f"\U0001f3af BOS PRONTO \u2014 {problem_title[:60]}\n"
+            f"Score: {bos_score:.2f}/1 | Soluzione: {sol_title[:50]}\n"
+            f"{desc_lines[:200]}\n"
+            f"{sep}\n"
+            f"\u2705 Avvia esecuzione  |  \u274c Scarta  |  \U0001f50d Dettagli"
+        )
+
+    # Formato standard per altri tipi
     desc_lines = desc.split("\n")[:3]
     desc_short = "\n".join(desc_lines)
-
     return (
         f"AZIONE RICHIESTA [{pending_count} in coda]\n"
         f"{'_' * 30}\n"
@@ -761,11 +847,26 @@ def send_next_action(chat_id):
 
 
 def handle_action_response(chat_id, response_text):
-    """Gestisce la risposta di Mirco a un'azione in coda. Ritorna (handled, reply_text)."""
-    if chat_id not in _current_action:
-        return False, None
+    """Gestisce la risposta di Mirco a un'azione in coda. Ritorna (handled, reply_text).
+    Se _current_action non è in memoria (es. dopo restart CC), carica l'azione pending dal DB."""
+    lower = response_text.strip().lower()
+    response_keywords = {
+        "si", "sì", "ok", "yes", "vai", "approva", "confermo",
+        "no", "rifiuta", "skip", "salta", "annulla",
+        "dettagli", "spiega", "approfondisci", "dimmi di piu",
+    }
 
-    action = _current_action[chat_id]
+    action = _current_action.get(chat_id)
+
+    # Se non c'è azione in memoria ma la risposta è una keyword → cerca nel DB
+    if not action and lower in response_keywords:
+        db_action = get_next_action(chat_id)
+        if db_action:
+            _current_action[chat_id] = db_action
+            action = db_action
+
+    if not action:
+        return False, None
     action_id = action["id"]
     action_type = action.get("action_type", "")
     payload = action.get("payload")
@@ -817,7 +918,29 @@ def handle_action_response(chat_id, response_text):
 def _execute_action(action_type, payload, approved):
     """Esegue l'operazione conseguente a un'azione approvata/rifiutata."""
     try:
-        if action_type == "approve_problem":
+        if action_type == "approve_bos":
+            # Azione principale della pipeline automatica
+            sid = payload.get("solution_id")
+            pid = payload.get("problem_id")
+            if approved and sid:
+                # Seleziona la soluzione per esecuzione e aggiorna problema ad approved
+                result = select_solution(int(sid))
+                if pid:
+                    try:
+                        supabase.table("problems").update({"status": "approved"}).eq("id", int(pid)).execute()
+                    except:
+                        pass
+                return f"BOS approvato. {result}\nProject Builder notificato. Procedo con la costruzione."
+            elif not approved and sid:
+                try:
+                    supabase.table("solutions").update({"status": "archived"}).eq("id", int(sid)).execute()
+                    if pid:
+                        supabase.table("problems").update({"status": "archived"}).eq("id", int(pid)).execute()
+                except:
+                    pass
+                return "BOS scartato. Soluzione e problema archiviati."
+
+        elif action_type == "approve_problem":
             pid = payload.get("problem_id")
             if pid:
                 if approved:
@@ -1898,6 +2021,27 @@ async def handle_enqueue_action(request):
         return web.Response(text=str(e), status=500)
 
 
+async def handle_set_current_action(request):
+    """Chiamato da agents_runner dopo aver inserito un'azione BOS in action_queue.
+    Carica l'azione in _current_action così Mirco può rispondervi immediatamente."""
+    try:
+        data = await request.json()
+        chat_id_str = data.get("chat_id")
+        action_id_str = data.get("action_id")
+        if not chat_id_str or not action_id_str:
+            return web.Response(text="Missing chat_id or action_id", status=400)
+        chat_id = int(chat_id_str)
+        result = supabase.table("action_queue").select("*").eq("id", int(action_id_str)).execute()
+        if result.data:
+            _current_action[chat_id] = result.data[0]
+            logger.info(f"[ACTION/SET] current_action impostata per chat_id={chat_id} action_id={action_id_str}")
+            return web.json_response({"status": "ok"})
+        return web.Response(text="Action not found", status=404)
+    except Exception as e:
+        logger.error(f"[ACTION/SET] {e}")
+        return web.Response(text=str(e), status=500)
+
+
 # ---- MAIN ----
 
 async def main():
@@ -1925,6 +2069,7 @@ async def main():
     app.router.add_post("/", telegram_webhook)
     app.router.add_post("/alert", handle_alert)
     app.router.add_post("/action", handle_enqueue_action)
+    app.router.add_post("/action/set", handle_set_current_action)
 
     runner = web.AppRunner(app)
     await runner.setup()
