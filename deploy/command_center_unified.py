@@ -159,7 +159,7 @@ Max 15 righe. Per problemi: IL PROBLEMA, CHI SOFFRE, ESEMPIO REALE, PERCHE ORA, 
 Per soluzioni: COSA FA, PERCHE FUNZIONA, COME GUADAGNA, COMPETITOR, PROSSIMO PASSO, RISCHI.
 
 FLUSSO PROBLEMI:
-- Quando Mirco chiede "problemi": usa query_supabase per prendere i top 5 con status=new, ordinati per weighted_score desc. Mostra il primo in formato elevator, poi "Vuoi vedere il prossimo?"
+- Quando Mirco chiede "problemi": usa query_supabase per prendere i top 10 problemi, ordinati per weighted_score desc (senza filtrare per status). Mostra formato: nome, score decimale, settore, urgenza.
 - Se chiede "top 5" o "tutti": mostrali tutti insieme.
 - Se Mirco dice "approva" o "si vai": usa approve_problem con l'ID del problema appena mostrato.
 - Se dice "no", "rifiuta", "skip": usa reject_problem.
@@ -668,6 +668,33 @@ def clean_reply(text):
     return text.strip()
 
 
+def _get_problemi_direct():
+    """Query diretta DB per comando 'problemi'. Bypass LLM."""
+    try:
+        r = supabase.table("problems") \
+            .select("id,title,weighted_score,sector,urgency,status") \
+            .order("weighted_score", desc=True) \
+            .limit(10) \
+            .execute()
+        if not r.data:
+            return "Nessun problema in database."
+        lines = ["TOP 10 PROBLEMI:\n"]
+        for i, p in enumerate(r.data, 1):
+            score = p.get("weighted_score") or 0
+            urgency = p.get("urgency") or 0
+            sector = p.get("sector", "?")
+            status = p.get("status", "?")
+            title = p.get("title", "?")
+            lines.append(
+                f"{i}. {title}\n"
+                f"   Score: {score:.2f} | Settore: {sector} | Urgenza: {urgency} | Status: {status}\n"
+            )
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"[PROBLEMI] {e}")
+        return f"Errore lettura problemi: {e}"
+
+
 def is_mirco_active():
     """True se Mirco ha mandato un messaggio negli ultimi 90 secondi."""
     return (time.time() - _last_mirco_message_time) < MIRCO_ACTIVE_WINDOW
@@ -1091,6 +1118,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pending_deploys.pop(chat_id)
             await update.message.reply_text("Deploy annullato. Il codice resta su GitHub.")
             return
+
+    # Handler diretto per "problemi" — query DB senza passare dal LLM
+    lower_msg = msg.strip().lower()
+    if lower_msg in ("problemi", "problems", "top problemi", "mostra problemi"):
+        await update.message.chat.send_action("typing")
+        reply = _get_problemi_direct()
+        for i in range(0, len(reply), 4000):
+            await update.message.reply_text(reply[i:i + 4000])
+        return
 
     await update.message.chat.send_action("typing")
     reply = clean_reply(ask_claude(msg))
