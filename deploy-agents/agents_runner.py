@@ -3890,6 +3890,7 @@ REGOLE:
 - Stack: Python + Supabase + Google Cloud Run (sempre, salvo eccezioni giustificate)
 - Costo infrastruttura target: < 50 EUR/mese
 - Deploy target: Google Cloud Run europe-west3, Container Docker
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 per task veloci, claude-sonnet-4-5 per task complessi). NON usare mai GPT, OpenAI, Gemini o altri provider LLM.
 
 STRUTTURA OBBLIGATORIA (usa esattamente questi header):
 
@@ -4043,6 +4044,11 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
             spec_meta = json.loads(match.group(1))
             stack = spec_meta.get("stack", [])
             kpis = spec_meta.get("kpis", {})
+            # mvp_build_time_days e mvp_cost_eur sono al root di JSON_SPEC, non dentro kpis
+            if spec_meta.get("mvp_build_time_days"):
+                kpis["mvp_build_time_days"] = spec_meta["mvp_build_time_days"]
+            if spec_meta.get("mvp_cost_eur"):
+                kpis["mvp_cost_eur"] = spec_meta["mvp_cost_eur"]
     except Exception as e:
         logger.warning(f"[SPEC] JSON extraction error: {e}")
 
@@ -4188,7 +4194,7 @@ Genera la landing page HTML completa."""
 # ---- BUILD PROMPT GENERATOR ----
 
 def generate_build_prompt(project_id):
-    """Genera il prompt Claude Code per il build MVP e lo salva + invia al topic."""
+    """Genera il prompt Claude Code, lo salva in DB e avvia il build agent automatico."""
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
@@ -4241,28 +4247,140 @@ Env vars necessarie (configurare prima del deploy):
 {env_vars_section if env_vars_section else "(vedi sezione 7 del SPEC.md)"}
 
 Stack: {", ".join(stack) if stack else "Python + Supabase + Cloud Run"}
+Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), MAI OpenAI/GPT.
 
 REGOLA ASSOLUTA: zero decisioni architetturali autonome.
 Se il SPEC e' ambiguo su qualcosa, FERMATI e chiedi a Mirco prima di procedere.
 Committa ogni file creato/modificato — mai lavorare in locale senza committare."""
 
-    # Salva in DB
+    # Salva in DB (senza mandarlo su Telegram)
     try:
         supabase.table("projects").update({"build_prompt": prompt}).eq("id", project_id).execute()
     except Exception as e:
         logger.error(f"[BUILD_PROMPT] DB update error: {e}")
 
-    # Invia al topic del progetto in 2 messaggi
+    # Notifica breve: build avviato
     group_id = _get_telegram_group_id()
     _send_to_topic(group_id, topic_id,
-                   f"\U0001f6e0\ufe0f BUILD PROMPT PRONTO — {name}\nCopia il prompt qui sotto in Claude Code:")
-    # Invia in chunks (limite Telegram 4096 chars)
-    chunk_size = 3800
-    for i in range(0, len(prompt), chunk_size):
-        _send_to_topic(group_id, topic_id, prompt[i:i + chunk_size])
+                   f"\U0001f6e0\ufe0f Build avviato per \"{name}\".\nGenerando codice MVP in corso...")
 
-    logger.info(f"[BUILD_PROMPT] Generato per project={project_id}")
+    # Avvia build agent in background (non blocca)
+    import threading as _threading_build
+    _threading_build.Thread(target=run_build_agent, args=(project_id,), daemon=True).start()
+
+    logger.info(f"[BUILD_PROMPT] Generato per project={project_id}, build agent avviato")
     return {"status": "ok", "project_id": project_id, "prompt_length": len(prompt)}
+
+
+def run_build_agent(project_id):
+    """Build agent autonomo: legge SPEC, genera codice, committa su GitHub, notifica risultato."""
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return
+        project = proj.data[0]
+    except Exception as e:
+        logger.error(f"[BUILD_AGENT] DB load: {e}")
+        return
+
+    name = project.get("name", "MVP")
+    github_repo = project.get("github_repo", "")
+    spec_md = project.get("spec_md", "")
+    stack = project.get("stack") or []
+    topic_id = project.get("topic_id")
+    group_id = _get_telegram_group_id()
+
+    if isinstance(stack, str):
+        try:
+            stack = json.loads(stack)
+        except:
+            stack = []
+
+    if not spec_md or not github_repo:
+        _send_to_topic(group_id, topic_id, f"\u274c Build {name}: SPEC o repo mancanti. Impossibile procedere.")
+        return
+
+    stack_str = ", ".join(stack) if stack else "Python, Supabase, Cloud Run"
+
+    # Prompt per generazione codice struttura progetto
+    build_prompt = f"""Sei un senior Python developer. Genera il codice completo per la Fase 1 dell'MVP "{name}".
+
+SPEC.md (estratto pertinente):
+{spec_md[:5000]}
+
+REQUISITI:
+- Stack: {stack_str}
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), NON OpenAI/GPT
+- Crea struttura progetto completa: main.py (o app.py), requirements.txt, Dockerfile, .env.example, README.md
+- Il codice deve essere funzionante e deployabile su Google Cloud Run europe-west3
+- Usa Supabase per il database (variabili SUPABASE_URL, SUPABASE_KEY)
+
+FORMATO OUTPUT: per ogni file, usa esattamente questo formato:
+=== FILE: nome_file.py ===
+[contenuto del file]
+=== END FILE ===
+
+Genera TUTTI i file necessari per la struttura base funzionante."""
+
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=8000,
+            messages=[{"role": "user", "content": build_prompt}],
+        )
+        code_output = response.content[0].text
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+    except Exception as e:
+        logger.error(f"[BUILD_AGENT] Claude error: {e}")
+        _send_to_topic(group_id, topic_id, f"\u274c Build {name} fallito: {e}")
+        return
+
+    # Parse e commit dei file generati
+    file_pattern = _re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', _re.DOTALL)
+    matches = list(file_pattern.finditer(code_output))
+    files_committed = 0
+
+    for match in matches:
+        filepath = match.group(1).strip()
+        content = match.group(2).strip()
+        if content and filepath:
+            ok = _commit_to_project_repo(
+                github_repo, filepath, content,
+                f"feat(fase-1): {filepath}",
+            )
+            if ok:
+                files_committed += 1
+
+    # Fallback se nessun file parsato
+    if files_committed == 0 and code_output:
+        _commit_to_project_repo(github_repo, "main.py", code_output, "feat(fase-1): MVP structure")
+        files_committed = 1
+
+    # Aggiorna status
+    try:
+        supabase.table("projects").update({"status": "building"}).eq("id", project_id).execute()
+    except:
+        pass
+
+    cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+    log_to_supabase("build_agent", "build_fase1", 3,
+                    f"project={project_id}", f"{files_committed} file committati",
+                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
+
+    sep = "\u2501" * 15
+    result_msg = (
+        f"\u2705 Build Fase 1 completata!\n"
+        f"{sep}\n"
+        f"\U0001f3d7\ufe0f {name}\n"
+        f"File committati: {files_committed}\n"
+        f"Repo: github.com/{github_repo}\n"
+        f"{sep}\n"
+        f"Fasi 2-4: apri Claude Code con il repo e continua.\n"
+        f"Prompt completo: projects.build_prompt (id={project_id})"
+    )
+    _send_to_topic(group_id, topic_id, result_msg)
+    logger.info(f"[BUILD_AGENT] Completato project={project_id}, {files_committed} file committati")
 
 
 # ---- ENQUEUE SPEC REVIEW ACTION ----
@@ -4346,10 +4464,6 @@ def enqueue_spec_review_action(project_id):
 
     group_id = _get_telegram_group_id()
     _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
-
-    # Notifica anche in DM se topic non disponibile
-    if not group_id and chat_id:
-        notify_telegram(msg, level="critical", source="spec_generator")
 
     logger.info(f"[SPEC_REVIEW] Enqueued action_id={action_db_id} per project={project_id}")
 
