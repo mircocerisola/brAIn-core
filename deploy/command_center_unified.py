@@ -1,10 +1,9 @@
 """
-brAIn Command Center Unified v2.3
+brAIn Command Center v3.0
 Bot Telegram unificato — unico punto di contatto per Mirco.
-Modello: Haiku 4.5 (economico, veloce, sufficiente per dashboard).
+Modello: Sonnet 4.5 (intelligente, contestuale, COO-level).
 Funzioni: query DB, problemi, soluzioni, costi, alert, vocali, foto, chat, /code.
-/code: scrive codice nel repo via Claude Sonnet + GitHub API.
-v2.3: notifiche intelligenti, formato score decimale, self-improvement feedback.
+v3.0: Sonnet, storia 25 turni con tool results, session context, smart prompting.
 """
 
 import os
@@ -36,8 +35,13 @@ claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
-chat_history = []
-MAX_HISTORY = 10
+MAX_HISTORY = 25  # turni di conversazione (ogni turno = user + assistant + tool calls)
+
+# Chat history per chat_id — include messaggi completi con tool results
+_chat_messages = {}  # chat_id -> [{"role": "user"|"assistant", "content": ...}, ...]
+
+# Session context per chat_id — traccia ultimo problema/soluzione discussi
+_session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 
 # ---- NOTIFICHE INTELLIGENTI ----
 # Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
@@ -123,67 +127,70 @@ def transcribe_voice(audio_bytes):
 
 # ---- SYSTEM PROMPT ----
 
-def build_system_prompt():
+def build_system_prompt(chat_id=None):
     ctx = get_minimal_context()
-    return f"""Sei il Command Center di brAIn — unico punto di contatto per Mirco, il CEO.
-brAIn e' un organismo AI-native che scansiona problemi globali e costruisce soluzioni.
+    session = ""
+    if chat_id and chat_id in _session_context:
+        sc = _session_context[chat_id]
+        parts = []
+        if sc.get("last_problem_id"):
+            parts.append(f"Ultimo problema discusso: ID {sc['last_problem_id']}")
+        if sc.get("last_solution_id"):
+            parts.append(f"Ultima soluzione discussa: ID {sc['last_solution_id']}")
+        if sc.get("last_shown_ids"):
+            parts.append(f"Ultimi ID mostrati: {sc['last_shown_ids']}")
+        if sc.get("last_command"):
+            parts.append(f"Ultimo comando: {sc['last_command']}")
+        if parts:
+            session = "\nCONTESTO SESSIONE:\n" + "\n".join(parts) + "\n"
 
-COME PARLI:
-- SEMPRE in italiano, diretto, zero fuffa.
-- NON usare MAI Markdown: niente asterischi, grassetto, corsivo. Testo piano.
-- UNA sola domanda alla volta. Frasi corte.
-- Mai ripetere cose gia' dette.
-- Rispondi SUBITO con tutto in un unico messaggio.
-- NON chiedere conferme inutili. Se Mirco chiede "mostra problemi" tu li mostri.
-- Se Mirco risponde "si", "ok", "avanti" — procedi senza chiedere altro.
+    return f"""Sei il COO di brAIn — organismo AI-native. Unico punto di contatto per Mirco (CEO).
+brAIn scansiona problemi globali, genera soluzioni, le testa sul mercato, scala quelle che funzionano.
 
-HAI QUESTI TOOL per accedere ai dati. Usali SEMPRE per ottenere dati freschi, non inventare.
+PERSONALITA':
+- Parli SEMPRE in italiano, diretto, zero fuffa. Testo piano, MAI Markdown.
+- Sei un COO che conosce ogni dettaglio dell'organizzazione.
+- Proattivo: se Mirco approva, agisci subito. Se chiede dati, fai la query. Mai dire "non ho accesso".
+- UNA domanda alla volta. Frasi corte. Mai ripetere cose gia' dette.
 
-FORMATO PROBLEMI (elevator — default, uno alla volta):
-TITOLO (tradotto in italiano, max 8 parole)
+CONTESTO CONVERSAZIONE:
+- Quando Mirco dice "il primo", "quello", "spiegami meglio" — CAPISCI dal contesto. Usa il CONTESTO SESSIONE sotto.
+- Se Mirco risponde "si", "ok", "avanti", "approva" — AGISCI senza chiedere altro.
+- Se dice un numero — interpretalo come ID del problema/soluzione dal contesto.
+- NON chiedere informazioni che hai gia' nella conversazione o nel contesto sessione.
+
+TOOL: Hai accesso al database. Usa i tool SEMPRE per dati freschi. NON inventare numeri.
+
+FORMATO PROBLEMI (lista):
+1. TITOLO (italiano, max 8 parole)
+   Score: 0.72 | Settore | Urgenza | Status
+Per ogni problema mostra ID, titolo, score, settore, urgenza.
+
+FORMATO PROBLEMA SINGOLO (elevator):
+TITOLO
 Score: 0.72 | Settore | Urgenza
 Il dolore: una frase che fa sentire il problema
 Chi soffre: target specifico
-Mercato: dimensione/valore in numeri
+Mercato: dimensione/valore
 
-FORMATO SOLUZIONI (elevator — default, una alla volta):
+FORMATO SOLUZIONI:
 TITOLO
-Score: 0.68 | BOS: 0.74 REVIEW
-Cosa fa: una frase
-Per chi: target
-Revenue: come guadagna
-Costo: burn mensile | TTM: tempo al mercato
+Score: 0.68 | BOS: 0.74
+Cosa fa | Per chi | Revenue | Costo mensile | TTM
 
-DEEP DIVE: solo quando Mirco chiede "approfondisci" o "dettagli".
-Max 15 righe. Per problemi: IL PROBLEMA, CHI SOFFRE, ESEMPIO REALE, PERCHE ORA, NUMERI CHIAVE.
-Per soluzioni: COSA FA, PERCHE FUNZIONA, COME GUADAGNA, COMPETITOR, PROSSIMO PASSO, RISCHI.
+DEEP DIVE: solo se Mirco chiede "approfondisci" o "dettagli". Max 15 righe.
 
-FLUSSO PROBLEMI:
-- Quando Mirco chiede "problemi": usa query_supabase per prendere i top 10 problemi, ordinati per weighted_score desc (senza filtrare per status). Mostra formato: nome, score decimale, settore, urgenza.
-- Se chiede "top 5" o "tutti": mostrali tutti insieme.
-- Se Mirco dice "approva" o "si vai": usa approve_problem con l'ID del problema appena mostrato.
-- Se dice "no", "rifiuta", "skip": usa reject_problem.
-- Se dice un numero: interpretalo come ID e approva/rifiuta in base al contesto.
+FLUSSO:
+- "problemi": query_supabase, table=problems, select=id,title,weighted_score,sector,urgency,status, order_by=weighted_score, order_desc=true, limit=10.
+- "approva" / "si vai": approve_problem con ID dal contesto.
+- "rifiuta" / "skip" / "no": reject_problem.
+- "soluzioni": query_supabase table=solutions.
+- "seleziona": select_solution.
+- "stato" / "status": get_system_status.
+- "costi": get_cost_report.
+- Tema da esplorare: trigger_scan.
 
-FLUSSO SOLUZIONI:
-- "soluzioni": usa query_supabase per prendere le soluzioni. Mostra una alla volta.
-- "seleziona" o "vai con questa": usa select_solution.
-
-STATO SISTEMA:
-- "come siamo messi?", "stato", "status": usa get_system_status. Riassumi in 3-5 righe.
-- "costi", "quanto spendiamo": usa get_cost_report.
-
-SCAN:
-- Se Mirco chiede di esplorare un tema: usa trigger_scan.
-
-FOTO:
-- Analizza in ottica brAIn: problemi visibili, opportunita, dati, trend.
-
-REGOLE FINALI:
-- Default: UN elemento alla volta. Dopo: "Vuoi vedere il prossimo?"
-- Tono: partner di startup studio che presenta dati a un investor. Professionale ma umano.
-
-{ctx}"""
+{ctx}{session}"""
 
 
 def get_minimal_context():
@@ -192,10 +199,22 @@ def get_minimal_context():
         p_new = supabase.table("problems").select("id", count="exact").eq("status", "new").execute()
         p_approved = supabase.table("problems").select("id", count="exact").eq("status", "approved").execute()
         s_count = supabase.table("solutions").select("id", count="exact").execute()
+        # Costi ultimi 24h
+        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+        costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
+        cost_24h = round(sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])), 4)
+        # Ultimi eventi pipeline
+        events = supabase.table("agent_events").select("event_type,status,created_at") \
+            .order("created_at", desc=True).limit(3).execute()
+        ev_summary = ""
+        if events.data:
+            ev_parts = [f"{e['event_type']}({e['status']})" for e in events.data]
+            ev_summary = f" Pipeline recente: {', '.join(ev_parts)}."
         return (
             f"\nSTATO ATTUALE: {p_count.count or 0} problemi "
             f"({p_new.count or 0} nuovi, {p_approved.count or 0} approvati), "
-            f"{s_count.count or 0} soluzioni.\n"
+            f"{s_count.count or 0} soluzioni. "
+            f"Costi 24h: ${cost_24h}.{ev_summary}\n"
         )
     except:
         return ""
@@ -560,47 +579,156 @@ def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
     threading.Thread(target=_log, daemon=True).start()
 
 
-# ---- CLAUDE (Haiku 4.5 + tool_use) ----
+# ---- CLAUDE (Sonnet 4.5 + tool_use) ----
 
-MODEL = "claude-haiku-4-5-20251001"
-COST_INPUT_PER_M = 1.0
-COST_OUTPUT_PER_M = 5.0
+MODEL = "claude-sonnet-4-5-20250929"
+COST_INPUT_PER_M = 3.0
+COST_OUTPUT_PER_M = 15.0
 MAX_TOOL_LOOPS = 5
 
+# Keywords che richiedono risposte piu' lunghe
+_LONG_KEYWORDS = {"problemi", "soluzioni", "stato", "status", "costi", "costs", "report", "lista", "tutti", "tutto"}
 
-def ask_claude(user_message, is_photo=False, image_b64=None):
-    global chat_history
+
+def _serialize_content(content):
+    """Serializza content blocks Claude in formato JSON-safe per la storia."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        result = []
+        for block in content:
+            if isinstance(block, dict):
+                result.append(block)
+            elif hasattr(block, "model_dump"):
+                result.append(block.model_dump())
+            elif hasattr(block, "text"):
+                result.append({"type": "text", "text": block.text})
+            else:
+                result.append({"type": "text", "text": str(block)})
+        return result
+    if hasattr(content, "model_dump"):
+        return content.model_dump()
+    return str(content)
+
+
+def _compress_old_history(messages):
+    """Comprimi messaggi vecchi: tieni ultimi ~10 turni completi, comprimi i precedenti a solo testo."""
+    if len(messages) <= 20:
+        return messages
+    # Ultimi 20 messaggi (circa 10 turni) restano completi
+    recent = messages[-20:]
+    old = messages[:-20]
+    compressed = []
+    for msg in old:
+        role = msg["role"]
+        content = msg["content"]
+        if isinstance(content, str):
+            compressed.append({"role": role, "content": content[:500]})
+        elif isinstance(content, list):
+            # Estrai solo testo, scarta tool_use/tool_result dettagli
+            texts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        texts.append(block["text"][:300])
+                    elif block.get("type") == "tool_result":
+                        texts.append(f"[tool result: {block.get('content', '')[:100]}]")
+                    elif block.get("type") == "tool_use":
+                        texts.append(f"[tool: {block.get('name', '?')}]")
+            if texts:
+                compressed.append({"role": role, "content": " ".join(texts)[:500]})
+        else:
+            compressed.append({"role": role, "content": str(content)[:500]})
+    return compressed + recent
+
+
+def _update_session_context(chat_id, messages):
+    """Aggiorna session context analizzando i tool results nella conversazione."""
+    if chat_id not in _session_context:
+        _session_context[chat_id] = {}
+    sc = _session_context[chat_id]
+    # Analizza ultimi messaggi per estrarre ID
+    for msg in messages[-6:]:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    # Tool use: traccia quale tool e' stato chiamato
+                    if block.get("type") == "tool_use":
+                        name = block.get("name", "")
+                        inp = block.get("input", {})
+                        if name == "approve_problem":
+                            sc["last_problem_id"] = inp.get("problem_id")
+                            sc["last_command"] = "approve"
+                        elif name == "reject_problem":
+                            sc["last_problem_id"] = inp.get("problem_id")
+                            sc["last_command"] = "reject"
+                        elif name == "select_solution":
+                            sc["last_solution_id"] = inp.get("solution_id")
+                            sc["last_command"] = "select"
+                        elif name == "query_supabase":
+                            table = inp.get("table", "")
+                            if table == "problems":
+                                sc["last_command"] = "problemi"
+                            elif table == "solutions":
+                                sc["last_command"] = "soluzioni"
+                    # Tool result: estrai ID mostrati
+                    elif block.get("type") == "tool_result":
+                        result_text = block.get("content", "")
+                        if isinstance(result_text, str) and '"id"' in result_text:
+                            try:
+                                data = json.loads(result_text)
+                                if isinstance(data, list):
+                                    ids = [str(item.get("id")) for item in data if "id" in item]
+                                    if ids:
+                                        sc["last_shown_ids"] = ", ".join(ids[:10])
+                            except:
+                                pass
+
+
+def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
     start = time.time()
+    cid = chat_id or "default"
+
+    # Init history e session context per questo chat_id
+    if cid not in _chat_messages:
+        _chat_messages[cid] = []
+    if cid not in _session_context:
+        _session_context[cid] = {}
 
     try:
-        system = build_system_prompt()
-        messages = []
-        for h in chat_history:
-            messages.append({"role": "user", "content": h["user"]})
-            messages.append({"role": "assistant", "content": h["assistant"]})
+        system = build_system_prompt(chat_id=cid)
 
+        # Costruisci messaggi dalla storia
+        messages = list(_chat_messages[cid])
+
+        # Aggiungi messaggio corrente
         if is_photo and image_b64:
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
-                    },
-                    {"type": "text", "text": user_message},
-                ],
-            })
+            user_content = [
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64},
+                },
+                {"type": "text", "text": user_message},
+            ]
         else:
-            messages.append({"role": "user", "content": user_message})
+            user_content = user_message
+
+        messages.append({"role": "user", "content": user_content})
+
+        # max_tokens dinamico
+        lower_msg = user_message.lower()
+        max_tokens = 4000 if any(kw in lower_msg for kw in _LONG_KEYWORDS) else 2000
 
         total_in = 0
         total_out = 0
         final = ""
+        all_tool_messages = []  # messaggi tool da aggiungere alla storia
 
         for _ in range(MAX_TOOL_LOOPS):
             resp = claude.messages.create(
                 model=MODEL,
-                max_tokens=2000,
+                max_tokens=max_tokens,
                 system=system,
                 messages=messages,
                 tools=TOOLS,
@@ -624,8 +752,12 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
                             "tool_use_id": b.id,
                             "content": str(r)[:8000],
                         })
-                messages.append({"role": "assistant", "content": resp.content})
+                # Serializza content per storia
+                serialized_assistant = _serialize_content(resp.content)
+                messages.append({"role": "assistant", "content": serialized_assistant})
                 messages.append({"role": "user", "content": results})
+                all_tool_messages.append({"role": "assistant", "content": serialized_assistant})
+                all_tool_messages.append({"role": "user", "content": results})
             else:
                 for b in resp.content:
                     if hasattr(b, "text"):
@@ -635,12 +767,21 @@ def ask_claude(user_message, is_photo=False, image_b64=None):
         dur = int((time.time() - start) * 1000)
         cost = (total_in * COST_INPUT_PER_M + total_out * COST_OUTPUT_PER_M) / 1_000_000
 
-        chat_history.append({
-            "user": f"[FOTO] {user_message}" if is_photo else user_message,
-            "assistant": final[:2000],
-        })
-        if len(chat_history) > MAX_HISTORY:
-            chat_history = chat_history[-MAX_HISTORY:]
+        # Salva in storia: user message + tool exchanges + final assistant
+        history = _chat_messages[cid]
+        history.append({"role": "user", "content": _serialize_content(user_content)})
+        for tm in all_tool_messages:
+            history.append(tm)
+        history.append({"role": "assistant", "content": final})
+
+        # Comprimi storia se troppo lunga
+        if len(history) > MAX_HISTORY * 2:
+            _chat_messages[cid] = _compress_old_history(history)
+        else:
+            _chat_messages[cid] = history
+
+        # Aggiorna session context
+        _update_session_context(cid, _chat_messages[cid])
 
         log_to_supabase(
             "command_center", "chat", user_message[:300], final[:300],
@@ -666,33 +807,6 @@ def clean_reply(text):
     text = re.sub(r'`(.+?)`', r'\1', text)
     text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
     return text.strip()
-
-
-def _get_problemi_direct():
-    """Query diretta DB per comando 'problemi'. Bypass LLM."""
-    try:
-        r = supabase.table("problems") \
-            .select("id,title,weighted_score,sector,urgency,status") \
-            .order("weighted_score", desc=True) \
-            .limit(10) \
-            .execute()
-        if not r.data:
-            return "Nessun problema in database."
-        lines = ["TOP 10 PROBLEMI:\n"]
-        for i, p in enumerate(r.data, 1):
-            score = p.get("weighted_score") or 0
-            urgency = p.get("urgency") or 0
-            sector = p.get("sector", "?")
-            status = p.get("status", "?")
-            title = p.get("title", "?")
-            lines.append(
-                f"{i}. {title}\n"
-                f"   Score: {score:.2f} | Settore: {sector} | Urgenza: {urgency} | Status: {status}\n"
-            )
-        return "\n".join(lines)
-    except Exception as e:
-        logger.error(f"[PROBLEMI] {e}")
-        return f"Errore lettura problemi: {e}"
 
 
 def is_mirco_active():
@@ -1064,11 +1178,11 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     await update.message.reply_text(
-        "brAIn Command Center v2.3 attivo.\n"
-        "Haiku 4.5 — vocali, foto, dashboard, /code.\n"
-        "Notifiche intelligenti attive. Scrivimi quello che vuoi."
+        "brAIn Command Center v3.0 attivo.\n"
+        "Sonnet 4.5 — intelligente, contestuale, COO-level.\n"
+        "Vocali, foto, dashboard, /code. Scrivimi quello che vuoi."
     )
-    log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v1.0 unified", "none")
+    log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v3.0 sonnet", "none")
 
 
 async def handle_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1119,17 +1233,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Deploy annullato. Il codice resta su GitHub.")
             return
 
-    # Handler diretto per "problemi" — query DB senza passare dal LLM
-    lower_msg = msg.strip().lower()
-    if lower_msg in ("problemi", "problems", "top problemi", "mostra problemi"):
-        await update.message.chat.send_action("typing")
-        reply = _get_problemi_direct()
-        for i in range(0, len(reply), 4000):
-            await update.message.reply_text(reply[i:i + 4000])
-        return
-
     await update.message.chat.send_action("typing")
-    reply = clean_reply(ask_claude(msg))
+    reply = clean_reply(ask_claude(msg, chat_id=chat_id))
     for i in range(0, len(reply), 4000):
         await update.message.reply_text(reply[i:i + 4000])
 
@@ -1138,12 +1243,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     await update.message.chat.send_action("typing")
+    chat_id = update.effective_chat.id
     photo = update.message.photo[-1]
     f = await context.bot.get_file(photo.file_id)
     img = await f.download_as_bytearray()
     b64 = base64.b64encode(bytes(img)).decode("utf-8")
     caption = update.message.caption or "Analizza questa immagine e dimmi cosa vedi in ottica brAIn."
-    reply = clean_reply(ask_claude(caption, True, b64))
+    reply = clean_reply(ask_claude(caption, chat_id=chat_id, is_photo=True, image_b64=b64))
     for i in range(0, len(reply), 4000):
         await update.message.reply_text(reply[i:i + 4000])
 
@@ -1152,6 +1258,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
     await update.message.chat.send_action("typing")
+    chat_id = update.effective_chat.id
     try:
         f = await context.bot.get_file(update.message.voice.file_id)
         audio = await f.download_as_bytearray()
@@ -1161,7 +1268,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text(f'Ho capito: "{text}"')
         await update.message.chat.send_action("typing")
-        reply = clean_reply(ask_claude(text))
+        reply = clean_reply(ask_claude(text, chat_id=chat_id))
         for i in range(0, len(reply), 4000):
             await update.message.reply_text(reply[i:i + 4000])
     except Exception as e:
@@ -1171,6 +1278,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_command_as_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update):
         return
+    chat_id = update.effective_chat.id
     text = update.message.text.lower().strip()
     remap = {
         "/problems": "mostrami i problemi nuovi",
@@ -1181,7 +1289,7 @@ async def handle_command_as_message(update: Update, context: ContextTypes.DEFAUL
     }
     user_message = remap.get(text, text.replace("/", ""))
     await update.message.chat.send_action("typing")
-    reply = clean_reply(ask_claude(user_message))
+    reply = clean_reply(ask_claude(user_message, chat_id=chat_id))
     for i in range(0, len(reply), 4000):
         await update.message.reply_text(reply[i:i + 4000])
 
@@ -1203,7 +1311,7 @@ def is_authorized(update):
 # ---- HTTP ENDPOINTS ----
 
 async def health_check(request):
-    return web.Response(text="brAIn Command Center Unified v2.3 OK", status=200)
+    return web.Response(text="brAIn Command Center v3.0 OK", status=200)
 
 
 async def telegram_webhook(request):
@@ -1253,7 +1361,7 @@ async def handle_alert(request):
 async def main():
     global tg_app
 
-    logger.info("brAIn Command Center Unified v2.3 — Haiku 4.5 + Smart Notifications + Self-Improvement")
+    logger.info("brAIn Command Center v3.0 — Sonnet 4.5 + Context + Smart Chat")
 
     tg_app = Application.builder().token(os.getenv("TELEGRAM_BOT_TOKEN")).build()
     tg_app.add_handler(CommandHandler("start", cmd_start))
