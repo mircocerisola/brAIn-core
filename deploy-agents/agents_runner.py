@@ -30,6 +30,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = None
+COMMAND_CENTER_URL = os.getenv("COMMAND_CENTER_URL", "")
 
 
 # ============================================================
@@ -49,7 +50,21 @@ def get_telegram_chat_id():
     return TELEGRAM_CHAT_ID
 
 
-def notify_telegram(message):
+def notify_telegram(message, level="info", source="agents_runner"):
+    # Prova a inviare via command_center (notifiche intelligenti con coda)
+    if COMMAND_CENTER_URL:
+        try:
+            resp = requests.post(
+                f"{COMMAND_CENTER_URL}/alert",
+                json={"message": message, "level": level, "source": source},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return
+            logger.warning(f"[NOTIFY] command_center returned {resp.status_code}, fallback diretto")
+        except Exception as e:
+            logger.warning(f"[NOTIFY] command_center non raggiungibile: {e}, fallback diretto")
+    # Fallback: invio diretto a Telegram
     chat_id = get_telegram_chat_id()
     if not chat_id or not TELEGRAM_BOT_TOKEN:
         return
@@ -215,7 +230,7 @@ SCANNER_WEIGHTS = {
     "recurring_potential": 0.05,
 }
 
-MIN_SCORE_THRESHOLD = 0.65
+MIN_SCORE_THRESHOLD = 0.55
 
 SCANNER_SECTORS = [
     "food", "health", "finance", "education", "legal",
@@ -258,6 +273,8 @@ Ogni problema DEVE avere almeno 2 score sotto 0.4 e almeno 1 score sotto 0.3.
    - top_markets: lista 3-5 codici paese ISO
 
 NON riproporre problemi generici. Cerca problemi specifici con gap reale.
+
+LINGUA: Rispondi SEMPRE in italiano. Titoli, descrizioni, who_is_affected, real_world_example, why_it_matters: tutto in italiano.
 
 REGOLA DIVERSITA SETTORI: i problemi devono riguardare settori DIVERSI.
 
@@ -669,7 +686,7 @@ def run_scan(queries):
             {"problems_saved": total_saved, "problem_ids": saved_problem_ids,
              "avg_score": sum(all_scores) / len(all_scores) if all_scores else 0})
         # Notifica problemi trovati
-        high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= 0.65]
+        high_score_ids = [pid for pid, sc in zip(saved_problem_ids, all_scores) if sc >= 0.55]
         if high_score_ids:
             emit_event("world_scanner", "problems_found", "command_center",
                 {"problem_ids": high_score_ids, "count": len(high_score_ids)})
@@ -726,6 +743,8 @@ def run_custom_scan(topic):
 
 RESEARCH_PROMPT = """Sei un analista di mercato esperto. Dati i risultati di ricerca sul web, crea un DOSSIER COMPETITIVO per il problema dato.
 
+LINGUA: Rispondi SEMPRE in italiano.
+
 Il dossier deve includere:
 1. SOLUZIONI ESISTENTI: chi gia' risolve questo problema? Nome, cosa fa, prezzo, punti deboli.
 2. GAP DI MERCATO: cosa manca nelle soluzioni attuali?
@@ -744,6 +763,8 @@ GENERATION_PROMPT = """Sei un innovation strategist di livello mondiale. Combini
 - Lean Canvas
 
 Hai un DOSSIER COMPETITIVO e un PROBLEMA. Genera 3 soluzioni ordinate per potenziale.
+
+LINGUA: Rispondi SEMPRE in italiano. Titoli, descrizioni, value proposition, tutto in italiano.
 
 REGOLE CRITICHE:
 - NON proporre soluzioni che gia' esistono e funzionano bene
@@ -770,7 +791,9 @@ Rispondi SOLO con JSON:
 {{"solutions":[{{"title":"","description":"","value_proposition":"","target_segment":"","job_to_be_done":"","revenue_model":"","monthly_revenue_potential":"","monthly_burn_rate":"","competitive_moat":"","novelty_score":0.7,"opportunity_score":0.8,"defensibility_score":0.6,"uniqueness":0.7,"moat_potential":0.6,"value_multiplier":0.8,"simplicity":0.7,"revenue_clarity":0.8,"ai_nativeness":0.9}}],"ranking_rationale":"perche' hai messo la prima in cima"}}
 SOLO JSON."""
 
-SA_FEASIBILITY_PROMPT = """Sei un CTO pragmatico. Valuta la fattibilita' di ogni soluzione dati questi VINCOLI:
+SA_FEASIBILITY_PROMPT = """Sei un CTO pragmatico. Valuta la fattibilita' di ogni soluzione dati questi VINCOLI.
+
+LINGUA: Rispondi SEMPRE in italiano.
 
 VINCOLI ATTUALI:
 - 1 persona, 20h/settimana, competenza tecnica minima
@@ -1076,6 +1099,8 @@ def run_solution_architect(problem_id=None):
 
 FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn, un'organizzazione AI-native.
 Valuti la fattibilita' economica e tecnica di soluzioni AI.
+
+LINGUA: Rispondi SEMPRE in italiano.
 
 VINCOLI:
 - 1 persona, 20h/settimana, competenza tecnica minima
@@ -1578,7 +1603,7 @@ def run_auto_pipeline(saved_problem_ids):
     msg = f"PIPELINE COMPLETATA ({pipeline_duration}s)\n\n"
     msg += f"Problemi analizzati: {len(problems_processed)}\n"
     for pp in problems_processed:
-        msg += f"  Score: {pp['score']:.2f} | {pp['title'][:40]} -> {pp['solutions']} sol.\n"
+        msg += f"  Score: {pp['score']:.2f} | {pp['title']} -> {pp['solutions']} sol.\n"
     msg += f"\nSoluzioni: {total_solutions}\n"
     msg += f"Feasibility: {go_count} GO, {conditional_count} conditional, {no_go_count} no-go\n"
 
@@ -1587,7 +1612,7 @@ def run_auto_pipeline(saved_problem_ids):
         msg += "\nBOS RANKING:\n"
         for br in bos_sorted[:5]:
             b = br["bos"]
-            msg += f"  Score: {b['bos_score']:.2f} | {b['verdict']} | {br['title'][:35]}\n"
+            msg += f"  Score: {b['bos_score']:.2f} | {b['verdict']} | {br['title']}\n"
 
     msg += "\nChiedimi i dettagli sul Command Center!"
     notify_telegram(msg)
@@ -1609,6 +1634,8 @@ def run_auto_pipeline(saved_problem_ids):
 
 KNOWLEDGE_PROMPT = """Sei il Knowledge Keeper di brAIn.
 Analizza i log degli agenti e estrai lezioni apprese.
+
+LINGUA: Rispondi SEMPRE in italiano. Titoli e contenuti delle lezioni in italiano.
 
 Rispondi SOLO con JSON:
 {"lessons":[{"title":"titolo","content":"descrizione","category":"process","actionable":"azione"}],"patterns":[{"pattern":"descrizione","frequency":"quanto"}],"summary":"riassunto breve"}
@@ -2028,7 +2055,7 @@ def generate_daily_report():
         top_problems = sorted(problem_data, key=lambda x: float(x.get("weighted_score", 0) or 0), reverse=True)[:3]
         report_lines.append("TOP PROBLEMI:")
         for p in top_problems:
-            report_lines.append(f"  Score: {float(p.get('weighted_score', 0)):.2f} | {p.get('sector', '?')} | {p['title'][:45]}")
+            report_lines.append(f"  Score: {float(p.get('weighted_score', 0)):.2f} | {p.get('sector', '?')} | {p['title']}")
         report_lines.append("")
 
     # Top 3 soluzioni per BOS
@@ -2046,7 +2073,7 @@ def generate_daily_report():
                     except:
                         details = {}
                 verdict = details.get("verdict", "?")
-                report_lines.append(f"  Score: {bos:.2f} | {verdict} | {s['title'][:40]}")
+                report_lines.append(f"  Score: {bos:.2f} | {verdict} | {s['title']}")
             report_lines.append("")
 
     # Lezioni apprese oggi
@@ -2106,7 +2133,7 @@ def process_events():
                 for pid in problem_ids:
                     try:
                         prob = supabase.table("problems").select("weighted_score").eq("id", pid).execute()
-                        if prob.data and float(prob.data[0].get("weighted_score", 0) or 0) >= 0.65:
+                        if prob.data and float(prob.data[0].get("weighted_score", 0) or 0) >= 0.55:
                             emit_event("event_processor", "problem_ready", "solution_architect",
                                 {"problem_id": str(pid)})
                     except:

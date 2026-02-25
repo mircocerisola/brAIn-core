@@ -1,5 +1,5 @@
 # brAIn — DNA dell'Organismo
-# Ultima modifica: 23 Febbraio 2026
+# Ultima modifica: 25 Febbraio 2026
 # Questo file viene letto automaticamente ad ogni sessione.
 # NON eliminare. Aggiornare tramite Knowledge Keeper o manualmente.
 
@@ -21,10 +21,9 @@ Priorita' assoluta: marginalita' alta dal giorno uno.
 Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ### CORTEX (Sistema Nervoso)
-- brAIn Bot: interfaccia CEO-business via Telegram. Problemi, soluzioni, approvazioni.
-- brAIn God (TU): interfaccia CEO-infrastruttura via Telegram. Codice, deploy, costi, monitoring.
+- brAIn Bot (Command Center): interfaccia CEO via Telegram. Problemi, soluzioni, approvazioni, Code Agent integrato.
 - Router: classifica input e smista all'agente giusto.
-- Modello: Haiku per brAIn Bot, Opus 4.6 per brAIn God.
+- Modello: Haiku per chat, Sonnet per Code Agent.
 
 ### SENSES (Sistema Sensoriale)
 - World Scanner v2.2: scansione problemi globali, 40+ fonti con auto-ranking, 7 parametri pesati, deduplicazione, dati qualitativi (chi soffre, storie, perche' conta), settori + geolocalizzazione.
@@ -42,8 +41,8 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 - Customer Agent: supporto, feedback, retention. DA COSTRUIRE.
 - PRIORITA': primo sistema da costruire dopo che il Code Agent e' stabile.
 
-### DNA (Auto-Replicazione) — TU SEI QUESTO
-- Code Agent (brAIn God): legge, scrive, modifica codice su GitHub. Puo' proporre deploy.
+### DNA (Auto-Replicazione)
+- Code Agent: legge, scrive, modifica codice su GitHub. Integrato nel Command Center. Puo' proporre deploy.
 - Test Agent: verifica codice prima del deploy. DA COSTRUIRE.
 - Git Manager: versioning, branching, rollback. Parzialmente operativo.
 - PRINCIPIO: brAIn modifica se stesso. Tu scrivi il codice degli altri agenti.
@@ -76,10 +75,10 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ## STACK TECNOLOGICO (Confermato e definitivo)
 
-- Claude API: Haiku per brAIn Bot (80%), Opus 4.6 per brAIn God e Code Agent (20%).
+- Claude API: Haiku per brAIn Bot (80%), Sonnet per Code Agent (20%).
 - Perplexity API Sonar: ricerca web per World Scanner e Solution Architect.
 - Supabase Pro: PostgreSQL + pgvector + RLS attivo su tutte le tabelle. 22+ tabelle.
-- Telegram: 2 bot separati (brAIn = business, brAIn God = infrastruttura).
+- Telegram: bot brAIn (Command Center unificato).
 - Python: linguaggio agenti.
 - GitHub privato: mircocerisola/brAIn-core. Tutto il codice versionato.
 - Google Cloud Run EU Frankfurt: hosting 24/7. Container Docker. Scala da zero.
@@ -93,9 +92,8 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ## SERVIZI CLOUD RUN ATTIVI
 
-- command-center: bot Telegram brAIn (business). Porta 8080. Webhook mode.
-- agents-runner: World Scanner + Solution Architect + Knowledge Keeper + Capability Scout. Porta 8080.
-- brain-god: brAIn God (TU). Porta 8080. Webhook mode.
+- command-center: bot Telegram brAIn (Command Center unificato + Code Agent). Porta 8080. Webhook mode.
+- agents-runner: World Scanner + Solution Architect + Feasibility Engine + Knowledge Keeper + Capability Scout. Porta 8080.
 - Regione: europe-west3 (Frankfurt).
 - Project ID: brain-core-487914
 - Artifact Registry: europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/
@@ -148,7 +146,7 @@ Normalizzazione aggressiva post-processing per evitare clustering attorno a 0.8.
 
 ### L2: Guardrails hardcoded nel codice Python
 - Blocklist comandi: rm -rf, DROP, DELETE FROM, gcloud run services delete.
-- Whitelist directory: solo agents/, deploy/, deploy-agents/, deploy-god/, docs/, config/, CLAUDE.md, MEMORY.md.
+- Whitelist directory: solo agents/, deploy/, deploy-agents/, docs/, config/, CLAUDE.md, MEMORY.md.
 - Rate limiter: max 5 deploy/giorno, max 20 scritture/sessione.
 - Timeout: nessuna operazione > 10 minuti.
 
@@ -174,7 +172,7 @@ PRINCIPIO: i guardrails sono nel CODICE Python, NON nel prompt. Il modello non p
 6. Fonti si auto-evolvono: le migliori salgono, nuove vengono scoperte automaticamente.
 7. Idee archiviate vengono rivalutate periodicamente (Idea Recycler).
 8. Architettura organica a 8 sistemi, non piu' 5 layer sequenziali.
-9. Due bot Telegram separati: brAIn (business) e brAIn God (infrastruttura).
+9. Bot Telegram unificato: Command Center con Code Agent integrato.
 10. Code Agent come priorita' #1 perche' moltiplica la velocita' di tutto il resto.
 11. Mirco (CEO) riceve sempre "per conoscenza" su ogni decisione. Mai escluso.
 12. Protezione asset critica da Day 1: backup, export, disaster recovery.
@@ -187,11 +185,11 @@ PRINCIPIO: i guardrails sono nel CODICE Python, NON nel prompt. Il modello non p
 4. Mem0 tentato e abbandonato: strato inutile. pgvector in Supabase fa tutto.
 5. Layer 5 prima del Layer 3: abbiamo costruito Knowledge Keeper e Capability Scout prima dei progetti. Decisione corretta perche' servono per informare il primo progetto.
 6. Bot unico per tutto: confusione tra business e infrastruttura. Risolto con 2 bot separati.
-7. Deploy manuale lento: ogni modifica richiedeva 4 comandi CMD. Risolto con brAIn God + auto-deploy (in corso).
+7. Deploy manuale lento: ogni modifica richiedeva 4 comandi CMD. Risolto con Code Agent + Cloud Build auto-deploy.
 
 ## PROSSIMI STEP (in ordine di priorita')
 
-1. Completare auto-deploy: brAIn God fa build + deploy con approvazione Mirco via Telegram. Zero CMD.
+1. Completare auto-deploy: Code Agent fa build + deploy con approvazione Mirco via Telegram. Zero CMD.
 2. CLAUDE.md e MEMORY.md operativi: questo file va nel repo, letto ad ogni sessione.
 3. METABOLISM base: aggregazione costi da agent_logs, alerting soglie, report giornaliero.
 4. IMMUNE base: Legal Monitor con feed normativo, valutazione rischi per azione.
@@ -209,7 +207,6 @@ PRINCIPIO: i guardrails sono nel CODICE Python, NON nel prompt. Il modello non p
 - Supabase Key: env var SUPABASE_KEY
 - Anthropic API Key: env var ANTHROPIC_API_KEY
 - Telegram Bot Token brAIn: env var TELEGRAM_BOT_TOKEN (nel servizio command-center)
-- Telegram Bot Token brAIn God: env var TELEGRAM_BOT_TOKEN (nel servizio brain-god)
 - Perplexity API Key: env var PERPLEXITY_API_KEY (nel servizio agents-runner)
 - Cloud Run project: brain-core-487914
 - Cloud Run region: europe-west3
@@ -224,9 +221,8 @@ File nel repo GitHub, directory agents/:
 - capability_scout.py: v1.1, scopre nuovi tool
 
 Versioni cloud in deploy/ e deploy-agents/:
-- command_center_cloud.py: v3.0 con formato elevator, soluzioni/problemi uno alla volta
-- agents_runner.py: runner HTTP per tutti gli agenti del Layer 1-2-5
-- brain_god.py: v1.0 con tool GitHub + Supabase + guardrails
+- command_center_unified.py: Command Center v2.3 con Code Agent, notifiche intelligenti, auto-deploy
+- agents_runner.py: runner HTTP event-driven per tutti gli agenti
 
 ## FLUSSO OPERATIVO TIPO
 

@@ -45,7 +45,7 @@ MAX_HISTORY = 10
 _last_mirco_message_time = 0.0  # timestamp ultimo messaggio di Mirco
 _notification_queue = []  # lista di messaggi in coda
 _notification_lock = threading.Lock()
-MIRCO_ACTIVE_WINDOW = 90  # secondi
+MIRCO_ACTIVE_WINDOW = 120  # secondi (2 minuti)
 NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 
 # ---- CODE AGENT ----
@@ -62,7 +62,6 @@ STRUTTURA REPO:
 - agents/: agenti Python (world_scanner.py, solution_architect.py, feasibility_engine.py, etc.)
 - deploy/: command_center_unified.py + Dockerfile per bot Telegram
 - deploy-agents/: agents_runner.py + Dockerfile per agenti schedulati
-- deploy-god/: brain_god.py per brAIn God
 - config/: configurazione
 - CLAUDE.md: DNA dell'organismo
 
@@ -821,7 +820,7 @@ def _run_code_agent_sync(chat_id, prompt):
 
         # 2. Leggi file rilevanti per contesto (max 5, max 3000 char ciascuno)
         context_files = []
-        key_dirs = ["agents/", "deploy/", "deploy-agents/", "deploy-god/"]
+        key_dirs = ["agents/", "deploy/", "deploy-agents/"]
         for fp in py_files:
             if any(fp.startswith(d) for d in key_dirs) and len(context_files) < 5:
                 content, _ = github_get_file(fp)
@@ -935,9 +934,6 @@ def _determine_services_to_deploy(files):
         if f.startswith("deploy/") and "command_center" in f:
             if "command-center" not in services:
                 services.append("command-center")
-        if f.startswith("deploy-god/"):
-            if "brain-god" not in services:
-                services.append("brain-god")
     return services
 
 
@@ -954,7 +950,7 @@ def _trigger_build_deploy_sync(chat_id, deploy_info):
     if not token:
         _send_telegram_sync(chat_id,
             f"Non ho accesso al Cloud Build. Servizi da deployare: {', '.join(services)}\n"
-            f"Usa brAIn God per il deploy.")
+            f"Deploya manualmente.")
         return
 
     project_id = "brain-core-487914"
@@ -965,8 +961,6 @@ def _trigger_build_deploy_sync(chat_id, deploy_info):
             dockerfile_dir = "deploy-agents"
         elif service == "command-center":
             dockerfile_dir = "deploy"
-        elif service == "brain-god":
-            dockerfile_dir = "deploy-god"
         else:
             continue
 
@@ -1021,7 +1015,7 @@ def _trigger_build_deploy_sync(chat_id, deploy_info):
             else:
                 _send_telegram_sync(chat_id,
                     f"Errore build {service}: HTTP {r.status_code}\n"
-                    f"Usa brAIn God per deploy manuale.")
+                    f"Controlla i log di Cloud Build.")
         except Exception as e:
             _send_telegram_sync(chat_id, f"Errore build {service}: {e}")
 
