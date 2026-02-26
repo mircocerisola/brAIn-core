@@ -607,6 +607,34 @@ async def run_memory_cleanup_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_resend_spec_endpoint(request):
+    """POST /admin/resend-spec — {solution_id} — rimanda la SPEC al topic Telegram del progetto."""
+    try:
+        from execution.builder import enqueue_spec_review_action
+        data = await request.json()
+        solution_id = int(data.get("solution_id", 0))
+        if not solution_id:
+            return web.json_response({"error": "solution_id obbligatorio"}, status=400)
+        # Trova il progetto per questa soluzione
+        r = supabase.table("projects").select("id,name,status,spec_human_md,topic_id") \
+            .eq("bos_id", solution_id).execute()
+        if not r.data:
+            return web.json_response({"error": f"nessun progetto per solution_id={solution_id}"}, status=404)
+        project = r.data[0]
+        project_id = project["id"]
+        # Re-invia SPEC via enqueue_spec_review_action
+        enqueue_spec_review_action(project_id)
+        return web.json_response({
+            "status": "ok",
+            "project_id": project_id,
+            "project_name": project.get("name"),
+            "project_status": project.get("status"),
+            "has_spec_human": bool(project.get("spec_human_md")),
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_founder_pipeline_endpoint(request):
     """POST /admin/founder-pipeline — avvia init_project per soluzioni founder bos_approved senza progetto."""
     try:

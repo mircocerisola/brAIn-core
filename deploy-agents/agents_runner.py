@@ -42,7 +42,7 @@ from core.endpoints import (
     # Memory
     run_memory_create_episode_endpoint, run_memory_extract_facts_endpoint, run_memory_cleanup_endpoint,
     # Admin
-    run_founder_pipeline_endpoint,
+    run_founder_pipeline_endpoint, run_resend_spec_endpoint,
 )
 
 
@@ -137,6 +137,7 @@ async def main():
 
     # Admin / one-time triggers
     app.router.add_post("/admin/founder-pipeline", run_founder_pipeline_endpoint)
+    app.router.add_post("/admin/resend-spec", run_resend_spec_endpoint)
 
     # All
     app.router.add_post("/all", run_all_endpoint)
