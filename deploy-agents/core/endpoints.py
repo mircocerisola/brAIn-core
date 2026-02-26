@@ -608,28 +608,55 @@ async def run_memory_cleanup_endpoint(request):
 
 
 async def run_resend_spec_endpoint(request):
-    """POST /admin/resend-spec — {solution_id} — rimanda la SPEC al topic Telegram del progetto."""
+    """POST /admin/resend-spec — {solution_id} — rimanda la SPEC a Mirco via chat diretta."""
+    import os as _os
+    import requests as _requests
     try:
-        from execution.builder import enqueue_spec_review_action
         data = await request.json()
         solution_id = int(data.get("solution_id", 0))
         if not solution_id:
             return web.json_response({"error": "solution_id obbligatorio"}, status=400)
         # Trova il progetto per questa soluzione
-        r = supabase.table("projects").select("id,name,status,spec_human_md,topic_id") \
+        r = supabase.table("projects").select("id,name,status,spec_human_md,spec_md,bos_score") \
             .eq("bos_id", solution_id).execute()
         if not r.data:
             return web.json_response({"error": f"nessun progetto per solution_id={solution_id}"}, status=404)
         project = r.data[0]
         project_id = project["id"]
-        # Re-invia SPEC via enqueue_spec_review_action
-        enqueue_spec_review_action(project_id)
+        # Recupera chat_id Mirco
+        rc = supabase.table("org_config").select("value").eq("key", "telegram_user_id").execute()
+        mirco_chat_id = int(rc.data[0]["value"]) if rc.data else 8307106544
+        # Prepara messaggio
+        spec_human = project.get("spec_human_md") or ""
+        name = project.get("name", f"Progetto {project_id}")
+        bos_score = float(project.get("bos_score") or 0)
+        sep = "\u2501" * 15
+        if spec_human:
+            msg = f"{spec_human}\n{sep}"
+        else:
+            spec_excerpt = (project.get("spec_md") or "SPEC non disponibile")[:500]
+            msg = f"\U0001f4cb SPEC pronta \u2014 {name}\nBOS score: {bos_score:.2f}\n\n{spec_excerpt}\n{sep}"
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
+                {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
+                {"text": "\U0001f4c4 Versione completa", "callback_data": f"spec_full:{project_id}"},
+            ]]
+        }
+        token = _os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return web.json_response({"error": "TELEGRAM_BOT_TOKEN non configurato"}, status=500)
+        resp = _requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": mirco_chat_id, "text": msg[:4000], "reply_markup": reply_markup},
+            timeout=15,
+        )
         return web.json_response({
             "status": "ok",
             "project_id": project_id,
-            "project_name": project.get("name"),
+            "project_name": name,
             "project_status": project.get("status"),
-            "has_spec_human": bool(project.get("spec_human_md")),
+            "telegram_ok": resp.status_code == 200,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
