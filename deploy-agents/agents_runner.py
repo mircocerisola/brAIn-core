@@ -6287,6 +6287,7 @@ Genera JSON:
 {cnt_data.get('cold_outreach_template', '')}
 """
 
+    _seo_content_lines = "".join(f"- Articolo SEO: \"{k.get('keyword','')}\" ({k.get('intent','')})\n" for k in keywords[:5])
     seo_md = f"""# SEO Strategy — {name}
 
 ## Top Keywords
@@ -6295,8 +6296,7 @@ Genera JSON:
 {chr(10).join(f"| {k.get('keyword','')} | {k.get('intent','')} | {k.get('difficulty','')} |" for k in keywords)}
 
 ## Content da Creare
-{chr(10).join(f"- Articolo SEO: \"{k.get('keyword','')}\" ({k.get('intent','')})" for k in keywords[:5])}
-"""
+{_seo_content_lines}"""
 
     # Blog post SEO
     blog_md = f"""# {cnt_data.get('blog_post_title', f'Blog Post — {name}')}
