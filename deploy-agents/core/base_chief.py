@@ -295,13 +295,8 @@ class BaseChief(BaseAgent):
             except Exception as e:
                 logger.warning(f"[{self.name}] episodic project memory error: {e}")
 
-        # 6. Messaggi recenti verbatim (L1 working memory)
-        if recent_messages:
-            msgs_text = "\n".join(
-                f"{m['role'].upper()}: {m['text'][:300]}"
-                for m in recent_messages[-10:]
-            )
-            parts.append(f"=== CONVERSAZIONE RECENTE ===\n{msgs_text}")
+        # 6. Messaggi recenti: passati come turns reali ad Anthropic (NON nel system prompt)
+        #    — build_system_prompt non li include più qui, answer_question li passa via prior_messages
 
         # 7. Contesto progetto (se presente)
         if project_context:
@@ -358,7 +353,13 @@ class BaseChief(BaseAgent):
         model = self._select_model(question)
 
         try:
-            return self.call_claude(question, system=system, max_tokens=1500, model=model)
+            return self.call_claude(
+                question,
+                system=system,
+                max_tokens=1500,
+                model=model,
+                prior_messages=recent_messages,
+            )
         except Exception as e:
             logger.error(f"[{self.name}] answer_question error: {e}")
             return f"[{self.name}] Errore nella risposta: {e}"

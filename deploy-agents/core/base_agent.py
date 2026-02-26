@@ -51,10 +51,25 @@ class BaseAgent:
         system: Optional[str] = None,
         model: Optional[str] = None,
         max_tokens: int = 2000,
+        prior_messages: Optional[list] = None,
     ) -> str:
-        """Chiama Claude API con retry automatico."""
+        """Chiama Claude API con retry automatico.
+        prior_messages: lista di {role, text} — passata come turns reali ad Anthropic.
+        """
         mdl = model or self.default_model
-        messages = [{"role": "user", "content": prompt}]
+        messages: list = []
+        if prior_messages:
+            for m in prior_messages:
+                role = "assistant" if m.get("role") in ("bot", "assistant") else "user"
+                text = (m.get("text") or m.get("content") or "").strip()
+                if not text:
+                    continue
+                # Merge messaggi consecutivi dello stesso ruolo (Anthropic lo richiede)
+                if messages and messages[-1]["role"] == role:
+                    messages[-1]["content"] += "\n" + text
+                else:
+                    messages.append({"role": role, "content": text})
+        messages.append({"role": "user", "content": prompt})
         kwargs: Dict[str, Any] = {"model": mdl, "max_tokens": max_tokens, "messages": messages}
         if system:
             kwargs["system"] = system

@@ -2801,7 +2801,7 @@ async def handle_project_message(update, project):
                     f"https://api.telegram.org/bot{_token}/sendMessage",
                     json=payload, timeout=15,
                 )
-            _topic_buffer_add(chat_id, thread_id or 0, _proj_answer[:200], role="bot")
+            _topic_buffer_add(chat_id, thread_id or 0, _proj_answer, role="bot")
             threading.Thread(
                 target=_trigger_extract_facts, args=(msg, _chief_id), daemon=True
             ).start()
@@ -3803,7 +3803,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     },
                     timeout=15,
                 )
-            _topic_buffer_add(chat_id, thread_id, _answer_t[:200], role="bot")
+            _topic_buffer_add(chat_id, thread_id, _answer_t, role="bot")
             threading.Thread(
                 target=_trigger_extract_facts, args=(msg, _chief_t.chief_id), daemon=True
             ).start()
