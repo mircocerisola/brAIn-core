@@ -692,7 +692,7 @@ def run_scan(queries, max_problems=None):
         start = time.time()
         try:
             response = claude.messages.create(
-                model="claude-haiku-4-5",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=4096,
                 system=analysis_prompt,
                 messages=[{"role": "user", "content": f"Analizza e identifica problemi. SOLO JSON:\n\n{combined}"}]
@@ -702,7 +702,7 @@ def run_scan(queries, max_problems=None):
 
             log_to_supabase("world_scanner", "scan_v2", 1,
                 f"Batch {len(batch)} ricerche", reply[:500],
-                "claude-haiku-4-5",
+                "claude-haiku-4-5-20251001",
                 response.usage.input_tokens, response.usage.output_tokens,
                 (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
                 duration)
@@ -1068,7 +1068,7 @@ def research_problem(problem):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=3000,
             system=RESEARCH_PROMPT,
             messages=[{"role": "user", "content": f"{problem_context}\n\nRISULTATI RICERCA:\n{combined_research}\n\nCrea il dossier. SOLO JSON."}]
@@ -1078,7 +1078,7 @@ def research_problem(problem):
 
         log_to_supabase("solution_architect", "research", 2,
             f"Ricerca: {title[:100]}", reply[:500],
-            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -1124,7 +1124,7 @@ def generate_solutions_unconstrained(problem, dossier):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=4000,
             system=gen_prompt,
             messages=[{"role": "user", "content": f"{problem_context}\n\nDOSSIER COMPETITIVO:\n{dossier_text}\n\nGenera 3 soluzioni. SOLO JSON."}]
@@ -1134,7 +1134,7 @@ def generate_solutions_unconstrained(problem, dossier):
 
         log_to_supabase("solution_architect", "generate_unconstrained", 2,
             f"Soluzioni per: {problem['title'][:100]}", reply[:500],
-            "claude-sonnet-4-5",
+            "claude-sonnet-4-6",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 3.0 + response.usage.output_tokens * 15.0) / 1_000_000,
             duration)
@@ -1152,7 +1152,7 @@ def assess_feasibility(problem, solutions_data):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2000,
             system=SA_FEASIBILITY_PROMPT,
             messages=[{"role": "user", "content": f"PROBLEMA: {problem['title']}\n\nSOLUZIONI:\n{solutions_text}\n\nValuta fattibilita. SOLO JSON."}]
@@ -1162,7 +1162,7 @@ def assess_feasibility(problem, solutions_data):
 
         log_to_supabase("solution_architect", "assess_feasibility", 2,
             f"Fattibilita: {problem['title'][:100]}", reply[:500],
-            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -1508,7 +1508,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
         start = time.time()
         try:
             response = claude.messages.create(
-                model="claude-haiku-4-5",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
                 system=FEASIBILITY_ENGINE_PROMPT,
                 messages=[{"role": "user", "content": f"Valuta. SOLO JSON:\n\n{context}"}]
@@ -1518,7 +1518,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
             log_to_supabase("feasibility_engine", "analyze_feasibility", 2,
                 f"Feasibility: {title[:100]}", reply[:500],
-                "claude-haiku-4-5",
+                "claude-haiku-4-5-20251001",
                 response.usage.input_tokens, response.usage.output_tokens,
                 (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
                 duration)
@@ -2084,7 +2084,7 @@ def run_knowledge_keeper():
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=KNOWLEDGE_PROMPT,
             messages=[{"role": "user", "content": f"Analizza SOLO JSON:\n\n{json.dumps(simple_logs, default=str)}"}]
@@ -2094,7 +2094,7 @@ def run_knowledge_keeper():
 
         log_to_supabase("knowledge_keeper", "analyze_logs", 5,
             f"Analizzati {len(logs)} log", reply[:500],
-            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -2168,7 +2168,7 @@ def run_capability_scout():
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             system=SCOUT_PROMPT,
             messages=[{"role": "user", "content": f"Analizza SOLO JSON:\n\n{combined}"}]
@@ -2178,7 +2178,7 @@ def run_capability_scout():
 
         log_to_supabase("capability_scout", "analyze_discoveries", 5,
             f"Analizzati {len(search_results)} topic", reply[:500],
-            "claude-haiku-4-5",
+            "claude-haiku-4-5-20251001",
             response.usage.input_tokens, response.usage.output_tokens,
             (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,
             duration)
@@ -3277,7 +3277,7 @@ def generate_cost_report_v2():
         except Exception as e:
             logger.error(f"[COST_REPORT] Telegram error: {e}")
     log_to_supabase("cost_report", "generate", 0, f"Cost report {data_it}", report[:300], "none")
-    return {"status": "ok", "type": "cost", "date": data_it}
+    return {"status": "ok", "type": "cost", "date": data_it, "text": report}
 
 
 def generate_activity_report_v2():
@@ -3378,7 +3378,7 @@ def generate_activity_report_v2():
         except Exception as e:
             logger.error(f"[ACTIVITY_REPORT] Telegram error: {e}")
     log_to_supabase("activity_report", "generate", 0, f"Activity report {data_it}", report[:300], "none")
-    return {"status": "ok", "type": "activity", "date": data_it}
+    return {"status": "ok", "type": "activity", "date": data_it, "text": report}
 
 
 def update_kpi_daily():
@@ -3556,6 +3556,29 @@ def process_events():
 # ============================================================
 # THRESHOLD MANAGER — Aggiornamento settimanale soglie dinamiche
 # ============================================================
+
+def run_action_queue_cleanup():
+    """Pulizia settimanale action_queue: rimuove entry pending > 7 giorni e processed > 30 giorni."""
+    logger.info("[QUEUE_CLEANUP] Starting action_queue cleanup...")
+    try:
+        threshold_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        threshold_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        # Marca come expired le pending > 7 giorni
+        r1 = supabase.table("action_queue").update({"status": "expired"}) \
+            .eq("status", "pending").lt("created_at", threshold_7d).execute()
+        expired_count = len(r1.data or [])
+        # Elimina le processed/expired > 30 giorni
+        r2 = supabase.table("action_queue").delete() \
+            .in_("status", ["processed", "expired"]).lt("created_at", threshold_30d).execute()
+        deleted_count = len(r2.data or [])
+        msg = f"Queue cleanup: {expired_count} scadute, {deleted_count} eliminate"
+        logger.info(f"[QUEUE_CLEANUP] {msg}")
+        notify_telegram(f"🧹 {msg}", "info", "queue_cleanup")
+        return {"status": "ok", "expired": expired_count, "deleted": deleted_count}
+    except Exception as e:
+        logger.error(f"[QUEUE_CLEANUP] Error: {e}")
+        return {"status": "error", "error": str(e)}
+
 
 def run_weekly_threshold_update():
     """Aggiorna le soglie della pipeline in base al bos_approval_rate settimanale.
@@ -4234,7 +4257,7 @@ REGOLE:
 - Stack: Python + Supabase + Google Cloud Run (sempre, salvo eccezioni giustificate)
 - Costo infrastruttura target: < 50 EUR/mese
 - Deploy target: Google Cloud Run europe-west3, Container Docker
-- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 per task veloci, claude-sonnet-4-5 per task complessi). NON usare mai GPT, OpenAI, Gemini o altri provider LLM.
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 per task veloci, claude-sonnet-4-6 per task complessi). NON usare mai GPT, OpenAI, Gemini o altri provider LLM.
 
 STRUTTURA OBBLIGATORIA (usa esattamente questi header):
 
@@ -4452,7 +4475,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
     spec_md = ""
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=8000,
             system=SPEC_SYSTEM_PROMPT_AR,
             messages=[{"role": "user", "content": user_prompt}],
@@ -4463,7 +4486,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
     except Exception as e:
         logger.error(f"[SPEC] Claude error: {e}")
         log_to_supabase("spec_generator", "spec_generate", 3, f"project={project_id}", str(e),
-                        "claude-sonnet-4-5", 0, 0, 0, int((time.time() - start) * 1000), "error", str(e))
+                        "claude-sonnet-4-6", 0, 0, 0, int((time.time() - start) * 1000), "error", str(e))
         return {"status": "error", "error": str(e)}
 
     cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
@@ -4529,7 +4552,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
     log_to_supabase("spec_generator", "spec_generate", 3,
                     f"project={project_id} solution={solution_id} problem={problem_id}",
                     f"SPEC {len(spec_md)} chars stack={stack}",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     logger.info(f"[SPEC] Completato project={project_id} in {duration_ms}ms spec_len={len(spec_md)}")
     return {"status": "ok", "project_id": project_id, "spec_length": len(spec_md),
@@ -4607,7 +4630,7 @@ Genera la landing page HTML completa."""
     html = ""
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=3000,
             system=LP_SYSTEM_PROMPT_AR,
             messages=[{"role": "user", "content": user_prompt}],
@@ -4640,7 +4663,7 @@ Genera la landing page HTML completa."""
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("landing_page_generator", "lp_generate", 3,
                     f"project={project_id}", f"HTML {len(html)} chars",
-                    "claude-haiku-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    "claude-haiku-4-5-20251001", tokens_in, tokens_out, cost, duration_ms)
 
     logger.info(f"[LP] Completato project={project_id} in {duration_ms}ms")
     return {"status": "ok", "project_id": project_id, "html_length": len(html), "cost_usd": round(cost, 6)}
@@ -4705,7 +4728,7 @@ Env vars necessarie (configurare prima del deploy):
 {env_vars_section if env_vars_section else "(vedi sezione 7 del SPEC.md)"}
 
 Stack: {", ".join(stack) if stack else "Python + Supabase + Cloud Run"}
-Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), MAI OpenAI/GPT.
+Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 o claude-sonnet-4-6), MAI OpenAI/GPT.
 
 REGOLA ASSOLUTA: zero decisioni architetturali autonome.
 Committa ogni file creato/modificato — mai lavorare in locale senza committare."""
@@ -4779,7 +4802,7 @@ SPEC.md (estratto):
 
 REQUISITI FASE 1:
 - Stack: {stack_str}
-- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), NON OpenAI/GPT
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 o claude-sonnet-4-6), NON OpenAI/GPT
 - Genera: main.py (o app.py), requirements.txt, Dockerfile, .env.example
 - Il codice deve essere funzionante e deployabile su Google Cloud Run europe-west3
 - Usa Supabase per il database (variabili SUPABASE_URL, SUPABASE_KEY)
@@ -4794,7 +4817,7 @@ Genera SOLO i file della struttura base."""
 
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=8000,
             messages=[{"role": "user", "content": build_prompt}],
         )
@@ -4844,7 +4867,7 @@ Genera SOLO i file della struttura base."""
     cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
     log_to_supabase("build_agent", "build_fase1", 3,
                     f"project={project_id}", f"{files_committed} file committati",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, 0)
 
     # Card summary — Fix 2
     file_list = "\n".join([f"  \u2022 {m.group(1).strip()}" for m in matches]) if matches else "  \u2022 main.py (fallback)"
@@ -4875,7 +4898,7 @@ def _extract_spec_bullets(spec_md):
     """Estrae 3 bullet points dalla SPEC usando Claude Haiku. Max 60 chars ciascuno."""
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=200,
             messages=[{"role": "user", "content": (
                 "Analizza questo SPEC e ritorna SOLO 3 bullet points in italiano, "
@@ -5165,7 +5188,7 @@ Analizza i rischi legali per operare in Europa con questo progetto."""
     review_data = {}
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=2000,
             system=LEGAL_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": user_prompt}],
@@ -5256,7 +5279,7 @@ Analizza i rischi legali per operare in Europa con questo progetto."""
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("legal_agent", "legal_review", 2,
                     f"project={project_id}", f"green={len(green)} yellow={len(yellow)} red={len(red)}",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     logger.info(f"[LEGAL] Completato project={project_id} green={len(green)} yellow={len(yellow)} red={len(red)}")
     return {
@@ -5582,7 +5605,7 @@ Rispondi in JSON:
     insights = {}
     try:
         resp = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=1000,
             messages=[{"role": "user", "content": insights_prompt}],
         )
@@ -5667,7 +5690,7 @@ Rispondi in JSON:
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("smoke_test_agent", "smoke_analyze", 2,
                     f"project={project_id}", f"conv={conv_rate:.1f}% rec={insights.get('recommendation','')}",
-                    "claude-sonnet-4-5", 0, 0, cost, duration_ms)
+                    "claude-sonnet-4-6", 0, 0, cost, duration_ms)
 
     logger.info(f"[SMOKE_ANALYZE] Completato project={project_id} conv={conv_rate:.1f}%")
     return {
@@ -5819,7 +5842,7 @@ RISPONDI con JSON puro:
     brand_data = {}
     try:
         resp = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=3000,
             messages=[{"role": "user", "content": brand_prompt}],
         )
@@ -5953,7 +5976,7 @@ _{tagline}_
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("brand_agent", "brand_generate", 3,
                     f"project={project_id}", f"brand={brand_name} tagline={tagline}",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     logger.info(f"[BRAND] Completato project={project_id} brand={brand_name} in {duration_ms}ms")
     return {"status": "ok", "project_id": project_id, "brand_name": brand_name, "tagline": tagline,
@@ -6060,7 +6083,7 @@ Genera in JSON:
     pm_data = {}
     try:
         resp = claude.messages.create(
-            model="claude-sonnet-4-5", max_tokens=4000,
+            model="claude-sonnet-4-6", max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.content[0].text.strip()
@@ -6162,7 +6185,7 @@ Genera in JSON:
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("product_marketing_agent", "pm_generate", 3, f"project={project_id}",
-                    f"icp={icp.get('profile','')[:80]}", "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    f"icp={icp.get('profile','')[:80]}", "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     logger.info(f"[PRODUCT_MKT] Completato project={project_id} in {duration_ms}ms")
     return {"status": "ok", "project_id": project_id, "cost_usd": round(cost, 5)}
@@ -6236,7 +6259,7 @@ Genera JSON:
     cnt_data = {}
     try:
         resp = claude.messages.create(
-            model="claude-sonnet-4-5", max_tokens=4000,
+            model="claude-sonnet-4-6", max_tokens=4000,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.content[0].text.strip()
@@ -6364,7 +6387,7 @@ Genera JSON:
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("content_agent", "content_generate", 3, f"project={project_id}",
-                    f"keywords={len(keywords)} emails={len(emails)}", "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    f"keywords={len(keywords)} emails={len(emails)}", "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     return {"status": "ok", "project_id": project_id, "cost_usd": round(cost, 5)}
 
@@ -7388,7 +7411,7 @@ Analizza e dai il verdetto."""
         verdict_text = ""
         try:
             response = claude.messages.create(
-                model="claude-haiku-4-5",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=1000,
                 system=VALIDATION_SYSTEM_PROMPT_AR,
                 messages=[{"role": "user", "content": user_prompt}],
@@ -7455,7 +7478,7 @@ Analizza e dai il verdetto."""
     cost = (total_tokens_in * 0.8 + total_tokens_out * 4.0) / 1_000_000
     log_to_supabase("validation_agent", "validation_weekly", 3,
                     f"{len(projects)} progetti", f"{analyzed} analizzati",
-                    "claude-haiku-4-5", total_tokens_in, total_tokens_out, cost, duration_ms)
+                    "claude-haiku-4-5-20251001", total_tokens_in, total_tokens_out, cost, duration_ms)
 
     logger.info(f"[VALIDATION] Completato: {analyzed} progetti in {duration_ms}ms")
     return {"status": "ok", "projects_analyzed": analyzed, "cost_usd": round(cost, 6)}
@@ -7519,7 +7542,7 @@ FEEDBACK DI MIRCO sulla fase {current_phase}:
 
 REQUISITI FASE {next_phase} — {fase_desc}:
 - Integra il feedback ricevuto
-- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5 o claude-sonnet-4-5), NON OpenAI/GPT
+- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 o claude-sonnet-4-6), NON OpenAI/GPT
 - Usa Supabase per il database
 
 FORMATO OUTPUT per ogni file:
@@ -7531,7 +7554,7 @@ Genera il codice per la Fase {next_phase}."""
 
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=8000,
             messages=[{"role": "user", "content": build_prompt}],
         )
@@ -7571,7 +7594,7 @@ Genera il codice per la Fase {next_phase}."""
     cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
     log_to_supabase("build_agent", f"build_fase{next_phase}", 3,
                     f"project={project_id} feedback={feedback[:100]}", f"{files_committed} file committati",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, 0)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, 0)
 
     # Aggiorna DB e notifica
     sep = "\u2501" * 15
@@ -7692,7 +7715,7 @@ Rispondi SOLO con il SPEC.md aggiornato completo."""
     new_spec = ""
     try:
         response = claude.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=8000,
             system=SPEC_SYSTEM_PROMPT_AR,
             messages=[{"role": "user", "content": update_prompt}],
@@ -7737,7 +7760,7 @@ Rispondi SOLO con il SPEC.md aggiornato completo."""
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("spec_generator", "spec_update", 3,
                     f"project={project_id}", f"SPEC aggiornato {len(new_spec)} chars",
-                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+                    "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
     # Re-enqueue spec review
     enqueue_spec_review_action(project_id)
@@ -7847,7 +7870,7 @@ async def run_pipeline_endpoint(request):
     return web.json_response({"scan": scan_result, "pipeline": f"{len(saved_ids)} problemi processati"})
 
 async def run_daily_report_endpoint(request):
-    result = generate_cost_report_v2()
+    result = generate_activity_report_v2()
     return web.json_response(result)
 
 async def run_cost_report_endpoint(request):
@@ -7885,6 +7908,10 @@ async def run_sources_cleanup_endpoint(request):
 
 async def run_weekly_threshold_endpoint(request):
     result = run_weekly_threshold_update()
+    return web.json_response(result)
+
+async def run_action_queue_cleanup_endpoint(request):
+    result = run_action_queue_cleanup()
     return web.json_response(result)
 
 async def run_project_init_endpoint(request):
@@ -8195,6 +8222,7 @@ async def main():
     app.router.add_post("/marketing/run", run_marketing_run_endpoint)
     app.router.add_post("/marketing/brand", run_marketing_brand_endpoint)
     app.router.add_post("/marketing/report", run_marketing_report_endpoint)
+    app.router.add_post("/cycle/queue-cleanup", run_action_queue_cleanup_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)

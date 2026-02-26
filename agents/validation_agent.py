@@ -22,7 +22,7 @@ claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 1000
 
 

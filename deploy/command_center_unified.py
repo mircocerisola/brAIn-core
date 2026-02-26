@@ -115,7 +115,7 @@ _current_action = {}  # chat_id -> action dict (azione in attesa di risposta)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 GITHUB_API = "https://api.github.com"
-CODE_AGENT_MODEL = "claude-sonnet-4-5"
+CODE_AGENT_MODEL = "claude-sonnet-4-6"
 
 pending_deploys = {}  # chat_id -> {"files": [...], "summary": ..., "timestamp": ...}
 
@@ -1292,7 +1292,7 @@ def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
 
 # ---- CLAUDE (Sonnet 4.5 + tool_use) ----
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-sonnet-4-6"
 COST_INPUT_PER_M = 3.0
 COST_OUTPUT_PER_M = 15.0
 MAX_TOOL_LOOPS = 5
@@ -1470,7 +1470,7 @@ def _generate_and_save_summary(chat_id):
 
         # Genera con Haiku (economico)
         resp = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=500,
             system="Genera un riassunto compatto della conversazione in italiano. Includi: temi discussi, decisioni prese, problemi/soluzioni approvati/rifiutati con ID, preferenze espresse da Mirco. Max 250 parole. Testo piano, no markdown.",
             messages=[{"role": "user", "content": f"Riassumi:\n\n{conversation_text}"}],
@@ -1480,7 +1480,7 @@ def _generate_and_save_summary(chat_id):
         # Logga costo summary
         s_cost = (resp.usage.input_tokens * 1.0 + resp.usage.output_tokens * 5.0) / 1_000_000
         log_to_supabase("command_center", "summary_generation", f"chat_id={chat_id}",
-                        summary_text[:200], "claude-haiku-4-5",
+                        summary_text[:200], "claude-haiku-4-5-20251001",
                         resp.usage.input_tokens, resp.usage.output_tokens, s_cost, 0)
 
         # Salva come summary (role="summary" per distinguerlo)
@@ -2628,17 +2628,33 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("build_modify:"):
         await query.answer("Scrivi il feedback nel topic del progetto.")
 
-    # ---- REPORT ON-DEMAND callbacks (FIX 2/3) ----
+    # ---- REPORT ON-DEMAND callbacks ----
     elif data == "report_cost_ondemand":
         await query.answer("Generazione report costi...")
+        _token_rc = os.getenv("TELEGRAM_BOT_TOKEN")
+        _cid_rc = chat_id
         def _gen_cost_cb():
-            _call_agents_runner_sync("/report/cost")
+            result = _call_agents_runner_sync("/report/cost")
+            if result and result.get("text") and _token_rc and _cid_rc:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token_rc}/sendMessage",
+                    json={"chat_id": _cid_rc, "text": result["text"], "parse_mode": "Markdown"},
+                    timeout=15,
+                )
         threading.Thread(target=_gen_cost_cb, daemon=True).start()
 
     elif data == "report_activ_ondemand":
         await query.answer("Generazione report attività...")
+        _token_ra = os.getenv("TELEGRAM_BOT_TOKEN")
+        _cid_ra = chat_id
         def _gen_activ_cb():
-            _call_agents_runner_sync("/report/activity")
+            result = _call_agents_runner_sync("/report/activity")
+            if result and result.get("text") and _token_ra and _cid_ra:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token_ra}/sendMessage",
+                    json={"chat_id": _cid_ra, "text": result["text"], "parse_mode": "Markdown"},
+                    timeout=15,
+                )
         threading.Thread(target=_gen_activ_cb, daemon=True).start()
 
     # ---- MARKETING callbacks ----

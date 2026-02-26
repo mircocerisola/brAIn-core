@@ -98,7 +98,7 @@ def analyze_logs(logs):
     start = time.time()
     try:
         response = claude.messages.create(
-            model="claude-haiku-4-5",
+            model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=SYSTEM_PROMPT,
             messages=[{
@@ -115,7 +115,7 @@ def analyze_logs(logs):
             "layer": 5,
             "input_summary": f"Analizzati {len(logs)} log",
             "output_summary": reply[:500],
-            "model_used": "claude-haiku-4-5",
+            "model_used": "claude-haiku-4-5-20251001",
             "tokens_input": response.usage.input_tokens,
             "tokens_output": response.usage.output_tokens,
             "cost_usd": (response.usage.input_tokens * 1.0 + response.usage.output_tokens * 5.0) / 1_000_000,

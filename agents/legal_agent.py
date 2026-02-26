@@ -69,7 +69,7 @@ def review_project(project_id):
 
     print(f"[LEGAL] Review per: {name}")
     response = claude.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-6",
         max_tokens=2000,
         system=LEGAL_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": (

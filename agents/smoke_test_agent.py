@@ -158,7 +158,7 @@ def analyze(project_id):
     print(f"  Conversione: {conv_rate:.1f}%")
 
     resp = claude.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-4-6",
         max_tokens=1000,
         messages=[{"role": "user", "content": (
             f'Analizza smoke test "{name}". '

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
-MODEL = "claude-haiku-4-5"
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TOKENS = 3000
 
 

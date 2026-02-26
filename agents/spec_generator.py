@@ -26,7 +26,7 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_API = "https://api.github.com"
 
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 8000
 
 
