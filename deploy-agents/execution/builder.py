@@ -495,29 +495,44 @@ def _ensure_spec_and_repo(project_id, project, group_id):
             _send_to_topic(group_id, topic_id, f"\u274c Build {name}: impossibile rigenerare SPEC. Contatta CTO.")
             return None, None
 
-    # FIX 2: repo GitHub mancante → crealo ora (max 3 tentativi con backoff)
+    # FIX 2: repo GitHub mancante → crealo (o recupera quello esistente)
     if not github_repo:
-        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Repo GitHub mancante per {name} — creazione in corso...")
-        for attempt in range(3):
-            try:
-                created = _create_github_repo(slug, name)
-                if created:
-                    github_repo = created
-                    supabase.table("projects").update({"github_repo": github_repo}).eq("id", project_id).execute()
-                    logger.info(f"[BUILD_AGENT] Repo creato: {github_repo}")
-                    break
-                else:
-                    logger.warning(f"[BUILD_AGENT] Repo creation attempt {attempt+1} fallito")
-            except Exception as _re:
-                logger.warning(f"[BUILD_AGENT] Repo creation error attempt {attempt+1}: {_re}")
-            if attempt < 2:
-                time.sleep(30)
+        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Repo GitHub mancante per {name} — ricerca/creazione in corso...")
+        repo_name = f"brain-{slug}"
+        mirco_user = "mircocerisola"
+
+        # Prima controlla se il repo esiste già su GitHub (creato in sessioni precedenti)
+        try:
+            existing_repo = _github_project_api("GET", f"{mirco_user}/{repo_name}", "")
+            if existing_repo and existing_repo.get("full_name"):
+                github_repo = existing_repo["full_name"]
+                supabase.table("projects").update({"github_repo": github_repo}).eq("id", project_id).execute()
+                logger.info(f"[BUILD_AGENT] Repo già esistente, recuperato: {github_repo}")
+        except Exception as _ge:
+            logger.warning(f"[BUILD_AGENT] Repo GET check error: {_ge}")
+
+        # Se non trovato, crea
+        if not github_repo:
+            for attempt in range(2):
+                try:
+                    created = _create_github_repo(slug, name)
+                    if created:
+                        github_repo = created
+                        supabase.table("projects").update({"github_repo": github_repo}).eq("id", project_id).execute()
+                        logger.info(f"[BUILD_AGENT] Repo creato: {github_repo}")
+                        break
+                    else:
+                        logger.warning(f"[BUILD_AGENT] Repo creation attempt {attempt+1} fallito")
+                except Exception as _re:
+                    logger.warning(f"[BUILD_AGENT] Repo creation error attempt {attempt+1}: {_re}")
+                if attempt < 1:
+                    time.sleep(10)
 
         if not github_repo:
             # FIX 3: alert cantiere e abort
             _send_to_topic(group_id, topic_id,
-                f"\u274c Build {name}: impossibile creare repo GitHub dopo 3 tentativi.\n"
-                f"Verifica che GITHUB_TOKEN sia configurato in agents-runner.")
+                f"\u274c Build {name}: impossibile creare/trovare repo GitHub.\n"
+                f"Verifica GITHUB_TOKEN in agents-runner.")
             return None, None
 
     return spec_md, github_repo
