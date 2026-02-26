@@ -2556,8 +2556,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data.startswith("smoke_proceed:"):
         project_id = int(data.split(":")[1])
-        await query.answer("Avvio build...")
+        await query.answer("Avvio build e marketing...")
         threading.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
+        def _mkt_smoke_proceed():
+            _call_agents_runner_sync("/marketing/run", {"project_id": project_id, "phase": "full"})
+        threading.Thread(target=_mkt_smoke_proceed, daemon=True).start()
 
     elif data.startswith("smoke_spec_insights:"):
         parts = data.split(":")
@@ -2637,6 +2640,68 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         def _gen_activ_cb():
             _call_agents_runner_sync("/report/activity")
         threading.Thread(target=_gen_activ_cb, daemon=True).start()
+
+    # ---- MARKETING callbacks ----
+    elif data.startswith("mkt_report:"):
+        project_id = int(data.split(":")[1]) if data.split(":")[1] else None
+        await query.answer("Generazione report marketing...")
+        def _mkt_report_cb():
+            _call_agents_runner_sync("/marketing/report", {"project_id": project_id})
+        threading.Thread(target=_mkt_report_cb, daemon=True).start()
+
+    elif data.startswith("mkt_brand_kit:"):
+        project_id = int(data.split(":")[1]) if data.split(":")[1] else None
+        await query.answer("Brand Kit in arrivo...")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token and project_id:
+            try:
+                r = supabase.table("brand_assets").select("brand_name,tagline,brand_dna_md").eq("project_id", project_id).execute()
+                if r.data:
+                    a = r.data[0]
+                    lines = [f"Nome: {a.get('brand_name','N/A')}", f"Tagline: {a.get('tagline','N/A')}", "",
+                             "Brand DNA:", (a.get("brand_dna_md") or "")[:800]]
+                    text = "\n".join(lines)[:4000]
+                    http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                       json={"chat_id": chat_id, "text": text}, timeout=15)
+            except Exception as e:
+                logger.warning(f"[MKT_BRAND_KIT] {e}")
+
+    elif data.startswith("mkt_next:"):
+        project_id = int(data.split(":")[1]) if data.split(":")[1] else None
+        await query.answer("Avvio fase successiva marketing...")
+        def _mkt_next_cb():
+            _call_agents_runner_sync("/marketing/run", {"project_id": project_id, "phase": "gtm"})
+        threading.Thread(target=_mkt_next_cb, daemon=True).start()
+
+    elif data.startswith("mkt_report_detail:"):
+        project_id = int(data.split(":")[1]) if data.split(":")[1] else None
+        await query.answer("Dettaglio report...")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token and project_id:
+            try:
+                r = supabase.table("marketing_reports").select("*").eq("project_id", project_id).order("recorded_at", desc=True).limit(1).execute()
+                if r.data:
+                    rep = r.data[0]
+                    text = (f"📊 Report marketing — progetto {project_id}\n"
+                            f"Settimana: {rep.get('week_start','N/A')}\n"
+                            f"Visite: {rep.get('landing_visits',0)}\n"
+                            f"CAC: €{rep.get('cac_eur','N/A')}\n"
+                            f"Open rate: {rep.get('email_open_rate','N/A')}%\n"
+                            f"Conversione: {rep.get('conversion_rate','N/A')}%")
+                    http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                       json={"chat_id": chat_id, "text": text}, timeout=15)
+            except Exception as e:
+                logger.warning(f"[MKT_REPORT_DETAIL] {e}")
+
+    elif data.startswith("mkt_report_trend:"):
+        await query.answer("Trend in sviluppo — dati insufficienti.")
+
+    elif data.startswith("mkt_report_optimize:"):
+        project_id = int(data.split(":")[1]) if data.split(":")[1] else None
+        await query.answer("Avvio ottimizzazione marketing...")
+        def _mkt_opt_cb():
+            _call_agents_runner_sync("/marketing/run", {"project_id": project_id, "phase": "retention"})
+        threading.Thread(target=_mkt_opt_cb, daemon=True).start()
 
     # BOS approval inline (Fix 3)
     elif data.startswith("bos_approve:") or data.startswith("bos_reject:"):
@@ -3189,6 +3254,49 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     lower_msg = msg.strip().lower()
+
+    # ---- MARKETING ROUTING ----
+    _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
+
+    if lower_msg in _BRAND_TRIGGERS or lower_msg.startswith("crea brand identity"):
+        await update.message.reply_text(
+            _make_card("\U0001f3a8", "BRAND IDENTITY", "avvio in corso", ["Generazione brand DNA, naming, logo\u2026", "Ti notificher\u00f2 al completamento."]),
+            parse_mode="Markdown",
+        )
+        def _mkt_brand_brain():
+            _call_agents_runner_sync("/marketing/brand", {"target": "brain"})
+        threading.Thread(target=_mkt_brand_brain, daemon=True).start()
+        return
+
+    if lower_msg.startswith("marketing ") or lower_msg == "marketing":
+        project_name = lower_msg.replace("marketing", "").strip() or None
+        project_id = None
+        if project_name:
+            try:
+                r = supabase.table("projects").select("id").ilike("name", f"%{project_name}%").limit(1).execute()
+                if r.data:
+                    project_id = r.data[0]["id"]
+            except Exception:
+                pass
+        if project_id:
+            await update.message.reply_text(
+                _make_card("\U0001f680", "MARKETING AVVIATO", f"progetto id={project_id}", [
+                    "Fase: full (brand \u2192 GTM \u2192 retention)",
+                    "Ti notificher\u00f2 al completamento.",
+                ]),
+                parse_mode="Markdown",
+            )
+            def _mkt_run():
+                _call_agents_runner_sync("/marketing/run", {"project_id": project_id, "phase": "full"})
+            threading.Thread(target=_mkt_run, daemon=True).start()
+        else:
+            await update.message.reply_text(
+                _make_card("\u2139\ufe0f", "MARKETING", "progetto non trovato", [
+                    "Specifica nome progetto valido: marketing NomeProgetto",
+                ]),
+                parse_mode="Markdown",
+            )
+        return
 
     # ---- FIX 2/3: ROUTING REPORT ON-DEMAND ----
     _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
