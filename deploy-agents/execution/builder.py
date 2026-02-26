@@ -829,7 +829,11 @@ def init_project(solution_id):
     topic_id = None
     logger.info("[INIT] Forum Topic: verrà creato automaticamente dopo spec_validate")
 
-    # 6. Genera SPEC
+    # 6. Genera SPEC — sblocca prima (run_spec_generator rilockera da solo)
+    try:
+        supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as _ule:
+        logger.warning(f"[INIT] pre-spec unlock error: {_ule}")
     spec_result = run_spec_generator(project_id)
     if spec_result.get("status") != "ok":
         logger.error(f"[INIT] Spec generation fallita: {spec_result}")
