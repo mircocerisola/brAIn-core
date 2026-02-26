@@ -240,6 +240,27 @@ def _topic_buffer_get_recent(chat_id, thread_id, n=5):
     return prior[-n:]
 
 
+def _warmup_topic_buffer(chat_id: int, thread_id: int):
+    """Carica storico dal DB se il buffer in-memory è vuoto (post-restart recovery)."""
+    key = f"{chat_id}:{thread_id}"
+    if _topic_recent_msgs.get(key):
+        return  # già popolato — niente da fare
+    try:
+        r = supabase.table("topic_conversation_history") \
+            .select("role,text") \
+            .eq("scope_id", key) \
+            .order("created_at", desc=False) \
+            .limit(20).execute()
+        if r.data:
+            _topic_recent_msgs[key] = [
+                {"role": row["role"], "text": row["text"]}
+                for row in r.data
+            ]
+            logger.info(f"[TOPIC_WARMUP] Caricati {len(r.data)} msgs per {key}")
+    except Exception as e:
+        logger.warning(f"[TOPIC_WARMUP] errore caricamento storico: {e}")
+
+
 def _trigger_create_episode(scope_id: str, messages: list):
     """Background: chiama agents-runner per creare un episodio riassuntivo."""
     if not AGENTS_RUNNER_URL:
@@ -2431,6 +2452,7 @@ async def handle_project_message(update, project):
 
     # Salva nel buffer topic per contesto conversazione
     if thread_id and msg.strip():
+        _warmup_topic_buffer(chat_id, thread_id)  # post-restart recovery
         _topic_buffer_add(chat_id, thread_id, msg, role="user")
 
     # 1. Identifica mittente
@@ -3732,6 +3754,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ---- FORUM TOPIC ROUTING ----
     thread_id = update.message.message_thread_id if update.message else None
+    # ---- WARMUP BUFFER DA DB (post-restart recovery) ----
+    if thread_id:
+        _warmup_topic_buffer(chat_id, thread_id)
     if thread_id:
         project = lookup_project_by_topic_id(thread_id)
         if project:
@@ -3755,7 +3780,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _chief_t = _chief_by_topic
             def _call_chief_topic():
                 return _chief_t.answer_question(
-                    _q_t, topic_scope_id=_scope_t, recent_messages=_recent_t
+                    _q_t,
+                    user_context=_active_proj_ctx,
+                    topic_scope_id=_scope_t,
+                    recent_messages=_recent_t,
                 )
             try:
                 _answer_t = await asyncio.wait_for(
