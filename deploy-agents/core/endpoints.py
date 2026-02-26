@@ -702,6 +702,16 @@ async def run_resend_spec_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_health_check_endpoint(request):
+    """POST /admin/health-check — genera e invia health check a #technology"""
+    try:
+        from core.base_chief import send_system_health_check
+        result = send_system_health_check()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_founder_pipeline_endpoint(request):
     """POST /admin/founder-pipeline — avvia init_project per soluzioni founder bos_approved senza progetto."""
     try:

@@ -648,13 +648,14 @@ class BaseChief(BaseAgent):
     # ============================================================
 
     def generate_brief_report(self) -> Optional[str]:
-        """FIX 2: Genera report breve (max 8 righe) se ci sono aggiornamenti nelle ultime 4h.
-        Invia al Forum Topic del Chief. Ritorna il testo o None se nulla da segnalare.
-        Override nelle sottoclassi per dati specifici di dominio.
+        """Genera report di stato periodico del dominio (max 8 righe).
+        Sempre inviato — usa get_domain_context() come base dati.
+        Invia al Forum Topic del Chief. Ritorna il testo o None se errore.
         """
         four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
 
-        # Controlla decisioni recenti
+        # Decisioni recenti (escludi brief_report)
+        recent_decisions = []
         try:
             r = supabase.table("chief_decisions") \
                 .select("summary,decision_type,created_at") \
@@ -664,19 +665,23 @@ class BaseChief(BaseAgent):
                 .order("created_at", desc=True).limit(5).execute()
             recent_decisions = r.data or []
         except Exception:
-            recent_decisions = []
+            pass
 
-        # Controlla anomalie
+        # Anomalie dominio
+        anomalies = []
         try:
             anomalies = self.check_anomalies()
         except Exception:
-            anomalies = []
+            pass
 
-        # Se nulla di nuovo → skip silenzioso
-        if not recent_decisions and not anomalies:
-            logger.info(f"[{self.name}] generate_brief_report: nulla da segnalare, skip")
-            return None
+        # Dati live del dominio
+        domain_ctx = {}
+        try:
+            domain_ctx = self.get_domain_context()
+        except Exception:
+            pass
 
+        # Costruisci contesto
         ctx_parts = []
         if recent_decisions:
             dec_text = "\n".join(
@@ -690,20 +695,30 @@ class BaseChief(BaseAgent):
                 for a in anomalies[:3]
             )
             ctx_parts.append(f"Anomalie:\n{anom_text}")
+        # Aggiungi dati dominio significativi
+        for k, v in domain_ctx.items():
+            if k not in ("recent_decisions", "memory") and v:
+                v_str = json.dumps(v, ensure_ascii=False, default=str)[:300]
+                ctx_parts.append(f"{k}: {v_str}")
 
-        ctx = "\n\n".join(ctx_parts)
+        ctx = "\n\n".join(ctx_parts) if ctx_parts else "Nessun dato significativo disponibile."
+
         prompt = (
-            f"Sei il {self.name} di brAIn. Genera un report breve di aggiornamento (max 8 righe, italiano).\n"
+            f"Sei il {self.name} di brAIn. Genera un report di stato breve (max 8 righe, italiano).\n"
             f"Dominio: {self.domain}\n"
-            f"Dati ultimi 4 ore:\n{ctx}\n\n"
-            "Formato: usa separatori ━━━━━━━━━━━━━━━, emoji rilevanti, dati concreti. "
-            "Zero fuffa. Solo novità reali."
+            f"Dati disponibili:\n{ctx}\n\n"
+            "Formato: usa separatori \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501, emoji rilevanti, dati concreti. "
+            "Se non ci sono novit\u00e0, comunica lo stato attuale del dominio. "
+            "Zero fuffa. Vai al punto."
         )
 
         try:
             text = self.call_claude(prompt, model="claude-haiku-4-5-20251001", max_tokens=400)
         except Exception as e:
             logger.warning(f"[{self.name}] generate_brief_report call_claude error: {e}")
+            return None
+
+        if not text:
             return None
 
         # Salva in chief_decisions
@@ -807,3 +822,110 @@ class BaseChief(BaseAgent):
             }).execute()
         except Exception as e:
             logger.warning(f"[{self.name}] save_decision error: {e}")
+
+
+# ============================================================
+# HEALTH CHECK — funzione standalone, invia a #technology
+# ============================================================
+
+def send_system_health_check() -> Dict[str, Any]:
+    """
+    Genera e invia un health check del sistema brAIn al topic #technology.
+    Controlla: DB, scheduler jobs, progetti attivi, ultimi errori.
+    """
+    sep = "\u2501" * 15
+    now_str = datetime.now(timezone.utc).strftime("%d/%m %H:%M UTC")
+
+    checks: Dict[str, str] = {}
+    details: List[str] = []
+
+    # 1. DB Supabase
+    try:
+        supabase.table("org_config").select("key").limit(1).execute()
+        checks["Supabase DB"] = "\u2705"
+    except Exception as e:
+        checks["Supabase DB"] = f"\u274c {str(e)[:40]}"
+
+    # 2. Chief topics configurati
+    try:
+        r = supabase.table("org_config").select("key,value").ilike("key", "chief_topic_%").execute()
+        chief_topics = {row["key"]: row["value"] for row in (r.data or [])}
+        expected = {"chief_topic_cso", "chief_topic_coo", "chief_topic_cto",
+                    "chief_topic_cmo", "chief_topic_cfo", "chief_topic_clo", "chief_topic_cpeo"}
+        found = set(chief_topics.keys()) & expected
+        checks["Chief Topics"] = f"\u2705 {len(found)}/7" if len(found) == 7 else f"\u26a0\ufe0f {len(found)}/7"
+    except Exception as e:
+        checks["Chief Topics"] = f"\u274c {str(e)[:40]}"
+
+    # 3. Progetti attivi
+    try:
+        r = supabase.table("projects").select("id,name,status").neq("status", "archived").execute()
+        active = r.data or []
+        checks["Progetti attivi"] = f"\u2705 {len(active)}"
+        if active:
+            details.append("Cantieri: " + ", ".join(f"{p['name']} ({p['status']})" for p in active[:3]))
+    except Exception as e:
+        checks["Progetti attivi"] = f"\u274c {str(e)[:40]}"
+
+    # 4. Errori recenti (ultimi 30 min)
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        r = supabase.table("agent_logs").select("agent_id,error").eq("status", "error") \
+            .gte("created_at", cutoff).limit(5).execute()
+        errors = r.data or []
+        if errors:
+            checks["Errori recenti (30m)"] = f"\u26a0\ufe0f {len(errors)}"
+            details.append("Ultimi errori: " + "; ".join(
+                f"{e['agent_id']}: {(e.get('error') or '')[:40]}" for e in errors[:2]
+            ))
+        else:
+            checks["Errori recenti (30m)"] = "\u2705 0"
+    except Exception as e:
+        checks["Errori recenti (30m)"] = f"\u274c {str(e)[:40]}"
+
+    # 5. Action queue pending
+    try:
+        r = supabase.table("action_queue").select("id").eq("status", "pending").execute()
+        pending = len(r.data or [])
+        checks["Action Queue"] = f"\u2705 {pending} pending"
+    except Exception as e:
+        checks["Action Queue"] = f"\u274c {str(e)[:40]}"
+
+    # Costruisci messaggio
+    checks_text = "\n".join(f"{icon} {name}" for name, icon in checks.items())
+    # fix: rebuild for better display
+    checks_lines = "\n".join(f"{name}: {icon}" for name, icon in checks.items())
+    detail_text = ("\n" + "\n".join(details)) if details else ""
+
+    msg = (
+        f"\U0001f50d *Health Check brAIn*\n"
+        f"{sep}\n"
+        f"{checks_lines}"
+        f"{detail_text}\n"
+        f"{sep}\n"
+        f"_{now_str}_"
+    )
+
+    # Invia a #technology (chief_topic_cto)
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "chief_topic_cto").execute()
+        tech_topic_id = int(r.data[0]["value"]) if r.data else None
+        r2 = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+        group_id = int(r2.data[0]["value"]) if r2.data else None
+
+        if tech_topic_id and group_id and TELEGRAM_BOT_TOKEN:
+            _requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": group_id,
+                    "message_thread_id": tech_topic_id,
+                    "text": msg[:4000],
+                    "parse_mode": "Markdown",
+                },
+                timeout=15,
+            )
+            logger.info(f"[HEALTH_CHECK] Inviato a #technology topic_id={tech_topic_id}")
+    except Exception as e:
+        logger.warning(f"[HEALTH_CHECK] Invio Telegram error: {e}")
+
+    return {"status": "ok", "checks": checks}

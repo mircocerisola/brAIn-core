@@ -3740,8 +3740,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ---- CHIEF TOPIC ROUTING (FIX 1) ----
     # Il topic_id definisce il Chief senza ambiguità — nessuna classificazione Haiku
+    if thread_id and not _CSUITE_DIRECT:
+        logger.warning(f"[CHIEF_ROUTING] _CSUITE_DIRECT=False thread_id={thread_id} — csuite non caricato")
     if thread_id and _CSUITE_DIRECT:
         _chief_by_topic = _lookup_chief_by_topic(thread_id)
+        if not _chief_by_topic:
+            logger.debug(f"[CHIEF_ROUTING] thread_id={thread_id} non corrisponde a nessun Chief topic")
         if _chief_by_topic:
             _topic_buffer_add(chat_id, thread_id, msg, role="user")
             _scope_t = f"{chat_id}:{thread_id}"
