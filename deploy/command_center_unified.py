@@ -2326,21 +2326,93 @@ async def handle_project_message(update, project):
                 )
         return
 
-    # 8. Fallback: risposta generica con contesto progetto + contesto topic
+    # 8. Fallback: routing C-Suite con contesto cantiere
     if _is_mirco or _is_collab:
-        topic_ctx = ""
-        if thread_id:
-            recent = _topic_buffer_get_recent(chat_id, thread_id)
-            if recent:
-                topic_ctx = "\n[Ultimi messaggi nel topic Cantiere]\n" + "\n".join(
-                    f"{m['role'].upper()}: {m['text'][:120]}" for m in recent
-                ) + "\n"
-        context_note = f"[Progetto: {name} | Status: {project_status} | BOS: {project.get('bos_score', 0):.2f}]{topic_ctx}"
-        reply = clean_reply(ask_claude(f"{context_note}\n{msg}", chat_id=chat_id))
-        if thread_id:
-            _topic_buffer_add(chat_id, thread_id, reply[:200], role="bot")
-        for i in range(0, len(reply), 4000):
-            await update.message.reply_text(reply[i:i + 4000])
+        # Costruisci project_context
+        spec_excerpt = (project.get("spec_human_md") or project.get("spec_md") or "")[:2000]
+        project_context = (
+            f"Cantiere: {name} | Slug: {project.get('slug','')} | "
+            f"Status: {project_status} | Fase build: {build_phase} | "
+            f"Settore: {project.get('sector','')} | "
+            f"SPEC (estratto): {spec_excerpt}"
+        )
+
+        # Classifica richiesta con Haiku → Chief domain
+        _classify_prompt = (
+            f"Sei un sistema di routing per il C-Suite di brAIn.\n"
+            f"Contesto cantiere: {name} ({project_status})\n"
+            f"Messaggio: \"{msg}\"\n\n"
+            f"In quale dominio Chief rientra questa richiesta?\n"
+            f"Rispondi SOLO con una di queste parole: cso|coo|cto|cmo|cfo|clo|cpeo"
+        )
+        _chief_domain_map = {
+            "cso": "strategy", "coo": "ops", "cto": "tech",
+            "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
+        }
+        _chief_name_map = {
+            "cso": "CSO", "coo": "COO", "cto": "CTO",
+            "cmo": "CMO", "cfo": "CFO", "clo": "CLO", "cpeo": "CPeO",
+        }
+        try:
+            _claude_client = __import__("anthropic").Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+            _cr = _claude_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=10,
+                messages=[{"role": "user", "content": _classify_prompt}],
+            )
+            _chief_id = _cr.content[0].text.strip().lower().split("|")[0].strip()
+            if _chief_id not in _chief_domain_map:
+                _chief_id = "coo"  # fallback operativo
+        except Exception:
+            _chief_id = "coo"
+
+        _domain_target = _chief_domain_map.get(_chief_id, "ops")
+        _chief_display = _chief_name_map.get(_chief_id, "COO")
+        sep = "\u2501" * 15
+
+        # Chiama Chief via agents-runner con project_context
+        def _project_chief_ask():
+            _token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if not AGENTS_RUNNER_URL or not _token:
+                return
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                result = http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/csuite/ask",
+                    json={
+                        "domain": _domain_target,
+                        "question": msg,
+                        "project_context": project_context,
+                    },
+                    headers=headers,
+                    timeout=45,
+                )
+                if result.status_code == 200:
+                    answer = result.json().get("answer", "")
+                    chief_name = result.json().get("chief", _chief_display)
+                    card = (
+                        f"\U0001f464 {chief_name} risponde:\n"
+                        f"{sep}\n"
+                        f"{answer[:1200]}"
+                    )
+                    payload = {"chat_id": chat_id, "text": card}
+                    if thread_id:
+                        payload["message_thread_id"] = thread_id
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_token}/sendMessage",
+                        json=payload, timeout=15,
+                    )
+                    _topic_buffer_add(chat_id, thread_id or 0, answer[:200], role="bot")
+            except Exception as e:
+                logger.warning(f"[PROJECT_CHIEF_ASK] {e}")
+
+        import threading as _thr2
+        _thr2.Thread(target=_project_chief_ask, daemon=True).start()
+        await update.message.reply_text(
+            _make_card("\U0001f464", _chief_display, name, ["Consultando il Chief in corso\u2026"]),
+            parse_mode="Markdown",
+        )
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):

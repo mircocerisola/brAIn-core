@@ -154,21 +154,90 @@ class BaseChief(BaseAgent):
             context["memory"] = {}
         return context
 
-    def answer_question(self, question: str, user_context: Optional[str] = None) -> str:
-        """Risponde a una domanda nel proprio dominio."""
+    def build_system_prompt(self, project_context: Optional[str] = None) -> str:
+        """
+        Assembla il system prompt dinamico per il Chief:
+        1. Profilo Chief (da chief_knowledge knowledge_type='profile')
+        2. Top 10 org_shared_knowledge (importanza DESC)
+        3. Top 20 chief_knowledge specialistica (escluso 'profile')
+        4. Contesto progetto (se presente)
+        5. Regola fondamentale
+        """
+        sep = "\u2501" * 20
+        parts: List[str] = []
+
+        # 1. Profilo Chief
+        profile_text = ""
+        try:
+            r = supabase.table("chief_knowledge") \
+                .select("content") \
+                .eq("chief_id", self.chief_id) \
+                .eq("knowledge_type", "profile") \
+                .limit(1).execute()
+            if r.data:
+                profile_text = r.data[0]["content"]
+        except Exception as e:
+            logger.warning(f"[{self.name}] build_system_prompt profile: {e}")
+
+        if profile_text:
+            parts.append(f"=== PROFILO E RUOLO ===\n{profile_text}")
+        else:
+            parts.append(
+                f"Sei il {self.name} di brAIn, responsabile del dominio '{self.domain}'."
+            )
+
+        # 2. Conoscenza condivisa brAIn (top 10 per importanza)
+        try:
+            r = supabase.table("org_shared_knowledge") \
+                .select("category,title,content") \
+                .order("importance", desc=True).limit(10).execute()
+            if r.data:
+                osk_lines = []
+                for row in r.data:
+                    osk_lines.append(f"[{row['category'].upper()}] {row['title']}: {row['content'][:300]}")
+                parts.append("=== CONOSCENZA brAIn ===\n" + "\n\n".join(osk_lines))
+        except Exception as e:
+            logger.warning(f"[{self.name}] build_system_prompt org_knowledge: {e}")
+
+        # 3. Conoscenza specialistica Chief (top 20, escluso profile)
+        try:
+            r = supabase.table("chief_knowledge") \
+                .select("knowledge_type,title,content") \
+                .eq("chief_id", self.chief_id) \
+                .neq("knowledge_type", "profile") \
+                .order("importance", desc=True).limit(20).execute()
+            if r.data:
+                ck_lines = []
+                for row in r.data:
+                    ck_lines.append(f"[{row['knowledge_type'].upper()}] {row['title']}: {row['content'][:400]}")
+                parts.append(f"=== CONOSCENZA SPECIALISTICA {self.name} ===\n" + "\n\n".join(ck_lines))
+        except Exception as e:
+            logger.warning(f"[{self.name}] build_system_prompt chief_knowledge: {e}")
+
+        # 4. Contesto progetto (se presente)
+        if project_context:
+            parts.append(f"=== CONTESTO CANTIERE ===\n{project_context}")
+
+        # 5. Regola fondamentale
+        parts.append(
+            "=== REGOLA FONDAMENTALE ===\n"
+            "Rispondi SOLO su argomenti del tuo dominio come descritto nel PROFILO E RUOLO. "
+            "Se la richiesta non è di tua competenza, attiva check_domain_routing(). "
+            "Rispondi sempre in italiano, conciso, formato card con separatori \u2501\u2501\u2501. "
+            "Zero fuffa, vai al punto. UNA sola domanda alla volta se devi chiedere."
+        )
+
+        return "\n\n".join(parts)
+
+    def answer_question(self, question: str, user_context: Optional[str] = None,
+                        project_context: Optional[str] = None) -> str:
+        """Risponde a una domanda nel proprio dominio usando system prompt dinamico."""
         if self.is_circuit_open():
             return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
 
-        domain_ctx = self.get_domain_context()
-        ctx_str = json.dumps(domain_ctx, ensure_ascii=False, indent=2)[:2000]
-
-        system = (
-            f"Sei il {self.name} di brAIn, responsabile del dominio '{self.domain}'. "
-            f"Rispondi in italiano, conciso, orientato all'azione. "
-            f"Contesto dominio:\n{ctx_str}"
-        )
+        system = self.build_system_prompt(project_context=project_context)
         if user_context:
-            system += f"\n\nContesto utente: {user_context}"
+            system += f"\n\nContesto aggiuntivo: {user_context}"
 
         try:
             return self.call_claude(question, system=system, max_tokens=1500)
@@ -177,22 +246,23 @@ class BaseChief(BaseAgent):
             return f"[{self.name}] Errore nella risposta: {e}"
 
     def answer_question_with_routing(self, question: str, user_context: Optional[str] = None,
-                                     no_redirect: bool = False) -> str:
+                                     no_redirect: bool = False,
+                                     project_context: Optional[str] = None) -> str:
         """
         Risponde con routing automatico: se la domanda non è di competenza,
         la passa al Chief corretto. Previene loop con no_redirect=True.
         """
         if not no_redirect:
-            routed = self.check_domain_routing(question)
+            routed = self.check_domain_routing(question, project_context=project_context)
             if routed:
                 return routed  # risposta già inviata via Telegram
-        return self.answer_question(question, user_context)
+        return self.answer_question(question, user_context, project_context=project_context)
 
     # ============================================================
     # TASK 4 — ROUTING AUTOMATICO TRA CHIEF
     # ============================================================
 
-    def check_domain_routing(self, question: str) -> Optional[str]:
+    def check_domain_routing(self, question: str, project_context: Optional[str] = None) -> Optional[str]:
         """
         Verifica se la domanda è di competenza del Chief.
         Se no, la passa al Chief corretto e notifica Mirco con card routing.
@@ -259,7 +329,7 @@ class BaseChief(BaseAgent):
 
         # Ottieni risposta dal Chief destinazione (no_redirect=True per evitare loop)
         try:
-            dest_answer = dest_chief.answer_question(question)
+            dest_answer = dest_chief.answer_question(question, project_context=project_context)
         except Exception as e:
             logger.warning(f"[{self.name}] Routing to {correct_chief_id} error: {e}")
             return None

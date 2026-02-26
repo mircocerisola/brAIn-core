@@ -418,13 +418,14 @@ async def run_csuite_briefing_endpoint(request):
 
 
 async def run_csuite_ask_endpoint(request):
-    """POST /csuite/ask — {domain, question, context?} — chiede al Chief"""
+    """POST /csuite/ask — {domain?, question, context?, project_context?} — chiede al Chief"""
     try:
         from csuite import get_chief, route_to_chief
         data = await request.json()
         domain = data.get("domain")
         question = data.get("question", "")
         context = data.get("context")
+        project_context = data.get("project_context")
         if not question:
             return web.json_response({"error": "question obbligatoria"}, status=400)
         if domain:
@@ -433,7 +434,7 @@ async def run_csuite_ask_endpoint(request):
             chief, domain = route_to_chief(question)
         if not chief:
             return web.json_response({"error": "Impossibile identificare il Chief appropriato"}, status=400)
-        answer = chief.answer_question(question, user_context=context)
+        answer = chief.answer_question(question, user_context=context, project_context=project_context)
         return web.json_response({"status": "ok", "domain": domain, "chief": chief.name, "answer": answer})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -480,5 +481,41 @@ async def run_ethics_check_active_endpoint(request):
             except Exception as e:
                 results.append({"project_id": pid, "status": "error", "error": str(e)})
         return web.json_response({"status": "ok", "checked": len(results), "results": results})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ── CDO endpoints ────────────────────────────────────────────
+
+
+async def run_cto_data_audit_endpoint(request):
+    """POST /cto/data-audit — CDO audit qualità dati"""
+    try:
+        from csuite.cdo import audit_data_quality
+        result = audit_data_quality()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cto_knowledge_monitor_endpoint(request):
+    """POST /cto/knowledge-monitor — CDO monitor crescita knowledge"""
+    try:
+        from csuite.cdo import monitor_knowledge_growth
+        result = monitor_knowledge_growth()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ── CPeO coaching endpoint ───────────────────────────────────
+
+
+async def run_cpeo_coaching_endpoint(request):
+    """POST /cpeo/coaching — coaching automatico dei Chief"""
+    try:
+        from csuite.cpeo import coach_chiefs
+        result = coach_chiefs()
+        return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
