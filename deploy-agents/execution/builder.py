@@ -462,6 +462,67 @@ FASE_DESCRIPTIONS = {
 }
 
 
+def _ensure_spec_and_repo(project_id, project, group_id):
+    """FIX 1+2: Garantisce che SPEC e repo GitHub esistano prima del build.
+    Ritorna (spec_md, github_repo) oppure (None, None) se non recuperabili.
+    Invia aggiornamenti nel topic cantiere.
+    """
+    name = project.get("name", "MVP")
+    slug = project.get("slug", "")
+    topic_id = project.get("topic_id")
+    spec_md = project.get("spec_md") or ""
+    github_repo = project.get("github_repo") or ""
+
+    # FIX 1a: SPEC mancante → rigenera (max 1 tentativo, run_spec_generator si ri-locka da solo)
+    if not spec_md:
+        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f SPEC mancante per {name} — rigenerazione in corso...")
+        # Sblocca momentaneamente per permettere a spec_generator di ri-lockare
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
+        spec_result = run_spec_generator(project_id)
+        # Rilockiamo build_agent
+        try:
+            supabase.table("projects").update({"pipeline_locked": True}).eq("id", project_id).execute()
+        except Exception:
+            pass
+        if spec_result.get("status") == "ok":
+            # Ricarica spec_md dal DB
+            r = supabase.table("projects").select("spec_md").eq("id", project_id).execute()
+            spec_md = (r.data[0].get("spec_md") or "") if r.data else ""
+        if not spec_md:
+            _send_to_topic(group_id, topic_id, f"\u274c Build {name}: impossibile rigenerare SPEC. Contatta CTO.")
+            return None, None
+
+    # FIX 2: repo GitHub mancante → crealo ora (max 3 tentativi con backoff)
+    if not github_repo:
+        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Repo GitHub mancante per {name} — creazione in corso...")
+        for attempt in range(3):
+            try:
+                created = _create_github_repo(slug, name)
+                if created:
+                    github_repo = created
+                    supabase.table("projects").update({"github_repo": github_repo}).eq("id", project_id).execute()
+                    logger.info(f"[BUILD_AGENT] Repo creato: {github_repo}")
+                    break
+                else:
+                    logger.warning(f"[BUILD_AGENT] Repo creation attempt {attempt+1} fallito")
+            except Exception as _re:
+                logger.warning(f"[BUILD_AGENT] Repo creation error attempt {attempt+1}: {_re}")
+            if attempt < 2:
+                time.sleep(30)
+
+        if not github_repo:
+            # FIX 3: alert cantiere e abort
+            _send_to_topic(group_id, topic_id,
+                f"\u274c Build {name}: impossibile creare repo GitHub dopo 3 tentativi.\n"
+                f"Verifica che GITHUB_TOKEN sia configurato in agents-runner.")
+            return None, None
+
+    return spec_md, github_repo
+
+
 def run_build_agent(project_id):
     """Build agent autonomo: genera Fase 1 (struttura base), committa su GitHub, notifica per review."""
     # Pipeline lock
@@ -489,8 +550,6 @@ def run_build_agent(project_id):
         return
 
     name = project.get("name", "MVP")
-    github_repo = project.get("github_repo", "")
-    spec_md = project.get("spec_md", "")
     stack = project.get("stack") or []
     topic_id = project.get("topic_id")
     group_id = _get_telegram_group_id()
@@ -501,36 +560,44 @@ def run_build_agent(project_id):
         except:
             stack = []
 
+    # FIX 1+2: Verifica e recupera SPEC + repo prima di procedere
+    spec_md, github_repo = _ensure_spec_and_repo(project_id, project, group_id)
     if not spec_md or not github_repo:
-        _send_to_topic(group_id, topic_id, f"\u274c Build {name}: SPEC o repo mancanti. Impossibile procedere.")
+        # _ensure_spec_and_repo ha già inviato il messaggio di errore nel cantiere
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
         return
 
     stack_str = ", ".join(stack) if stack else "Python, Supabase, Cloud Run"
-
     slug = project.get("slug", "")
 
+    # Notifica avanzamento: build avviato
+    _send_to_topic(group_id, topic_id,
+        f"\U0001f528 Build Fase 1 avviato per *{name}*\n"
+        f"Stack: {stack_str}\n"
+        f"Repo: {github_repo}\n"
+        f"Generazione codice struttura base in corso...")
+
     # Genera solo Fase 1: struttura base
-    build_prompt = f"""Esegui con --dangerously-skip-permissions. Non chiedere autorizzazione per nessuna operazione. Non fermarti per conferme.
-
-Sei un senior Python developer. Genera il codice per la Fase 1 (struttura base) dell'MVP "{name}".
-
-SPEC.md (estratto):
-{spec_md[:5000]}
-
-REQUISITI FASE 1:
-- Stack: {stack_str}
-- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 o claude-sonnet-4-6), NON OpenAI/GPT
-- Genera: main.py (o app.py), requirements.txt, Dockerfile, .env.example
-- Il codice deve essere funzionante e deployabile su Google Cloud Run europe-west3
-- Usa Supabase per il database (variabili SUPABASE_URL, SUPABASE_KEY)
-- Struttura pulita: solo file essenziali per far partire il progetto
-
-FORMATO OUTPUT per ogni file:
-=== FILE: nome_file ===
-[contenuto del file]
-=== END FILE ===
-
-Genera SOLO i file della struttura base."""
+    spec_excerpt = spec_md[:5000]
+    build_prompt = (
+        f"Sei un senior Python developer. Genera il codice per la Fase 1 (struttura base) dell'MVP \"{name}\".\n\n"
+        f"SPEC.md (estratto):\n{spec_excerpt}\n\n"
+        f"REQUISITI FASE 1:\n"
+        f"- Stack: {stack_str}\n"
+        f"- Modelli LLM: usa SEMPRE Claude API (claude-haiku-4-5-20251001 o claude-sonnet-4-6), NON OpenAI/GPT\n"
+        f"- Genera: main.py (o app.py), requirements.txt, Dockerfile, .env.example\n"
+        f"- Il codice deve essere funzionante e deployabile su Google Cloud Run europe-west3\n"
+        f"- Usa Supabase per il database (variabili SUPABASE_URL, SUPABASE_KEY)\n"
+        f"- Struttura pulita: solo file essenziali per far partire il progetto\n\n"
+        f"FORMATO OUTPUT per ogni file:\n"
+        f"=== FILE: nome_file ===\n"
+        f"[contenuto del file]\n"
+        f"=== END FILE ===\n\n"
+        f"Genera SOLO i file della struttura base."
+    )
 
     try:
         response = claude.messages.create(
@@ -544,6 +611,10 @@ Genera SOLO i file della struttura base."""
     except Exception as e:
         logger.error(f"[BUILD_AGENT] Claude error: {e}")
         _send_to_topic(group_id, topic_id, f"\u274c Build {name} fallito: {e}")
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
         return
 
     # Parse e commit dei file generati
@@ -566,6 +637,9 @@ Genera SOLO i file della struttura base."""
     if files_committed == 0 and code_output:
         _commit_to_project_repo(github_repo, "main.py", code_output, "feat(fase-1): MVP structure")
         files_committed = 1
+
+    # Notifica avanzamento: file committati
+    _send_to_topic(group_id, topic_id, f"\u2705 {files_committed} file committati su GitHub — salvataggio log in corso...")
 
     # Salva log iterazione su GitHub
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
