@@ -2334,55 +2334,126 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "source_archive_ok":
         await query.answer("Ok!")
 
-    # Daily report callbacks (Fix 4)
-    elif data == "daily_report_fonti":
+    # Report costi — callbacks
+    elif data == "cost_detail_4h":
         await query.answer()
         try:
-            src_res = supabase.table("scan_sources").select("id,name,status,avg_problem_score,problems_found").execute()
-            all_src = src_res.data or []
-            active = [s for s in all_src if s.get("status") == "active"]
-            archived = [s for s in all_src if s.get("status") == "archived"]
-            top_active = sorted(active, key=lambda x: float(x.get("avg_problem_score") or 0), reverse=True)[:5]
-            lines = [f"📊 FONTI: {len(active)} attive / {len(archived)} archiviate"]
-            for s in top_active:
-                lines.append(f"  • {s['name'][:30]} · score {float(s.get('avg_problem_score') or 0):.2f} · {s.get('problems_found', 0)} prob")
+            from datetime import timedelta
+            since_4h = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+            logs = supabase.table("agent_logs").select("agent_id,cost_usd,action").gte("created_at", since_4h).execute().data or []
+            by_agent = {}
+            for l in logs:
+                a = l.get("agent_id", "unknown")
+                by_agent[a] = by_agent.get(a, 0.0) + float(l.get("cost_usd", 0) or 0)
+            sep = "\u2501" * 15
+            lines = ["\U0001f50d *Dettaglio costi ultime 4h*", sep]
+            if by_agent:
+                for a, c in sorted(by_agent.items(), key=lambda x: x[1], reverse=True):
+                    lines.append(f"\u2022 {a}: \u20ac{c * 0.92:.4f}")
+            else:
+                lines.append("Nessun costo registrato.")
             token = os.getenv("TELEGRAM_BOT_TOKEN")
             if token:
                 http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=10)
+                    json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=10)
         except Exception as e:
-            logger.error(f"[DAILY_REPORT_FONTI] {e}")
+            logger.error(f"[COST_DETAIL_4H] {e}")
 
-    elif data == "daily_report_costi":
+    elif data == "cost_trend_7d":
         await query.answer()
         try:
-            cost_text = get_cost_report(7)
+            from datetime import timedelta
+            lines = ["\U0001f4ca *Trend costi 7 giorni*", "\u2501" * 15]
+            now_utc = datetime.now(timezone.utc)
+            for d in range(6, -1, -1):
+                day = now_utc - timedelta(days=d)
+                day_str = day.strftime("%Y-%m-%d")
+                day_start = f"{day_str}T00:00:00+00:00"
+                day_end = f"{day_str}T23:59:59+00:00"
+                logs = supabase.table("agent_logs").select("cost_usd").gte("created_at", day_start).lte("created_at", day_end).execute().data or []
+                cost_eur = sum(float(l.get("cost_usd", 0) or 0) for l in logs) * 0.92
+                bar_len = min(10, round(cost_eur * 20))
+                bar = "\u2588" * bar_len + "\u2591" * (10 - bar_len)
+                label = day.strftime("%d/%m")
+                lines.append(f"{label} {bar} \u20ac{cost_eur:.2f}")
             token = os.getenv("TELEGRAM_BOT_TOKEN")
             if token:
                 http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": f"💰 Costi ultimi 7 giorni:\n{cost_text[:3000]}"}, timeout=10)
+                    json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=10)
         except Exception as e:
-            logger.error(f"[DAILY_REPORT_COSTI] {e}")
+            logger.error(f"[COST_TREND_7D] {e}")
 
-    elif data == "daily_report_problemi":
+    # Report attività — callbacks
+    elif data == "act_problemi":
         await query.answer()
         try:
-            prob_res = supabase.table("problems").select("id,title,weighted_score,status,sector").eq(
+            prob_res = supabase.table("problems").select("id,title,weighted_score,sector").eq(
                 "status", "new").order("weighted_score", desc=True).limit(5).execute()
             probs = prob_res.data or []
+            sep = "\u2501" * 15
             if probs:
-                lines = [f"❓ Problemi in attesa ({len(probs)}):"]
+                lines = [f"\U0001f4cb *Problemi in attesa ({len(probs)})*", sep]
                 for p in probs:
                     score = float(p.get("weighted_score") or 0)
-                    lines.append(f"  • [{score:.2f}] {p['title'][:50]}")
+                    sector = (p.get("sector") or "?").split("/")[0][:10]
+                    lines.append(f"\u2022 [{score:.2f}] {sector} \u2014 {p['title'][:45]}")
             else:
-                lines = ["Nessun problema in attesa."]
+                lines = ["\U0001f4cb Nessun problema in attesa."]
             token = os.getenv("TELEGRAM_BOT_TOKEN")
             if token:
                 http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": "\n".join(lines)}, timeout=10)
+                    json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=10)
         except Exception as e:
-            logger.error(f"[DAILY_REPORT_PROBLEMI] {e}")
+            logger.error(f"[ACT_PROBLEMI] {e}")
+
+    elif data == "act_top_bos":
+        await query.answer()
+        try:
+            bos_res = supabase.table("solutions").select("id,title,bos_score,bos_details").not_.is_(
+                "bos_score", "null").order("bos_score", desc=True).limit(3).execute()
+            bos_list = bos_res.data or []
+            sep = "\u2501" * 15
+            lines = ["\U0001f3c6 *Top 3 BOS*", sep]
+            for s in bos_list:
+                bos = float(s.get("bos_score", 0) or 0)
+                details = s.get("bos_details", {})
+                if isinstance(details, str):
+                    try:
+                        import json as _json; details = _json.loads(details)
+                    except Exception:
+                        details = {}
+                verdict = details.get("verdict", "?") if isinstance(details, dict) else "?"
+                lines.append(f"\u2022 {bos:.2f} \u2014 {verdict} \u2014 {s.get('title','?')[:40]}")
+            if not bos_list:
+                lines.append("Nessun BOS disponibile.")
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=10)
+        except Exception as e:
+            logger.error(f"[ACT_TOP_BOS] {e}")
+
+    elif data == "act_cantieri":
+        await query.answer()
+        try:
+            cantieri = supabase.table("projects").select("id,name,status,updated_at,build_phase").neq(
+                "status", "archived").execute().data or []
+            sep = "\u2501" * 15
+            if cantieri:
+                lines = [f"\U0001f3d7\ufe0f *Cantieri attivi ({len(cantieri)})*", sep]
+                for c in cantieri:
+                    upd = c.get("updated_at", "")[:16].replace("T", " ")
+                    phase = c.get("build_phase") or 0
+                    lines.append(f"\u2022 {c['name'][:30]}")
+                    lines.append(f"  Status: {c.get('status','?')} | Fase: {phase} | Agg: {upd}")
+            else:
+                lines = ["\U0001f3d7\ufe0f Nessun cantiere attivo."]
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": "\n".join(lines), "parse_mode": "Markdown"}, timeout=10)
+        except Exception as e:
+            logger.error(f"[ACT_CANTIERI] {e}")
 
     # Callback legacy (spec_build) mantenuto per compatibilità
     elif data.startswith("spec_build:"):

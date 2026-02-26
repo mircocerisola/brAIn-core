@@ -3134,134 +3134,136 @@ def run_finance_agent(target_date=None):
 
 
 # ============================================================
-# PARTE 8: DAILY REPORT ORE 20
+# PARTE 8: SISTEMA REPORT (costi ogni 4h ore pari, attività ore dispari)
 # ============================================================
 
-def generate_daily_report():
-    """Report giornaliero — redesign Fix 4. Box ╔══╗, costi per agente, pipeline, scanner, errori, pulsanti."""
-    logger.info("Generating daily report...")
-    now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
-    day_start = f"{today}T00:00:00+00:00"
+MESI_IT_REPORT = {1:"gen",2:"feb",3:"mar",4:"apr",5:"mag",6:"giu",
+                  7:"lug",8:"ago",9:"set",10:"ott",11:"nov",12:"dic"}
 
-    MESI_IT = {1:"gen",2:"feb",3:"mar",4:"apr",5:"mag",6:"giu",
-               7:"lug",8:"ago",9:"set",10:"ott",11:"nov",12:"dic"}
-    data_it = f"{now.day} {MESI_IT[now.month]} {now.year}"
 
-    def _shorten(title, max_words=6):
-        words = title.split()
-        return " ".join(words[:max_words]) + ("\u2026" if len(words) > max_words else "")
-
-    # --- DATI ---
+def _get_rome_tz():
     try:
-        scans = supabase.table("agent_logs").select("id", count="exact").eq(
-            "agent_id", "world_scanner").gte("created_at", day_start).execute()
-        scan_count = scans.count or 0
-    except:
-        scan_count = 0
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Europe/Rome")
+    except Exception:
+        return timezone(timedelta(hours=1))
 
+
+def _format_rome_time(ts_str):
+    """Converte timestamp UTC in HH:MM Europe/Rome."""
+    if not ts_str:
+        return "—"
     try:
-        problems = supabase.table("problems").select(
-            "id, title, weighted_score, sector").gte("created_at", day_start).execute()
-        problem_count = len(problems.data or [])
-        problem_data = problems.data or []
-    except:
-        problem_count = 0
-        problem_data = []
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        rome = dt.astimezone(_get_rome_tz())
+        return rome.strftime("%H:%M")
+    except Exception:
+        return str(ts_str)[:16]
 
-    try:
-        solutions = supabase.table("solutions").select(
-            "id, title, bos_score, bos_details").gte("created_at", day_start).execute()
-        solution_count = len(solutions.data or [])
-        solution_data = solutions.data or []
-    except:
-        solution_count = 0
-        solution_data = []
 
-    bos_count = sum(1 for s in solution_data if s.get("bos_score") is not None)
+def _make_bar(value, max_value, length=5):
+    """Barra proporzionale ▓░ di lunghezza fissa."""
+    if max_value <= 0:
+        return "░" * length
+    filled = max(0, min(length, round(value / max_value * length)))
+    return "▓" * filled + "░" * (length - filled)
 
-    daily_costs = finance_get_daily_costs(today)
+
+def _shorten_agent_name(name):
+    mapping = {
+        "world_scanner": "World Scanner",
+        "solution_architect": "Solution Arch.",
+        "spec_generator": "Spec Generator",
+        "build_agent": "Build Agent",
+        "knowledge_keeper": "Knowledge Keeper",
+        "command_center": "Command Center",
+        "daily_report": "Daily Report",
+        "cost_report": "Cost Report",
+        "activity_report": "Activity Report",
+        "validation_agent": "Validation",
+        "capability_scout": "Cap. Scout",
+        "bos_calculator": "BOS Calc.",
+    }
+    return mapping.get(name, name[:18])
+
+
+def _get_period_cost(since_iso, until_iso=None):
+    """Costi in EUR e breakdown per agente per il periodo dato. Ritorna (total_eur, {agent: eur})."""
     usd_to_eur = finance_get_usd_to_eur()
-    cost_eur = 0.0
-    cost_by_agent = {}
-    calls_by_agent = {}
-    if daily_costs:
-        cost_eur = round(daily_costs["total_cost_usd"] * usd_to_eur, 2)
-        cost_by_agent = {k: round(v * usd_to_eur, 4) for k, v in (daily_costs.get("cost_by_agent") or {}).items()}
-        calls_by_agent = daily_costs.get("calls_by_agent") or {}
-
-    # Errori ultime 24h
     try:
-        err_res = supabase.table("agent_logs").select("agent_id,error").eq(
-            "status", "error").gte("created_at", day_start).limit(5).execute()
-        errors = err_res.data or []
-    except:
-        errors = []
+        q = supabase.table("agent_logs").select("agent_id,cost_usd").gte("created_at", since_iso)
+        if until_iso:
+            q = q.lte("created_at", until_iso)
+        logs = q.execute().data or []
+    except Exception as e:
+        logger.warning(f"[PERIOD_COST] {e}")
+        return 0.0, {}
+    by_agent = {}
+    total_usd = 0.0
+    for l in logs:
+        a = l.get("agent_id", "unknown")
+        c = float(l.get("cost_usd", 0) or 0)
+        total_usd += c
+        by_agent[a] = by_agent.get(a, 0.0) + c
+    total_eur = round(total_usd * usd_to_eur, 4)
+    by_agent_eur = {k: round(v * usd_to_eur, 4) for k, v in by_agent.items()}
+    return total_eur, by_agent_eur
 
-    # --- COMPOSIZIONE ╔══╗ ---
-    NUMERI = ["\u2460", "\u2461", "\u2462"]
+
+def generate_cost_report():
+    """Report costi ogni 4h (ore pari Europe/Rome): ultime 4h / oggi / 7g / mese + top spender."""
+    logger.info("[REPORT] Generating cost report...")
+    now_utc = datetime.now(timezone.utc)
+    rome_tz = _get_rome_tz()
+    now_rome = now_utc.astimezone(rome_tz)
+    data_it = f"{now_rome.day} {MESI_IT_REPORT[now_rome.month]} {now_rome.year} {now_rome.strftime('%H:%M')}"
+
+    since_4h = (now_utc - timedelta(hours=4)).isoformat()
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    since_7d = (now_utc - timedelta(days=7)).isoformat()
+    month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    cost_4h, agents_4h = _get_period_cost(since_4h)
+    cost_today, _ = _get_period_cost(today_start)
+    cost_7d, _ = _get_period_cost(since_7d)
+    cost_month, _ = _get_period_cost(month_start)
+
+    # Spike detection: ultime 4h vs media (7g / 42 periodi da 4h)
+    avg_4h = cost_7d / 42 if cost_7d > 0 else 0
+    spike_pct = ((cost_4h - avg_4h) / avg_4h * 100) if avg_4h > 0 and cost_4h > avg_4h * 2 else 0
+
+    sorted_agents = sorted(agents_4h.items(), key=lambda x: x[1], reverse=True)
+    top4 = sorted_agents[:4]
+    altri_cost = sum(v for _, v in sorted_agents[4:])
+    display_agents = top4 + ([("Altri", altri_cost)] if altri_cost > 0 else [])
+    max_cost = max((v for _, v in display_agents), default=1) or 1
+
+    sep = "\u2501" * 15
     lines = [
-        f"\u2554\u2550\u2550 REPORT {data_it} \u2550\u2550\u2557",
+        f"\U0001f4b6 *COSTI brAIn* \u2014 {data_it}",
+        sep,
+        f"\U0001f550 Ultime 4h:   \u20ac{cost_4h:.2f}",
+        f"\U0001f4c5 Oggi:        \u20ac{cost_today:.2f}",
+        f"\U0001f4c6 7 giorni:    \u20ac{cost_7d:.2f}",
+        f"\U0001f5d3 Mese:        \u20ac{cost_month:.2f}",
+        sep,
+        "Top spender:",
     ]
+    for i, (agent, cost) in enumerate(display_agents):
+        prefix = "\u2514" if i == len(display_agents) - 1 else "\u251c"
+        short = _shorten_agent_name(agent)
+        bar = _make_bar(cost, max_cost)
+        lines.append(f"{prefix} {short:<18} \u20ac{cost:.2f}  {bar}")
 
-    # Sezione costi
-    lines.append(f"\U0001f4b0 Costi: \u20ac{cost_eur:.2f}")
-    sorted_agents = sorted(cost_by_agent.items(), key=lambda x: x[1], reverse=True)
-    for i, (agent, eur) in enumerate(sorted_agents[:5]):
-        calls = calls_by_agent.get(agent, 0)
-        prefix = "\u2514" if i == len(sorted_agents[:5]) - 1 else "\u251c"
-        lines.append(f"  {prefix} {agent}: \u20ac{eur:.4f} ({calls} call)")
-    if not cost_by_agent:
-        lines.append("  \u2514 Nessun costo registrato")
-
-    # Sezione scanner
-    lines.append(f"\n\U0001f50d Scanner: {scan_count} scansioni | {problem_count} problemi")
-    if problem_data:
-        top_problems = sorted(problem_data, key=lambda x: float(x.get("weighted_score", 0) or 0), reverse=True)[:3]
-        for i, p in enumerate(top_problems):
-            score = float(p.get("weighted_score", 0) or 0)
-            sector = (p.get("sector") or "?").split("/")[0].strip()[:10]
-            title = _shorten(p.get("title", "?"), 5)
-            lines.append(f"  {NUMERI[i]} {score:.2f} \u00b7 {sector} \u00b7 {title}")
-
-    # Sezione pipeline
-    lines.append(f"\n\U0001f3af Pipeline: {solution_count} soluzioni | {bos_count} BOS calcolati")
-    top_solutions = sorted(
-        [s for s in solution_data if s.get("bos_score") is not None],
-        key=lambda x: float(x.get("bos_score", 0) or 0), reverse=True
-    )[:3]
-    if top_solutions:
-        for i, s in enumerate(top_solutions):
-            bos = float(s.get("bos_score", 0) or 0)
-            details = s.get("bos_details", {})
-            if isinstance(details, str):
-                try:
-                    details = json.loads(details)
-                except:
-                    details = {}
-            verdict = details.get("verdict", "?")
-            title = _shorten(s.get("title", "?"), 5)
-            lines.append(f"  {NUMERI[i]} {bos:.2f} \u00b7 {verdict} \u00b7 {title}")
-    else:
-        lines.append("  Nessun BOS oggi")
-
-    # Sezione errori (opzionale)
-    if errors:
-        lines.append(f"\n\u26a0\ufe0f Errori ({len(errors)}):")
-        for e in errors[:3]:
-            err_text = (e.get("error") or "?")[:60]
-            lines.append(f"  \u2022 {e.get('agent_id','?')}: {err_text}")
-
-    lines.append("\u255a\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255d")
+    if spike_pct >= 100:
+        lines.append(sep)
+        lines.append(f"\u26a0\ufe0f Spike rilevato: +{spike_pct:.0f}%")
 
     report = "\n".join(lines)
-
-    # Pulsanti inline — Fix 4
-    report_reply_markup = {
+    reply_markup = {
         "inline_keyboard": [[
-            {"text": "\U0001f4ca Report fonti", "callback_data": "daily_report_fonti"},
-            {"text": "\U0001f4b0 Dettaglio costi", "callback_data": "daily_report_costi"},
-            {"text": "\u2753 Problemi", "callback_data": "daily_report_problemi"},
+            {"text": "\U0001f50d Dettaglio ora", "callback_data": "cost_detail_4h"},
+            {"text": "\U0001f4ca 7 giorni", "callback_data": "cost_trend_7d"},
         ]]
     }
     chat_id_report = get_telegram_chat_id()
@@ -3269,19 +3271,168 @@ def generate_daily_report():
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id_report, "text": report, "reply_markup": report_reply_markup},
+                json={"chat_id": chat_id_report, "text": report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
                 timeout=10,
             )
         except Exception as e:
-            logger.error(f"[DAILY_REPORT] Telegram error: {e}")
-            notify_telegram(report)
+            logger.error(f"[COST_REPORT] Telegram error: {e}")
+    log_to_supabase("cost_report", "generate", 0, f"Cost report {data_it}", report[:300], "none")
+    return {"status": "ok", "type": "cost", "date": data_it}
+
+
+def generate_activity_report():
+    """Report attività ogni 4h (ore dispari Europe/Rome): scanner, pipeline, cantieri."""
+    logger.info("[REPORT] Generating activity report...")
+    now_utc = datetime.now(timezone.utc)
+    rome_tz = _get_rome_tz()
+    now_rome = now_utc.astimezone(rome_tz)
+    data_it = f"{now_rome.day} {MESI_IT_REPORT[now_rome.month]} {now_rome.year} {now_rome.strftime('%H:%M')}"
+
+    today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    since_8h = (now_utc - timedelta(hours=8)).isoformat()
+
+    # --- SCANNER ---
+    try:
+        probs = supabase.table("problems").select("id,weighted_score").gte("created_at", today_start).execute().data or []
+        prob_count = len(probs)
+        avg_score = sum(float(p.get("weighted_score", 0) or 0) for p in probs) / prob_count if prob_count else 0.0
+    except Exception:
+        prob_count = 0; avg_score = 0.0
+    try:
+        last_scan_res = supabase.table("agent_logs").select("created_at").eq("agent_id", "world_scanner").order("created_at", desc=True).limit(1).execute().data or []
+        last_scan_str = _format_rome_time(last_scan_res[0]["created_at"]) if last_scan_res else "\u2014"
+    except Exception:
+        last_scan_str = "\u2014"
+
+    # --- PIPELINE ---
+    try:
+        bos_today = supabase.table("solutions").select("id,bos_score").gte("created_at", today_start).not_.is_("bos_score", "null").execute().data or []
+        bos_count = len(bos_today)
+        avg_bos = sum(float(b.get("bos_score", 0) or 0) for b in bos_today) / bos_count if bos_count else 0.0
+    except Exception:
+        bos_count = 0; avg_bos = 0.0
+    try:
+        pending_res = supabase.table("action_queue").select("id").eq("action_type", "approve_bos").eq("status", "pending").execute().data or []
+        pending_count = len(pending_res)
+    except Exception:
+        pending_count = 0
+
+    # --- CANTIERI ---
+    try:
+        cantieri = supabase.table("projects").select("id,name,status,updated_at").neq("status", "archived").execute().data or []
+    except Exception:
+        cantieri = []
+
+    # Scanner silenzioso: nessun problema nelle ultime 8h
+    try:
+        probs_8h = supabase.table("problems").select("id").gte("created_at", since_8h).execute().data or []
+        scanner_silent = len(probs_8h) == 0
+    except Exception:
+        scanner_silent = False
+
+    sep = "\u2501" * 15
+    lines = [
+        f"\u2699\ufe0f *ATTIVIT\u00c0 brAIn* \u2014 {data_it}",
+        sep,
+        "\U0001f50d Scanner",
+        f"\u251c Problemi trovati oggi:     {prob_count}",
+        f"\u251c Score medio:               {avg_score:.2f}",
+        f"\u2514 Ultimo scan:               {last_scan_str}",
+        "",
+        "\U0001f9e0 Pipeline",
+        f"\u251c BOS generati oggi:         {bos_count}",
+        f"\u251c Score medio BOS:           {avg_bos:.2f}",
+        f"\u2514 In attesa approvazione:    {pending_count}",
+        "",
+        "\U0001f3d7\ufe0f Cantieri",
+    ]
+    if cantieri:
+        first = cantieri[0]
+        last_upd = _format_rome_time(first.get("updated_at"))
+        lines.append(f"\u251c Attivi:                    {len(cantieri)} \u2014 {first.get('name', '?')[:25]}")
+        lines.append(f"\u251c Status:                    {first.get('status', '?')}")
+        lines.append(f"\u2514 Ultimo aggiornamento:      {last_upd}")
     else:
-        notify_telegram(report)
+        lines.append("\u2514 Nessun cantiere attivo")
 
-    log_to_supabase("daily_report", "generate", 0,
-        f"Report {today}", report[:500], "none")
+    if scanner_silent:
+        lines.append("")
+        lines.append("\u26a0\ufe0f Scanner silenzioso \u2014 verifica")
 
-    return {"status": "completed", "date": today}
+    report = "\n".join(lines)
+    reply_markup = {
+        "inline_keyboard": [[
+            {"text": "\U0001f4cb Problemi", "callback_data": "act_problemi"},
+            {"text": "\U0001f3c6 Top BOS", "callback_data": "act_top_bos"},
+            {"text": "\U0001f3d7\ufe0f Cantieri", "callback_data": "act_cantieri"},
+        ]]
+    }
+    chat_id_report = get_telegram_chat_id()
+    if chat_id_report and TELEGRAM_BOT_TOKEN:
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": chat_id_report, "text": report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.error(f"[ACTIVITY_REPORT] Telegram error: {e}")
+    log_to_supabase("activity_report", "generate", 0, f"Activity report {data_it}", report[:300], "none")
+    return {"status": "ok", "type": "activity", "date": data_it}
+
+
+def update_kpi_daily():
+    """Aggiorna kpi_daily per oggi. Chiamare a mezzanotte via Cloud Scheduler → /kpi/update."""
+    now_utc = datetime.now(timezone.utc)
+    today = now_utc.strftime("%Y-%m-%d")
+    today_start = f"{today}T00:00:00+00:00"
+
+    try:
+        prob_res = supabase.table("problems").select("id,weighted_score").gte("created_at", today_start).execute().data or []
+        problems_found = len(prob_res)
+        avg_problem_score = sum(float(p.get("weighted_score", 0) or 0) for p in prob_res) / problems_found if problems_found else 0.0
+    except Exception:
+        problems_found = 0; avg_problem_score = 0.0
+    try:
+        bos_res = supabase.table("solutions").select("id,bos_score").gte("created_at", today_start).not_.is_("bos_score", "null").execute().data or []
+        bos_generated = len(bos_res)
+        avg_bos_score = sum(float(b.get("bos_score", 0) or 0) for b in bos_res) / bos_generated if bos_generated else 0.0
+    except Exception:
+        bos_generated = 0; avg_bos_score = 0.0
+    try:
+        active_cantieri = len(supabase.table("projects").select("id").neq("status", "archived").execute().data or [])
+    except Exception:
+        active_cantieri = 0
+    try:
+        mvps_launched = len(supabase.table("projects").select("id").eq("status", "launch_approved").gte("updated_at", today_start).execute().data or [])
+    except Exception:
+        mvps_launched = 0
+    cost_today, _ = _get_period_cost(today_start)
+    try:
+        api_calls = supabase.table("agent_logs").select("id", count="exact").gte("created_at", today_start).execute().count or 0
+    except Exception:
+        api_calls = 0
+    try:
+        supabase.table("kpi_daily").upsert({
+            "date": today,
+            "problems_found": problems_found,
+            "avg_problem_score": round(avg_problem_score, 4),
+            "bos_generated": bos_generated,
+            "avg_bos_score": round(avg_bos_score, 4),
+            "mvps_launched": mvps_launched,
+            "active_cantieri": active_cantieri,
+            "total_cost_eur": round(cost_today, 4),
+            "api_calls": api_calls,
+        }, on_conflict="date").execute()
+        logger.info(f"[KPI] kpi_daily aggiornata per {today}")
+    except Exception as e:
+        logger.error(f"[KPI] Upsert fallito: {e}")
+    return {"status": "ok", "date": today}
+
+
+def generate_daily_report():
+    """Alias backward-compat → chiama generate_cost_report."""
+    return generate_cost_report()
 
 
 # ============================================================
@@ -5295,7 +5446,28 @@ async def run_pipeline_endpoint(request):
     return web.json_response({"scan": scan_result, "pipeline": f"{len(saved_ids)} problemi processati"})
 
 async def run_daily_report_endpoint(request):
-    result = generate_daily_report()
+    result = generate_cost_report()
+    return web.json_response(result)
+
+async def run_cost_report_endpoint(request):
+    result = generate_cost_report()
+    return web.json_response(result)
+
+async def run_activity_report_endpoint(request):
+    result = generate_activity_report()
+    return web.json_response(result)
+
+async def run_auto_report_endpoint(request):
+    """Ore pari Europe/Rome → cost report, ore dispari → activity report."""
+    hour = datetime.now(_get_rome_tz()).hour
+    if hour % 4 == 0:
+        result = generate_cost_report()
+    else:
+        result = generate_activity_report()
+    return web.json_response(result)
+
+async def run_kpi_update_endpoint(request):
+    result = update_kpi_daily()
     return web.json_response(result)
 
 async def run_recycle_endpoint(request):
@@ -5490,6 +5662,10 @@ async def main():
     app.router.add_post("/pipeline", run_pipeline_endpoint)
     app.router.add_post("/events/process", run_events_endpoint)
     app.router.add_post("/report/daily", run_daily_report_endpoint)
+    app.router.add_post("/report/cost", run_cost_report_endpoint)
+    app.router.add_post("/report/activity", run_activity_report_endpoint)
+    app.router.add_post("/report/auto", run_auto_report_endpoint)
+    app.router.add_post("/kpi/update", run_kpi_update_endpoint)
     app.router.add_post("/cycle/scan", run_scanner_endpoint)
     app.router.add_post("/cycle/knowledge", run_knowledge_endpoint)
     app.router.add_post("/cycle/capability", run_scout_endpoint)
