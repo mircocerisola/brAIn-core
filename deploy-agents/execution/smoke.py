@@ -1,6 +1,6 @@
 """
 brAIn module: execution/smoke.py
-Auto-extracted from agents_runner.py
+Smoke test execution — CSO territory (step 4-7 della pipeline lean).
 """
 from __future__ import annotations
 import os, json, time, re, uuid
@@ -8,7 +8,81 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
-from execution.project import get_project_db, _send_to_topic
+from execution.project import get_project_db, _send_to_topic, _commit_to_project_repo
+from execution.pipeline import advance_pipeline_step, generate_smoke_results_card
+
+
+def run_smoke_design(solution_id):
+    """LEAN PIPELINE: Crea progetto minimo da BOS approvato e avvia CSO smoke test design.
+    NON genera spec/landing. Solo progetto in DB + smoke test plan.
+    """
+    from execution.project import _slugify, _get_telegram_group_id
+    from execution.pipeline import design_smoke_test
+    logger.info(f"[SMOKE_DESIGN] Avvio per solution_id={solution_id}")
+
+    # Anti-duplicazione
+    try:
+        existing = supabase.table("projects").select("id,status,pipeline_step").eq("bos_id", int(solution_id)).execute()
+        if existing.data:
+            proj = existing.data[0]
+            if proj.get("status") not in ("new", "init", "failed"):
+                logger.info(f"[SMOKE_DESIGN] solution {solution_id} gia' processata, skip")
+                return {"status": "skipped", "reason": "progetto gia' in corso"}
+            # Se esiste ma failed, usa quello esistente
+            project_id = proj["id"]
+            design_smoke_test(project_id)
+            return {"status": "ok", "project_id": project_id, "reused": True}
+    except Exception as e:
+        logger.warning(f"[SMOKE_DESIGN] Duplicate check: {e}")
+
+    # Carica soluzione
+    try:
+        sol = supabase.table("solutions").select("*").eq("id", int(solution_id)).execute()
+        if not sol.data:
+            return {"status": "error", "error": "solution not found"}
+        solution = sol.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = solution.get("title", f"Project {solution_id}")[:80]
+    slug = _slugify(name)
+    bos_score = float(solution.get("bos_score") or 0)
+
+    # Crea record progetto minimo (NO spec, NO github, NO landing)
+    project_id = None
+    try:
+        result = supabase.table("projects").insert({
+            "name": name,
+            "slug": slug,
+            "bos_id": int(solution_id),
+            "bos_score": bos_score,
+            "status": "smoke_test_pending",
+            "pipeline_step": "bos_approved",
+            "pipeline_territory": "cso",
+            "pipeline_locked": False,
+        }).execute()
+        if result.data:
+            project_id = result.data[0]["id"]
+    except Exception as e:
+        logger.error(f"[SMOKE_DESIGN] DB insert: {e}")
+        return {"status": "error", "error": str(e)}
+
+    logger.info(f"[SMOKE_DESIGN] Progetto minimo creato: id={project_id} slug={slug}")
+
+    # Crea Forum Topic cantiere
+    group_id = _get_telegram_group_id()
+    if group_id:
+        from execution.project import _create_forum_topic
+        topic_id = _create_forum_topic(group_id, name)
+        if topic_id:
+            try:
+                supabase.table("projects").update({"topic_id": topic_id}).eq("id", project_id).execute()
+            except Exception:
+                pass
+
+    # CSO progetta smoke test
+    result = design_smoke_test(project_id)
+    return {"status": "ok", "project_id": project_id, "design": result}
 
 
 def run_smoke_test_setup(project_id):
@@ -123,11 +197,12 @@ def run_smoke_test_setup(project_id):
     except Exception:
         pass
 
-    # Aggiorna status progetto
+    # Aggiorna status progetto + pipeline step
     try:
         supabase.table("projects").update({"status": "smoke_test_running"}).eq("id", project_id).execute()
     except Exception:
         pass
+    advance_pipeline_step(project_id, "smoke_test_running")
 
     # Invia card con risultato
     sep = "\u2501" * 15
@@ -279,7 +354,7 @@ Rispondi in JSON:
     except Exception as e:
         logger.error(f"[SMOKE_ANALYZE] smoke_tests update: {e}")
 
-    # Aggiorna spec_insights in projects
+    # Aggiorna spec_insights in projects + salva dati smoke per report completo
     try:
         supabase.table("projects").update({
             "spec_insights": json.dumps(insights),
@@ -288,31 +363,19 @@ Rispondi in JSON:
     except Exception:
         pass
 
-    # Invia card risultato nel topic
-    sep = "\u2501" * 15
-    signal = insights.get("overall_signal", "yellow")
-    signal_emoji = "\U0001f7e2" if signal == "green" else ("\U0001f534" if signal == "red" else "\U0001f7e1")
-    msg = (
-        f"\U0001f9ea Smoke Test completato \u2014 {name}\n"
-        f"{sep}\n"
-        f"Segnale: {signal_emoji} {signal.upper()}\n"
-        f"Conversione: {conv_rate:.1f}% ({len(forms)}/{sent})\n"
-        f"Raccomandazione: {insights.get('recommendation', 'N/A')}\n"
-        f"{sep}"
-    )
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "\U0001f680 Avvia build", "callback_data": f"smoke_proceed:{project_id}"},
-                {"text": "\U0001f4ca Insight SPEC", "callback_data": f"smoke_spec_insights:{project_id}:{smoke_id}"},
-            ],
-            [
-                {"text": "\u270f\ufe0f Modifica SPEC", "callback_data": f"smoke_modify_spec:{project_id}"},
-            ],
-        ]
-    }
-    if group_id and topic_id:
-        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+    # Salva dati aggregati in smoke_tests per la results card
+    try:
+        supabase.table("smoke_tests").update({
+            "positive_responses": len(forms),
+            "negative_responses": len(rejected),
+            "no_response": max(sent - len(forms) - len(rejected), 0),
+            "qualitative_feedback": json.dumps(rejection_reasons[:5]),
+        }).eq("id", smoke_id).execute()
+    except Exception:
+        pass
+
+    # Genera e invia card risultati completa con GO/NO-GO via pipeline
+    generate_smoke_results_card(project_id, smoke_id)
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("smoke_test_agent", "smoke_analyze", 2,

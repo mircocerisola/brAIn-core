@@ -21,7 +21,8 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
     "cso": {
         "file_allowed": [],
         "tables_allowed": ["problems", "solutions", "solution_scores", "bos_archive",
-                           "pipeline_thresholds", "chief_memory", "chief_decisions"],
+                           "pipeline_thresholds", "chief_memory", "chief_decisions",
+                           "smoke_tests", "smoke_test_prospects", "smoke_test_events"],
         "tables_forbidden": [],
     },
     "coo": {
@@ -89,6 +90,7 @@ ROUTING_KEYWORDS: Dict[str, str] = {
     # CSO
     "pipeline": "cso", "opportunità": "cso", "mercato": "cso",
     "bos": "cso", "problemi globali": "cso", "competizione": "cso", "pivot": "cso",
+    "smoke test": "cso", "validazione mercato": "cso", "prospect": "cso",
     # COO
     "processi": "coo", "operazioni": "coo", "efficienza": "coo",
     "coda": "coo", "bottleneck": "coo", "flusso": "coo",
@@ -422,8 +424,8 @@ class BaseChief(BaseAgent):
             f"Chief corrente: {chief_id} (dominio: {self.domain})\n"
             f"Domanda ricevuta: \"{question}\"\n\n"
             f"Chief disponibili e loro domini:\n"
-            f"cso=strategy/pipeline, cfo=finance/budget, cmo=marketing/brand,\n"
-            f"cto=tech/code/infra, coo=operations/processes/product/build/projects,\n"
+            f"cso=strategy/pipeline/smoke_test/market_validation, cfo=finance/budget, cmo=marketing/brand,\n"
+            f"cto=tech/code/infra, coo=operations/build/projects/spec/launch,\n"
             f"clo=legal/compliance, cpeo=people/team\n\n"
             f"Rispondi SOLO JSON: {{\"is_own_domain\": true/false, \"correct_chief\": \"cso\", \"reason\": \"...\"}}"
         )

@@ -156,9 +156,9 @@ def _send_to_topic(group_id, topic_id, text, reply_markup=None):
 # Mappa tipo notifica → chiave org_config del topic Chief competente
 _NOTIF_TYPE_TO_CHIEF_KEY = {
     "bos": "chief_topic_cso",
-    "spec": "chief_topic_cso",
+    "spec": "chief_topic_coo",      # COO territory (post-GO)
     "legal": "chief_topic_clo",
-    "smoke": "chief_topic_coo",
+    "smoke": "chief_topic_cso",      # CSO territory (pre-GO)
     "build": "chief_topic_coo",
     "finance": "chief_topic_cfo",
     "security": "chief_topic_cto",

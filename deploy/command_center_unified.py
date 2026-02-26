@@ -97,6 +97,17 @@ _cached_ops_topic_id = None
 _cached_strategy_topic_id = None
 
 
+def _get_bos_id_for_project(project_id):
+    """Ritorna bos_id per un progetto."""
+    try:
+        r = supabase.table("projects").select("bos_id").eq("id", project_id).execute()
+        if r.data:
+            return r.data[0].get("bos_id")
+    except Exception:
+        pass
+    return None
+
+
 def _get_group_id_from_config():
     """Legge telegram_group_id da org_config con cache in-process."""
     global _cached_group_id
@@ -1518,22 +1529,23 @@ def _execute_action(action_type, payload, approved):
                         supabase.table("problems").update({"status": "approved"}).eq("id", int(pid)).execute()
                     except:
                         pass
-                # Triggera Layer 3: init_project in background
+                # LEAN PIPELINE: BOS approved → CSO progetta smoke test
+                # NON init_project (che fa spec+landing). Prima validiamo il mercato.
                 if AGENTS_RUNNER_URL:
-                    def _trigger_init():
+                    def _trigger_smoke_design():
                         try:
                             oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
                             headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
                             http_requests.post(
-                                f"{AGENTS_RUNNER_URL}/project/init",
+                                f"{AGENTS_RUNNER_URL}/smoke/design",
                                 json={"solution_id": sid},
                                 headers=headers,
-                                timeout=5,
+                                timeout=10,
                             )
                         except Exception as e:
-                            logger.warning(f"[EXECUTE_ACTION] /project/init trigger error: {e}")
-                    threading.Thread(target=_trigger_init, daemon=True).start()
-                return f"BOS approvato. {result}\nAvvio Layer 3: spec, landing page, review in preparazione."
+                            logger.warning(f"[EXECUTE_ACTION] /smoke/design trigger error: {e}")
+                    threading.Thread(target=_trigger_smoke_design, daemon=True).start()
+                return f"BOS approvato. {result}\nCSO sta progettando lo smoke test per validare la domanda."
             elif not approved and sid:
                 try:
                     supabase.table("solutions").update({"status": "archived"}).eq("id", int(sid)).execute()
@@ -2416,9 +2428,13 @@ def _create_cantiere_and_setup(project_id):
             start_team_setup(project_id, AUTHORIZED_USER_ID, None)
         return
 
-    # Salva topic_id in DB
+    # Salva topic_id in DB + avanza pipeline a spec_approved (COO territory)
     try:
-        supabase.table("projects").update({"topic_id": cantiere_topic_id}).eq("id", project_id).execute()
+        supabase.table("projects").update({
+            "topic_id": cantiere_topic_id,
+            "pipeline_step": "spec_approved",
+            "pipeline_territory": "coo",
+        }).eq("id", project_id).execute()
     except Exception as e:
         logger.warning(f"[CANTIERE] DB update topic_id: {e}")
 
@@ -3020,9 +3036,15 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.error(f"[LEGAL_READ] {e}")
 
     elif data.startswith("legal_proceed:"):
-        # Procedi con build (post legal OK)
+        # Procedi con build (post legal OK) — pipeline: legal_approved → build_running
         project_id = int(data.split(":")[1])
         await query.answer("Avvio build...")
+        try:
+            supabase.table("projects").update({
+                "pipeline_step": "legal_approved",
+            }).eq("id", project_id).execute()
+        except Exception:
+            pass
         threading.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
 
     elif data.startswith("legal_block:"):
@@ -3134,6 +3156,185 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.warning(f"[SMOKE_PROPOSAL_APPROVE] {e}")
         if AGENTS_RUNNER_URL:
             threading.Thread(target=_run_smoke_from_proposal, daemon=True).start()
+
+    # ---- LEAN PIPELINE: CSO Smoke Test Design callbacks ----
+    elif data.startswith("smoke_design_approve:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio smoke test...")
+        def _run_smoke_design_approved():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/smoke/setup",
+                    json={"project_id": str(project_id)},
+                    headers=headers, timeout=120,
+                )
+            except Exception as e:
+                logger.warning(f"[SMOKE_DESIGN_APPROVE] {e}")
+        if AGENTS_RUNNER_URL:
+            threading.Thread(target=_run_smoke_design_approved, daemon=True).start()
+
+    elif data.startswith("smoke_design_modify:"):
+        project_id = int(data.split(":")[1])
+        await query.answer()
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_smoke_plan_edit"] = project_id
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "Cosa vuoi modificare nel piano smoke test? (es. metodo, KPI, durata, target)"}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("smoke_design_archive:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Idea archiviata.")
+        try:
+            supabase.table("projects").update({
+                "status": "archived",
+                "pipeline_step": "smoke_nogo",
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.error(f"[SMOKE_DESIGN_ARCHIVE] {e}")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id, "text": "Idea archiviata. Idea Recycler la rivalutera' tra 90 giorni."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("smoke_go:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("GO! Avvio spec...")
+        try:
+            if smoke_id:
+                supabase.table("smoke_tests").update({
+                    "mirco_decision": "go",
+                }).eq("id", smoke_id).execute()
+        except Exception:
+            pass
+        # Importa e chiama handle_smoke_go
+        def _handle_go():
+            try:
+                from execution.pipeline import handle_smoke_go
+                handle_smoke_go(project_id)
+                # Triggera spec generation via agents-runner
+                if AGENTS_RUNNER_URL:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/project/init",
+                        json={"solution_id": str(_get_bos_id_for_project(project_id))},
+                        headers=headers, timeout=5,
+                    )
+            except Exception as e:
+                logger.warning(f"[SMOKE_GO] {e}")
+        threading.Thread(target=_handle_go, daemon=True).start()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "GO! Smoke test superato. Passaggio al COO per spec e build."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("smoke_nogo:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("NO-GO. Archiviato.")
+        try:
+            if smoke_id:
+                supabase.table("smoke_tests").update({
+                    "mirco_decision": "nogo",
+                }).eq("id", smoke_id).execute()
+        except Exception:
+            pass
+        def _handle_nogo():
+            try:
+                from execution.pipeline import handle_smoke_nogo
+                handle_smoke_nogo(project_id)
+            except Exception as e:
+                logger.warning(f"[SMOKE_NOGO] {e}")
+        threading.Thread(target=_handle_nogo, daemon=True).start()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "NO-GO. Progetto archiviato. Idea Recycler lo rivalutera' tra 90 giorni."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("smoke_pivot:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("Pivot! Torna al CSO.")
+        try:
+            if smoke_id:
+                supabase.table("smoke_tests").update({
+                    "mirco_decision": "pivot",
+                }).eq("id", smoke_id).execute()
+        except Exception:
+            pass
+        def _handle_pivot():
+            try:
+                from execution.pipeline import handle_smoke_pivot
+                handle_smoke_pivot(project_id)
+            except Exception as e:
+                logger.warning(f"[SMOKE_PIVOT] {e}")
+        threading.Thread(target=_handle_pivot, daemon=True).start()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "Pivot! Torna al CSO per modificare la soluzione con il feedback dello smoke test."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    # ---- RESTAURANT REPOSITION callbacks ----
+    elif data.startswith("restaurant_option_a:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Opzione A scelta!")
+        try:
+            supabase.table("projects").update({
+                "pipeline_step": "smoke_test_designing",
+                "pipeline_territory": "cso",
+                "status": "smoke_test_pending",
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.error(f"[RESTAURANT_A] {e}")
+        # Avvia design smoke test con il prototipo come materiale
+        def _restaurant_smoke():
+            try:
+                from execution.pipeline import design_smoke_test
+                design_smoke_test(project_id)
+            except Exception as e:
+                logger.warning(f"[RESTAURANT_A] {e}")
+        threading.Thread(target=_restaurant_smoke, daemon=True).start()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "Opzione A scelta. Il CSO sta progettando lo smoke test usando il prototipo come demo."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+
+    elif data.startswith("restaurant_option_b:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Opzione B scelta!")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id,
+                       "text": "Opzione B scelta. Build continua. Pipeline lean applicata a tutti i cantieri futuri."}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
     # Blocker: Mirco completa azione bloccante → sblocca pipeline
     elif data.startswith("blocker_done:"):
@@ -4467,31 +4668,65 @@ async def main():
     await tg_app.initialize()
     await tg_app.start()
 
-    # ---- STARTUP: manda smoke proposal per progetti in legal_approved/smoke_pending ----
-    def _startup_smoke_proposals():
-        """Invia proposta smoke test ai cantieri in legal_approved o smoke_pending (post-restart recovery)."""
+    # ---- STARTUP: recovery progetti bloccati in smoke/build ----
+    def _startup_pipeline_recovery():
+        """Recovery post-restart: riprende smoke test o build per progetti in pipeline attiva."""
         try:
+            # Progetti CSO in attesa smoke test design
             r = supabase.table("projects").select("id,name,topic_id,pipeline_step") \
-                .in_("pipeline_step", ["legal_approved", "smoke_pending"]).execute()
+                .in_("pipeline_step", ["bos_approved", "smoke_test_designing"]).execute()
             for proj in (r.data or []):
+                pid = proj["id"]
+                _sm = supabase.table("smoke_tests").select("id").eq("project_id", pid).execute()
+                if not (_sm.data) and AGENTS_RUNNER_URL:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/smoke/design",
+                        json={"solution_id": str(proj.get("bos_id", ""))},
+                        headers=headers, timeout=30,
+                    )
+            # Progetti COO in attesa legal/build
+            r2 = supabase.table("projects").select("id,name,topic_id,pipeline_step") \
+                .in_("pipeline_step", ["legal_approved"]).execute()
+            for proj in (r2.data or []):
                 pid = proj["id"]
                 tid = proj.get("topic_id")
                 if not tid:
                     continue
                 _sm = supabase.table("smoke_tests").select("id").eq("project_id", pid).execute()
-                if not (_sm.data):
-                    # Nessun smoke test → manda proposta
-                    if AGENTS_RUNNER_URL:
-                        oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
-                        headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
-                        http_requests.post(
-                            f"{AGENTS_RUNNER_URL}/smoke/setup",
-                            json={"project_id": str(pid)},
-                            headers=headers, timeout=120,
-                        )
+                if not (_sm.data) and AGENTS_RUNNER_URL:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/smoke/setup",
+                        json={"project_id": str(pid)},
+                        headers=headers, timeout=120,
+                    )
         except Exception as e:
-            logger.warning(f"[STARTUP_SMOKE] {e}")
-    threading.Thread(target=_startup_smoke_proposals, daemon=True).start()
+            logger.warning(f"[STARTUP_RECOVERY] {e}")
+    threading.Thread(target=_startup_pipeline_recovery, daemon=True).start()
+
+    # ---- STARTUP: manda opzioni riposizionamento a progetti che hanno saltato smoke test ----
+    def _startup_restaurant_reposition():
+        """Trova progetti in build che hanno saltato lo smoke test e manda le opzioni."""
+        try:
+            r = supabase.table("projects").select("id,name,pipeline_step,pipeline_territory") \
+                .in_("pipeline_step", ["build_running", "build_pending", "build_done"]) \
+                .is_("pipeline_territory", "null").execute()
+            for proj in (r.data or []):
+                pid = proj["id"]
+                if AGENTS_RUNNER_URL:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/admin/restaurant-reposition",
+                        json={"project_id": pid},
+                        headers=headers, timeout=30,
+                    )
+        except Exception as e:
+            logger.warning(f"[STARTUP_REPOSITION] {e}")
+    threading.Thread(target=_startup_restaurant_reposition, daemon=True).start()
 
     if WEBHOOK_URL:
         await tg_app.bot.set_webhook(url=WEBHOOK_URL)

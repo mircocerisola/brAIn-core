@@ -27,7 +27,8 @@ from finance.reports import (
 from execution.builder import generate_build_prompt, init_project
 from execution.validator import run_validation_agent, continue_build_agent, run_spec_update, _generate_team_invite_link_sync
 from execution.legal import run_legal_review, generate_project_docs, monitor_brain_compliance
-from execution.smoke import run_smoke_test_setup, analyze_feedback_for_spec
+from execution.smoke import run_smoke_test_setup, analyze_feedback_for_spec, run_smoke_design
+from execution.pipeline import send_restaurant_reposition
 from marketing.agents import run_marketing, generate_marketing_report
 
 
@@ -322,6 +323,18 @@ async def run_legal_docs_endpoint(request):
 async def run_legal_compliance_endpoint(request):
     try:
         result = monitor_brain_compliance()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_smoke_design_endpoint(request):
+    """POST /smoke/design — CSO progetta smoke test da BOS approvato."""
+    try:
+        data = await request.json()
+        solution_id = data.get("solution_id")
+        if not solution_id:
+            return web.json_response({"error": "solution_id obbligatorio"}, status=400)
+        result = run_smoke_design(solution_id)
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -743,6 +756,18 @@ async def run_founder_pipeline_endpoint(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
+
+async def run_restaurant_reposition_endpoint(request):
+    """POST /admin/restaurant-reposition — manda opzioni A/B al cantiere ristorante."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        result = send_restaurant_reposition(project_id)
+        return web.json_response({"status": "ok" if result else "error", "sent": result})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 async def run_cleanup_old_topics_endpoint(request):
     """POST /admin/cleanup-old-topics — elimina topic Forum e dati DB di cantieri obsoleti."""

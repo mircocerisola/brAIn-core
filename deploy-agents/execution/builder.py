@@ -837,17 +837,25 @@ def enqueue_spec_review_action(project_id):
 # ---- INIT PROJECT ----
 
 def init_project(solution_id):
-    """Inizializza progetto da BOS approvato: DB, GitHub repo, Forum Topic, spec, landing, enqueue review."""
+    """Inizializza progetto da BOS approvato (post-GO): GitHub repo, spec, landing, enqueue review.
+    LEAN PIPELINE: il progetto puo' gia' esistere (creato da run_smoke_design pre-GO).
+    In quel caso, riusa il progetto esistente e aggiunge spec/github/landing.
+    """
     logger.info(f"[INIT] Avvio per solution_id={solution_id}")
 
-    # Anti-duplicazione: se esiste già un progetto per questa soluzione, skip
+    # LEAN: se il progetto esiste gia' (creato da smoke_design), riusalo
+    existing_project_id = None
     try:
-        existing = supabase.table("projects").select("id,status,pipeline_locked").eq("bos_id", int(solution_id)).execute()
+        existing = supabase.table("projects").select("id,status,pipeline_locked,pipeline_step").eq("bos_id", int(solution_id)).execute()
         if existing.data:
             proj = existing.data[0]
-            if proj.get("status") not in ("new", "init", "failed") or proj.get("pipeline_locked"):
-                logger.info(f"[INIT] solution {solution_id} già processata (status={proj.get('status')}), skip")
-                return {"status": "skipped", "reason": "progetto già in corso o completato"}
+            # Se e' in smoke_go o spec_pending, e' il flow lean post-GO → riusa
+            if proj.get("pipeline_step") in ("smoke_go", "spec_pending"):
+                existing_project_id = proj["id"]
+                logger.info(f"[INIT] Riuso progetto esistente id={existing_project_id} (lean post-GO)")
+            elif proj.get("status") not in ("new", "init", "failed", "smoke_test_pending") or proj.get("pipeline_locked"):
+                logger.info(f"[INIT] solution {solution_id} gia' processata (status={proj.get('status')}), skip")
+                return {"status": "skipped", "reason": "progetto gia' in corso o completato"}
     except Exception as e:
         logger.warning(f"[INIT] Duplicate check error: {e}")
 
@@ -864,40 +872,60 @@ def init_project(solution_id):
         logger.error(f"[INIT] Solution load error: {e}")
         return {"status": "error", "error": str(e)}
 
-    # 2. Genera slug unico
-    base_slug = _slugify(sol_title)
-    slug = base_slug
-    # Controlla unicita'
-    try:
-        existing = supabase.table("projects").select("id").eq("slug", slug).execute()
-        if existing.data:
-            slug = f"{base_slug[:17]}-{solution_id}"
-    except:
-        pass
-
     name = sol_title[:80]
 
-    # 3. Crea record in DB
-    project_id = None
-    try:
-        result = supabase.table("projects").insert({
-            "name": name,
-            "slug": slug,
-            "bos_id": int(solution_id),
-            "bos_score": bos_score,
-            "status": "init",
-            "pipeline_locked": True,
-        }).execute()
-        if result.data:
-            project_id = result.data[0]["id"]
-        else:
-            logger.error("[INIT] Inserimento projects fallito")
-            return {"status": "error", "error": "db insert failed"}
-    except Exception as e:
-        logger.error(f"[INIT] DB insert error: {e}")
-        return {"status": "error", "error": str(e)}
+    # LEAN: Se il progetto esiste gia' (post-GO), riusalo
+    if existing_project_id:
+        project_id = existing_project_id
+        try:
+            p = supabase.table("projects").select("slug").eq("id", project_id).execute()
+            slug = p.data[0].get("slug", _slugify(sol_title)) if p.data else _slugify(sol_title)
+        except Exception:
+            slug = _slugify(sol_title)
+        try:
+            supabase.table("projects").update({
+                "status": "init",
+                "pipeline_locked": True,
+                "pipeline_step": "spec_pending",
+                "pipeline_territory": "coo",
+            }).eq("id", project_id).execute()
+        except Exception:
+            pass
+        logger.info(f"[INIT] Riuso progetto lean: id={project_id} slug={slug}")
+    else:
+        # 2. Genera slug unico
+        base_slug = _slugify(sol_title)
+        slug = base_slug
+        try:
+            existing = supabase.table("projects").select("id").eq("slug", slug).execute()
+            if existing.data:
+                slug = f"{base_slug[:17]}-{solution_id}"
+        except:
+            pass
 
-    logger.info(f"[INIT] Progetto creato: id={project_id} slug={slug}")
+        # 3. Crea record in DB
+        project_id = None
+        try:
+            result = supabase.table("projects").insert({
+                "name": name,
+                "slug": slug,
+                "bos_id": int(solution_id),
+                "bos_score": bos_score,
+                "status": "init",
+                "pipeline_locked": True,
+                "pipeline_step": "spec_pending",
+                "pipeline_territory": "coo",
+            }).execute()
+            if result.data:
+                project_id = result.data[0]["id"]
+            else:
+                logger.error("[INIT] Inserimento projects fallito")
+                return {"status": "error", "error": "db insert failed"}
+        except Exception as e:
+            logger.error(f"[INIT] DB insert error: {e}")
+            return {"status": "error", "error": str(e)}
+
+        logger.info(f"[INIT] Progetto creato: id={project_id} slug={slug}")
 
     # 3b. MACRO-TASK 1: Crea Supabase project separato (best-effort)
     db_url, db_anon_key = _create_supabase_project(slug)
