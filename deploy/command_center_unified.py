@@ -2375,24 +2375,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data.startswith("spec_validate:"):
         project_id = int(data.split(":")[1])
-        await query.answer("Avvio review legale...")
-        # MACRO-TASK 2: spec_validate ora triggera legal review invece di team_setup
-        def _trigger_legal_review():
-            try:
-                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
-                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
-                http_requests.post(
-                    f"{AGENTS_RUNNER_URL}/legal/review",
-                    json={"project_id": project_id},
-                    headers=headers, timeout=10,
-                )
-            except Exception as e:
-                logger.warning(f"[LEGAL_REVIEW_CB] {e}")
-        if AGENTS_RUNNER_URL:
-            threading.Thread(target=_trigger_legal_review, daemon=True).start()
-        else:
-            # fallback: team_setup se agents_runner non disponibile
-            threading.Thread(target=start_team_setup, args=(project_id, chat_id, thread_id), daemon=True).start()
+        await query.answer("SPEC validata!")
+        threading.Thread(target=start_team_setup, args=(project_id, chat_id, thread_id), daemon=True).start()
 
     elif data.startswith("spec_full:"):
         # MACRO-TASK 4: invia SPEC_CODE.md (versione tecnica completa)

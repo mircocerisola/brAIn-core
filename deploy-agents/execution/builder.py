@@ -658,15 +658,12 @@ def enqueue_spec_review_action(project_id):
             f"{sep}"
         )
 
-    # MACRO-TASK 4: nuovo layout pulsanti — riga 1: Valida + Modifica, riga 2: Versione completa
     reply_markup = {
         "inline_keyboard": [
             [
+                {"text": "\U0001f4c4 Scarica SPEC", "callback_data": f"spec_download:{project_id}"},
                 {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
                 {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
-            ],
-            [
-                {"text": "\U0001f4c4 Versione completa (SPEC_CODE)", "callback_data": f"spec_full:{project_id}"},
             ],
         ]
     }
