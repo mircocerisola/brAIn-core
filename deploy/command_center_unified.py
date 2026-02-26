@@ -4467,11 +4467,12 @@ async def main():
     await tg_app.initialize()
     await tg_app.start()
 
-    # ---- STARTUP: manda smoke proposal per progetti in smoke_pending ----
+    # ---- STARTUP: manda smoke proposal per progetti in legal_approved/smoke_pending ----
     def _startup_smoke_proposals():
-        """Invia proposta smoke test ai cantieri in smoke_pending (post-restart recovery)."""
+        """Invia proposta smoke test ai cantieri in legal_approved o smoke_pending (post-restart recovery)."""
         try:
-            r = supabase.table("projects").select("id,name,topic_id,pipeline_step").eq("pipeline_step", "smoke_pending").execute()
+            r = supabase.table("projects").select("id,name,topic_id,pipeline_step") \
+                .in_("pipeline_step", ["legal_approved", "smoke_pending"]).execute()
             for proj in (r.data or []):
                 pid = proj["id"]
                 tid = proj.get("topic_id")
