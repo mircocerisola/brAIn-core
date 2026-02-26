@@ -1680,6 +1680,50 @@ def clean_reply(text):
     return text.strip()
 
 
+# ---- CARD FORMAT HELPERS (FIX 4) ----
+_SEP = "\u2501" * 15
+
+
+def _make_card(emoji, title, context, body_lines, footer=None):
+    """Costruisce testo card con formato standard brAIn.
+    Header: [emoji] *TITOLO* — contesto
+    Sep, body con ├/└, sep, footer opzionale.
+    """
+    lines = [f"{emoji} *{title}*" + (f" \u2014 {context}" if context else ""), _SEP]
+    for i, line in enumerate(body_lines):
+        if not line:
+            lines.append("")
+            continue
+        prefix = "\u2514" if i == len(body_lines) - 1 else "\u251c"
+        if line.startswith("└") or line.startswith("├") or line.startswith("━"):
+            lines.append(line)
+        else:
+            lines.append(f"{prefix} {line}")
+    lines.append(_SEP)
+    if footer:
+        lines.append(footer)
+    return "\n".join(lines)
+
+
+def _call_agents_runner_sync(endpoint, body=None):
+    """Chiama agents_runner endpoint con OIDC auth. Usato per report on-demand."""
+    if not AGENTS_RUNNER_URL:
+        return None
+    try:
+        oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+        headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+        resp = http_requests.post(
+            f"{AGENTS_RUNNER_URL}{endpoint}",
+            json=body or {},
+            headers=headers,
+            timeout=15,
+        )
+        return resp.json() if resp.status_code == 200 else None
+    except Exception as e:
+        logger.warning(f"[CALL_AR] {endpoint}: {e}")
+        return None
+
+
 def is_mirco_active():
     """True se Mirco ha mandato un messaggio negli ultimi 90 secondi."""
     return (time.time() - _last_mirco_message_time) < MIRCO_ACTIVE_WINDOW
@@ -1694,16 +1738,23 @@ def queue_or_send_notification(message, is_critical=False):
             _notification_queue.append(message)
 
 
-def _send_notification_now(message):
-    """Invia notifica Telegram immediatamente."""
+def _send_notification_now(message, parse_mode="Markdown"):
+    """Invia notifica Telegram immediatamente. Usa formato card se non già formattato."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = AUTHORIZED_USER_ID
     if not token or not chat_id:
         return
+    # Se non è già una card (non contiene ━), wrappa in card
+    if _SEP not in message and not message.startswith("📊") and not message.startswith("💶") and not message.startswith("⚙️"):
+        emoji = "\U0001f514"  # 🔔
+        first_line = message.split("\n")[0][:80]
+        rest_lines = message.split("\n")[1:]
+        body = rest_lines if rest_lines else []
+        message = _make_card(emoji, "NOTIFICA brAIn", first_line, body) if body else f"\U0001f514 *{first_line}*"
     try:
         http_requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message},
+            json={"chat_id": chat_id, "text": message, "parse_mode": parse_mode},
             timeout=10,
         )
     except Exception as e:
@@ -1948,13 +1999,12 @@ def handle_launch(project_id, chat_id, thread_id=None):
 
     # Notifica nel topic — Fix 6: no link GitHub 404
     slug = project.get("slug", github_repo.replace("mircocerisola/", "") if github_repo else "")
-    msg = (
-        f"\U0001f680 {name} approvato per il lancio!\n"
-        f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
-        f"Avvia deploy manualmente su Cloud Run."
+    launch_card = _make_card(
+        "\U0001f680", "LANCIO APPROVATO", name,
+        [f"Repo: brain-{slug} (privato)", "Avvia deploy manualmente su Cloud Run."],
     )
     if token:
-        payload = {"chat_id": chat_id, "text": msg}
+        payload = {"chat_id": chat_id, "text": launch_card, "parse_mode": "Markdown"}
         if thread_id:
             payload["message_thread_id"] = thread_id
         try:
@@ -1985,10 +2035,10 @@ def start_team_setup(project_id, chat_id, thread_id=None):
     except Exception as e:
         logger.warning(f"[TEAM_SETUP] DB update: {e}")
 
-    msg = (
-        "\U0001f465 SPEC validata! Vuoi aggiungere collaboratori al Cantiere?\n"
-        "Potranno scrivere nel topic e riceverai una copia di ogni loro messaggio.\n"
-        "\u2501" * 15
+    msg = _make_card(
+        "\U0001f465", "TEAM SETUP", f"progetto {project_id}",
+        ["SPEC validata! Vuoi aggiungere collaboratori al Cantiere?",
+         "Potranno scrivere nel topic — ricevi copia di ogni messaggio."],
     )
     reply_markup = {
         "inline_keyboard": [[
@@ -1996,7 +2046,7 @@ def start_team_setup(project_id, chat_id, thread_id=None):
             {"text": "\u23ed\ufe0f Salta, avvia build", "callback_data": f"team_skip:{project_id}"},
         ]]
     }
-    payload = {"chat_id": chat_id, "text": msg, "reply_markup": reply_markup}
+    payload = {"chat_id": chat_id, "text": msg, "reply_markup": reply_markup, "parse_mode": "Markdown"}
     if thread_id:
         payload["message_thread_id"] = thread_id
     try:
@@ -2047,7 +2097,10 @@ async def handle_project_message(update, project):
         if registered:
             _is_collab = True
             sender_name = username or str(user_id)
-            await update.message.reply_text(f"Benvenuto nel Cantiere {name}!")
+            await update.message.reply_text(
+                _make_card("\U0001f3d7\ufe0f", "CANTIERE", name, ["Benvenuto nel cantiere!"]),
+                parse_mode="Markdown",
+            )
             _notify_mirco_silently(project_id, sender_name, f"[nuovo collaboratore registrato] {msg}")
             return
 
@@ -2076,18 +2129,31 @@ async def handle_project_message(update, project):
                     invite_link = resp.json().get("invite_link")
                     if invite_link:
                         await update.message.reply_text(
-                            f"Manda questo link al collaboratore: {invite_link}\n"
-                            f"Scade in 24h.\n\n"
-                            f"Vuoi aggiungere altri? Rispondi 'aggiungi' o 'basta'."
+                            _make_card("\U0001f517", "INVITE LINK", name,
+                                       [f"Link: {invite_link}", "Scade in 24h.",
+                                        "Vuoi aggiungere altri? Rispondi 'aggiungi' o 'basta'."]),
+                            parse_mode="Markdown",
                         )
                     else:
-                        await update.message.reply_text("Collaboratore salvato. Invite link non generato (controlla i permessi del bot nel gruppo).")
+                        await update.message.reply_text(
+                            _make_card("\u26a0\ufe0f", "INVITE", name, ["Collaboratore salvato.", "Invite link non generato — controlla permessi bot nel gruppo."]),
+                            parse_mode="Markdown",
+                        )
                 else:
-                    await update.message.reply_text(f"Errore generazione invite: {resp.text[:200]}")
+                    await update.message.reply_text(
+                        _make_card("\u274c", "ERRORE INVITE", name, [f"Errore: {resp.text[:150]}"]),
+                        parse_mode="Markdown",
+                    )
             except Exception as e:
-                await update.message.reply_text(f"Errore: {e}")
+                await update.message.reply_text(
+                    _make_card("\u274c", "ERRORE", name, [str(e)[:200]]),
+                    parse_mode="Markdown",
+                )
         else:
-            await update.message.reply_text("agents_runner non raggiungibile.")
+            await update.message.reply_text(
+                _make_card("\u274c", "ERRORE", "sistema", ["agents\\_runner non raggiungibile."]),
+                parse_mode="Markdown",
+            )
         return
 
     # Gestione "aggiungi altri" / "basta" dopo invite
@@ -2097,12 +2163,18 @@ async def handle_project_message(update, project):
             if chat_id not in _session_context:
                 _session_context[chat_id] = {}
             _session_context[chat_id]["awaiting_phone"] = project_id
-            await update.message.reply_text("Inviami il numero di telefono del collaboratore (es. +39...)")
+            await update.message.reply_text(
+                _make_card("\U0001f4de", "AGGIUNGI COLLABORATORE", name, ["Inviami il numero di telefono (es. +39...)"]),
+                parse_mode="Markdown",
+            )
             return
         if msg_lower in ("basta", "ok basta", "nessun altro"):
             import threading as _thr
             _thr.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
-            await update.message.reply_text("Avvio build...")
+            await update.message.reply_text(
+                _make_card("\U0001f680", "BUILD AVVIATO", name, ["Avvio build in corso\u2026"]),
+                parse_mode="Markdown",
+            )
             return
 
     # 4.5 Risposta breve nel topic: risolvi con contesto conversazione
@@ -2110,7 +2182,10 @@ async def handle_project_message(update, project):
         recent = _topic_buffer_get_recent(chat_id, thread_id)
         if _context_is_spec_discussion(recent):
             mod_desc = _extract_spec_modification(recent)
-            await update.message.reply_text(f"Aggiorno la SPEC con: {mod_desc[:120]}...")
+            await update.message.reply_text(
+                _make_card("\u270f\ufe0f", "SPEC", name, [f"Aggiornamento in corso: {mod_desc[:100]}\u2026"]),
+                parse_mode="Markdown",
+            )
             if AGENTS_RUNNER_URL:
                 try:
                     oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
@@ -2135,7 +2210,10 @@ async def handle_project_message(update, project):
                         http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
                         _topic_buffer_add(chat_id, thread_id, f"SPEC aggiornata con: {mod_desc[:80]}", role="bot")
                 except Exception as e:
-                    await update.message.reply_text(f"Errore aggiornamento SPEC: {e}")
+                    await update.message.reply_text(
+                        _make_card("\u274c", "ERRORE SPEC", name, [str(e)[:200]]),
+                        parse_mode="Markdown",
+                    )
             return
 
     # 5. "ok lanciamo" / "lancia" / "lanciamo"
@@ -2160,11 +2238,17 @@ async def handle_project_message(update, project):
                     )
                 except Exception as e:
                     logger.warning(f"[LAUNCH_NOTIFY] {e}")
-            await update.message.reply_text("Ho avvisato Mirco. In attesa della sua conferma.")
+            await update.message.reply_text(
+                _make_card("\u2709\ufe0f", "LANCIO RICHIESTO", name, ["Ho avvisato Mirco.", "In attesa della sua conferma."]),
+                parse_mode="Markdown",
+            )
         elif _is_mirco:
             import threading as _thr
             _thr.Thread(target=handle_launch, args=(project_id, chat_id, thread_id), daemon=True).start()
-            await update.message.reply_text("Lancio confermato!")
+            await update.message.reply_text(
+                _make_card("\U0001f680", "LANCIO CONFERMATO", name, ["Avvio in corso\u2026"]),
+                parse_mode="Markdown",
+            )
         return
 
     # 6. Feedback durante review fasi
@@ -2179,15 +2263,24 @@ async def handle_project_message(update, project):
                     headers=headers,
                     timeout=10,
                 )
-                await update.message.reply_text("Aggiornando... ti avviso appena la prossima fase è pronta.")
+                await update.message.reply_text(
+                    _make_card("\U0001f527", "BUILD", name, ["Aggiornando\u2026 ti avviso appena la prossima fase \u00e8 pronta."]),
+                    parse_mode="Markdown",
+                )
             except Exception as e:
-                await update.message.reply_text(f"Errore: {e}")
+                await update.message.reply_text(
+                    _make_card("\u274c", "ERRORE BUILD", name, [str(e)[:200]]),
+                    parse_mode="Markdown",
+                )
         return
 
     # 7. awaiting_spec_edit: comportamento esistente
     if ctx.get("awaiting_spec_edit") == project_id:
         _session_context[chat_id]["awaiting_spec_edit"] = None
-        await update.message.reply_text(f"Aggiornando SPEC per '{name}'...")
+        await update.message.reply_text(
+            _make_card("\u270f\ufe0f", "SPEC", name, ["Aggiornamento in corso\u2026"]),
+            parse_mode="Markdown",
+        )
         if AGENTS_RUNNER_URL:
             try:
                 oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
@@ -2213,9 +2306,15 @@ async def handle_project_message(update, project):
                     http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
                     _topic_buffer_add(chat_id, thread_id or 0, f"SPEC aggiornata con: {msg[:80]}", role="bot")
                 else:
-                    await update.message.reply_text("Modifica avviata. Ti mando la nuova SPEC review.")
+                    await update.message.reply_text(
+                        _make_card("\u270f\ufe0f", "SPEC", name, ["Modifica avviata.", "Ti mando la nuova SPEC review."]),
+                        parse_mode="Markdown",
+                    )
             except Exception as e:
-                await update.message.reply_text(f"Errore: {e}")
+                await update.message.reply_text(
+                    _make_card("\u274c", "ERRORE SPEC", name, [str(e)[:200]]),
+                    parse_mode="Markdown",
+                )
         return
 
     # 8. Fallback: risposta generica con contesto progetto + contesto topic
@@ -2525,6 +2624,19 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data.startswith("build_modify:"):
         await query.answer("Scrivi il feedback nel topic del progetto.")
+
+    # ---- REPORT ON-DEMAND callbacks (FIX 2/3) ----
+    elif data == "report_cost_ondemand":
+        await query.answer("Generazione report costi...")
+        def _gen_cost_cb():
+            _call_agents_runner_sync("/report/cost")
+        threading.Thread(target=_gen_cost_cb, daemon=True).start()
+
+    elif data == "report_activ_ondemand":
+        await query.answer("Generazione report attività...")
+        def _gen_activ_cb():
+            _call_agents_runner_sync("/report/activity")
+        threading.Thread(target=_gen_activ_cb, daemon=True).start()
 
     # BOS approval inline (Fix 3)
     elif data.startswith("bos_approve:") or data.startswith("bos_reject:"):
@@ -3008,9 +3120,15 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         pass
     await update.message.reply_text(
-        "brAIn Command Center v3.0 attivo.\n"
-        "Sonnet 4.5 — intelligente, contestuale, COO-level.\n"
-        "Vocali, foto, dashboard, /code. Scrivimi quello che vuoi."
+        _make_card(
+            "\U0001f9e0", "COMMAND CENTER", "v3.0 attivo",
+            [
+                "Sonnet 4.5 — intelligente, contestuale, COO-level.",
+                "Vocali, foto, report, /code — scrivimi quello che vuoi.",
+                "report costi | report attivit\u00e0 | /code <istruzioni>",
+            ]
+        ),
+        parse_mode="Markdown",
     )
     log_to_supabase("command_center", "start", f"uid={AUTHORIZED_USER_ID}", "v3.0 sonnet", "none")
 
@@ -3022,14 +3140,24 @@ async def handle_code_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     prompt = update.message.text.replace("/code", "", 1).strip()
     if not prompt:
         await update.message.reply_text(
-            "Scrivi /code seguito dalle istruzioni.\n"
-            "Esempio: /code aggiungi un endpoint /health che ritorna lo stato degli agenti")
+            _make_card("\U0001f4bb", "CODE AGENT", "uso",
+                       ["Scrivi /code seguito dalle istruzioni.",
+                        "Esempio: /code aggiungi endpoint /health"]),
+            parse_mode="Markdown",
+        )
         return
     if not GITHUB_TOKEN:
-        await update.message.reply_text("GITHUB_TOKEN non configurato.")
+        await update.message.reply_text(
+            _make_card("\u274c", "CODE AGENT", "errore", ["GITHUB\\_TOKEN non configurato."]),
+            parse_mode="Markdown",
+        )
         return
 
-    await update.message.reply_text(f"Ci lavoro con Sonnet: {prompt[:100]}...")
+    await update.message.reply_text(
+        _make_card("\U0001f4bb", "CODE AGENT", "avviato",
+                   [f"Lavoro con Sonnet: {prompt[:80]}\u2026"]),
+        parse_mode="Markdown",
+    )
     chat_id = update.effective_chat.id
     loop = asyncio.get_event_loop()
     loop.run_in_executor(None, _run_code_agent_sync, chat_id, prompt)
@@ -3054,18 +3182,73 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if msg.strip().upper() == "STOP":
-        await update.message.reply_text("STOP ricevuto. Tutto fermo.")
+        await update.message.reply_text(
+            _make_card("\U0001f6d1", "STOP", "sistema brAIn", ["Tutto fermo. Nessuna operazione attiva."]),
+            parse_mode="Markdown",
+        )
         return
 
     lower_msg = msg.strip().lower()
+
+    # ---- FIX 2/3: ROUTING REPORT ON-DEMAND ----
+    _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
+    _REPORT_ACTIV_TRIGGERS = {"report attività", "attività", "report attivita", "attivita", "status", "stato sistema", "report activity", "activity"}
+    _REPORT_GENERIC_TRIGGERS = {"report", "report brAIn", "report brain", "dashboard"}
+
+    if lower_msg in _REPORT_COST_TRIGGERS:
+        await update.message.reply_text(
+            _make_card("\U0001f4b6", "REPORT COSTI", "in arrivo...", ["Generazione in corso\u2026"]),
+            parse_mode="Markdown",
+        )
+        def _gen_cost():
+            _call_agents_runner_sync("/report/cost")
+        threading.Thread(target=_gen_cost, daemon=True).start()
+        return
+
+    if lower_msg in _REPORT_ACTIV_TRIGGERS:
+        await update.message.reply_text(
+            _make_card("\u2699\ufe0f", "REPORT ATTIVIT\u00c0", "in arrivo...", ["Generazione in corso\u2026"]),
+            parse_mode="Markdown",
+        )
+        def _gen_activ():
+            _call_agents_runner_sync("/report/activity")
+        threading.Thread(target=_gen_activ, daemon=True).start()
+        return
+
+    if lower_msg in _REPORT_GENERIC_TRIGGERS:
+        sep = _SEP
+        card_text = (
+            f"\U0001f4ca *REPORT DISPONIBILI*\n{sep}\n"
+            f"Scegli quale report vuoi vedere:\n{sep}"
+        )
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "\U0001f4b6 Costi", "callback_data": "report_cost_ondemand"},
+                {"text": "\u2699\ufe0f Attivit\u00e0", "callback_data": "report_activ_ondemand"},
+            ]]
+        }
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            http_requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json={"chat_id": chat_id, "text": card_text, "reply_markup": reply_markup, "parse_mode": "Markdown"},
+                timeout=10,
+            )
+        return
 
     # ---- COMANDI CODA AZIONI ----
     if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
         n = count_pending_actions(chat_id)
         if n == 0:
-            await update.message.reply_text("Nessuna azione in coda.")
+            await update.message.reply_text(
+                _make_card("\U0001f4ec", "CODA AZIONI", "brAIn", ["Nessuna azione in coda."]),
+                parse_mode="Markdown",
+            )
         else:
-            await update.message.reply_text(f"{n} azioni in coda.")
+            await update.message.reply_text(
+                _make_card("\U0001f4ec", "CODA AZIONI", "brAIn", [f"{n} azioni in attesa di risposta."]),
+                parse_mode="Markdown",
+            )
             if chat_id not in _current_action:
                 send_next_action(chat_id)
         return
@@ -3073,13 +3256,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if lower_msg in ("vedi tutte le azioni", "lista azioni", "tutte le azioni", "mostra azioni"):
         actions = list_pending_actions(chat_id)
         if not actions:
-            await update.message.reply_text("Nessuna azione in coda.")
+            await update.message.reply_text(
+                _make_card("\U0001f4ec", "CODA AZIONI", "brAIn", ["Nessuna azione in coda."]),
+                parse_mode="Markdown",
+            )
         else:
-            lines = [f"AZIONI IN CODA ({len(actions)})"]
-            for i, a in enumerate(actions, 1):
-                score = a.get("priority_score", 0) or 0
-                lines.append(f"{i}. {a['title']} (score: {score:.1f})")
-            await update.message.reply_text("\n".join(lines))
+            body = [f"{i}. {a['title']} (score: {(a.get('priority_score') or 0):.1f})" for i, a in enumerate(actions, 1)]
+            await update.message.reply_text(
+                _make_card("\U0001f4ec", f"AZIONI IN CODA", f"{len(actions)} totali", body),
+                parse_mode="Markdown",
+            )
         return
 
     if lower_msg in ("salta", "salta questa", "salta questa azione", "skip"):
@@ -3088,19 +3274,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             complete_action(action["id"], "skipped")
             remaining = count_pending_actions(chat_id)
             if remaining > 0:
-                await update.message.reply_text("Azione saltata.")
+                await update.message.reply_text(
+                    _make_card("\u23ed\ufe0f", "AZIONE SALTATA", "brAIn", [f"Rimanenti: {remaining}"]),
+                    parse_mode="Markdown",
+                )
                 send_next_action(chat_id)
             else:
-                await update.message.reply_text("Azione saltata. Nessuna altra azione in coda.")
+                await update.message.reply_text(
+                    _make_card("\u23ed\ufe0f", "AZIONE SALTATA", "brAIn", ["Nessuna altra azione in coda."]),
+                    parse_mode="Markdown",
+                )
         else:
-            await update.message.reply_text("Nessuna azione attiva da saltare.")
+            await update.message.reply_text(
+                _make_card("\u2139\ufe0f", "NESSUNA AZIONE", "brAIn", ["Nessuna azione attiva da saltare."]),
+                parse_mode="Markdown",
+            )
         return
 
     if lower_msg in ("prossima azione", "prossima", "next"):
-        if send_next_action(chat_id):
-            pass  # send_next_action manda il messaggio
-        else:
-            await update.message.reply_text("Nessuna azione in coda.")
+        if not send_next_action(chat_id):
+            await update.message.reply_text(
+                _make_card("\U0001f4ec", "CODA AZIONI", "brAIn", ["Nessuna azione in coda."]),
+                parse_mode="Markdown",
+            )
         return
 
     # ---- RISPOSTA A AZIONE IN CORSO ----
@@ -3115,13 +3311,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_id in pending_deploys:
         if lower_msg in ("si", "sì", "ok", "vai", "yes", "deploy", "builda", "deploya"):
             deploy_info = pending_deploys.pop(chat_id)
-            await update.message.reply_text("Avvio build e deploy...")
+            await update.message.reply_text(
+                _make_card("\U0001f680", "DEPLOY AVVIATO", "brAIn", ["Build e deploy in corso\u2026"]),
+                parse_mode="Markdown",
+            )
             loop = asyncio.get_event_loop()
             loop.run_in_executor(None, _trigger_build_deploy_sync, chat_id, deploy_info)
             return
         elif lower_msg in ("no", "annulla", "stop", "cancel"):
             pending_deploys.pop(chat_id)
-            await update.message.reply_text("Deploy annullato. Il codice resta su GitHub.")
+            await update.message.reply_text(
+                _make_card("\u274c", "DEPLOY ANNULLATO", "brAIn", ["Il codice resta su GitHub."]),
+                parse_mode="Markdown",
+            )
             return
 
     await update.message.chat.send_action("typing")
@@ -3224,13 +3426,11 @@ async def handle_alert(request):
         if not message:
             return web.Response(text="Missing message", status=400)
 
-        prefix = {
-            "critical": "ALERT CRITICO",
-            "warning": "ATTENZIONE",
-            "info": "INFO",
-        }.get(level, "NOTIFICA")
-
-        text = f"[{prefix}] da {source}:\n{message}"
+        # FIX 4: formato card per alert
+        level_emoji = {"critical": "\U0001f6a8", "warning": "\u26a0\ufe0f", "info": "\u2139\ufe0f"}.get(level, "\U0001f514")
+        level_title = {"critical": "ALERT CRITICO", "warning": "ATTENZIONE", "info": "INFO"}.get(level, "NOTIFICA")
+        body_lines = [line for line in message.split("\n") if line.strip()]
+        text = _make_card(level_emoji, level_title, source, body_lines)
 
         is_critical = (level == "critical")
         queue_or_send_notification(text, is_critical=is_critical)

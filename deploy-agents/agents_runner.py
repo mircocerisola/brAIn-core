@@ -3210,7 +3210,7 @@ def _get_period_cost(since_iso, until_iso=None):
     return total_eur, by_agent_eur
 
 
-def generate_cost_report():
+def generate_cost_report_v2():
     """Report costi ogni 4h (ore pari Europe/Rome): ultime 4h / oggi / 7g / mese + top spender."""
     logger.info("[REPORT] Generating cost report...")
     now_utc = datetime.now(timezone.utc)
@@ -3280,7 +3280,7 @@ def generate_cost_report():
     return {"status": "ok", "type": "cost", "date": data_it}
 
 
-def generate_activity_report():
+def generate_activity_report_v2():
     """Report attività ogni 4h (ore dispari Europe/Rome): scanner, pipeline, cantieri."""
     logger.info("[REPORT] Generating activity report...")
     now_utc = datetime.now(timezone.utc)
@@ -3428,11 +3428,6 @@ def update_kpi_daily():
     except Exception as e:
         logger.error(f"[KPI] Upsert fallito: {e}")
     return {"status": "ok", "date": today}
-
-
-def generate_daily_report():
-    """Alias backward-compat → chiama generate_cost_report."""
-    return generate_cost_report()
 
 
 # ============================================================
@@ -6234,24 +6229,24 @@ async def run_pipeline_endpoint(request):
     return web.json_response({"scan": scan_result, "pipeline": f"{len(saved_ids)} problemi processati"})
 
 async def run_daily_report_endpoint(request):
-    result = generate_cost_report()
+    result = generate_cost_report_v2()
     return web.json_response(result)
 
 async def run_cost_report_endpoint(request):
-    result = generate_cost_report()
+    result = generate_cost_report_v2()
     return web.json_response(result)
 
 async def run_activity_report_endpoint(request):
-    result = generate_activity_report()
+    result = generate_activity_report_v2()
     return web.json_response(result)
 
 async def run_auto_report_endpoint(request):
     """Ore pari Europe/Rome → cost report, ore dispari → activity report."""
     hour = datetime.now(_get_rome_tz()).hour
     if hour % 4 == 0:
-        result = generate_cost_report()
+        result = generate_cost_report_v2()
     else:
-        result = generate_activity_report()
+        result = generate_activity_report_v2()
     return web.json_response(result)
 
 async def run_kpi_update_endpoint(request):
