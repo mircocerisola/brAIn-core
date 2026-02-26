@@ -6114,15 +6114,15 @@ Genera in JSON:
 {chr(10).join(f"| {c.get('name','')} | {c.get('strengths','')} | {c.get('weaknesses','')} | {c.get('price','')} |" for c in competitors)}
 """
 
+    _obj_lines = "".join(f"**Obiezione {i+1}:** {o.get('objection','')}  \n**Risposta:** {o.get('response','')}\n\n" for i, o in enumerate(objections))
     objections_md = f"""# Objection Handler — {name}
 
-{chr(10).join(f"**Obiezione {i+1}:** {o.get('objection','')}  \\n**Risposta:** {o.get('response','')}\\n" for i, o in enumerate(objections))}
-"""
+{_obj_lines}"""
 
+    _pricing_lines = "".join(f"## {t.get('name','')} — {t.get('price','')}\n**Target:** {t.get('target','')}\n**Features:** {', '.join(t.get('features',[]))}\n\n" for t in pricing)
     pricing_md = f"""# Pricing Strategy — {name}
 
-{chr(10).join(f"## {t.get('name','')} — {t.get('price','')}\\n**Target:** {t.get('target','')}\\n**Features:** {', '.join(t.get('features',[]))}\\n" for t in pricing)}
-"""
+{_pricing_lines}"""
 
     sales_deck_md = f"""# Sales Deck Outline — {name}
 
@@ -6277,10 +6277,11 @@ Genera JSON:
 {cnt_data.get('about_us', '')}
 """
 
+    _email_lines = "".join(f"### Email {i+1}: {e.get('subject','')}\n*Preview:* {e.get('preview','')}\n{e.get('body_summary','')}\n\n" for i, e in enumerate(emails))
     email_md = f"""# Email Sequences — {name}
 
 ## Onboarding (5 email)
-{chr(10).join(f"### Email {i+1}: {e.get('subject','')}\\n*Preview:* {e.get('preview','')}\\n{e.get('body_summary','')}\\n" for i, e in enumerate(emails))}
+{_email_lines}
 
 ## Cold Outreach Template
 {cnt_data.get('cold_outreach_template', '')}
@@ -6460,10 +6461,10 @@ Genera JSON:
 - **Giorno 61-90:** Scale canale migliore, A/B test, 200 lead
 """
 
+    _paid_lines = "".join(f"## {p.get('platform','')} ({p.get('budget_pct',0)}% budget)\n- Targeting: {p.get('targeting','')}\n- Formato: {p.get('ad_format','')}\n\n" for p in paid)
     paid_md = f"""# Paid Media Plan — {name}
 
-{chr(10).join(f"## {p.get('platform','')} ({p.get('budget_pct',0)}% budget)\\n- Targeting: {p.get('targeting','')}\\n- Formato: {p.get('ad_format','')}\\n" for p in paid)}
-"""
+{_paid_lines}"""
 
     funnel_md = f"""# Funnel Map — {name}
 
@@ -6602,16 +6603,16 @@ Genera JSON:
     hashtags = soc_data.get("hashtag_sets", {})
     launch_posts = soc_data.get("launch_posts", [])
 
+    _soc_channel_lines = "".join(f"### {c.get('channel','')}\n- Motivazione: {c.get('reason','')}\n- Frequenza: {c.get('frequency','')}\n- Tono: {c.get('tone','')}\n\n" for c in channels)
     social_strategy_md = f"""# Social Strategy — {name}
 
 ## Canali Selezionati
-{chr(10).join(f"### {c.get('channel','')}\\n- Motivazione: {c.get('reason','')}\\n- Frequenza: {c.get('frequency','')}\\n- Tono: {c.get('tone','')}\\n" for c in channels)}
-"""
+{_soc_channel_lines}"""
 
+    _tmpl_lines = "".join(f"## Template {i+1} — {t.get('channel','')} ({t.get('type','')})\n```\n{t.get('template','')}\n```\n_Note visual: {t.get('visual_note','')}_\n\n" for i, t in enumerate(templates))
     templates_md = f"""# Content Templates — {name}
 
-{chr(10).join(f"## Template {i+1} — {t.get('channel','')} ({t.get('type','')})\\n```\\n{t.get('template','')}\\n```\\n_Note visual: {t.get('visual_note','')}_\\n" for i, t in enumerate(templates))}
-"""
+{_tmpl_lines}"""
 
     hashtag_md = f"""# Hashtag Strategy — {name}
 
@@ -6640,10 +6641,10 @@ Genera JSON:
 - Tag in post se usano il prodotto
 """
 
+    _post_lines = "".join(f"## Post {i+1} — {p.get('channel','')}\n{p.get('text','')}\n_Visual: {p.get('visual_note','')}_\n\n" for i, p in enumerate(launch_posts))
     launch_posts_md = f"""# Launch Posts — {name}
 
-{chr(10).join(f"## Post {i+1} — {p.get('channel','')}\\n{p.get('text','')}\\n_Visual: {p.get('visual_note','')}_\\n" for i, p in enumerate(launch_posts))}
-"""
+{_post_lines}"""
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     if github_repo:
@@ -6739,6 +6740,7 @@ Genera JSON:
     cost = (tokens_in * 0.8 + tokens_out * 4.0) / 1_000_000
 
     media_targets = pr_data.get("media_targets", [])
+    _press_faq_lines = "".join(f"**Q:** {fq.get('q','')}  \n**A:** {fq.get('a','')}\n\n" for fq in pr_data.get('media_faq', []))
 
     press_kit_md = f"""# Press Kit — {name}
 
@@ -6755,7 +6757,7 @@ Genera JSON:
 _{pr_data.get('founder_quote', '')}_
 
 ## FAQ Media
-{chr(10).join(f"**Q:** {f.get('q','')}  \\n**A:** {f.get('a','')}\\n" for f in pr_data.get('media_faq', []))}
+{_press_faq_lines}
 """
 
     media_list_md = f"""# Media List — {name}
@@ -6892,14 +6894,14 @@ Genera JSON:
 
     onboarding_steps = cm_data.get("onboarding_steps", [])
 
+    _onb_steps_lines = "".join(f"### Giorno {s.get('day',0)}\n**Azione:** {s.get('action','')}\n**Goal:** {s.get('goal','')}\n**Metrica:** {s.get('metric','')}\n\n" for s in onboarding_steps)
     onboarding_md = f"""# Onboarding Journey — {name}
 
 ## Aha Moment
 _{cm_data.get('aha_moment', '')}_
 
 ## Step-by-Step
-{chr(10).join(f"### Giorno {s.get('day',0)}\\n**Azione:** {s.get('action','')}\\n**Goal:** {s.get('goal','')}\\n**Metrica:** {s.get('metric','')}\\n" for s in onboarding_steps)}
-"""
+{_onb_steps_lines}"""
 
     retention_md = f"""# Retention Playbook — {name}
 
