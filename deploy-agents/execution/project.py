@@ -135,6 +135,74 @@ def _send_to_topic(group_id, topic_id, text, reply_markup=None):
         logger.error(f"[TG_TOPIC] {e}")
 
 
+# Mappa tipo notifica → chiave org_config del topic Chief competente
+_NOTIF_TYPE_TO_CHIEF_KEY = {
+    "bos": "chief_topic_cso",
+    "spec": "chief_topic_cso",
+    "legal": "chief_topic_clo",
+    "smoke": "chief_topic_coo",
+    "build": "chief_topic_coo",
+    "finance": "chief_topic_cfo",
+    "security": "chief_topic_cto",
+    "general": "chief_topic_coo",
+}
+
+
+def get_chief_topic_id(notif_type="general"):
+    """Ritorna topic_id del topic Chief competente per questo tipo di notifica."""
+    cfg_key = _NOTIF_TYPE_TO_CHIEF_KEY.get(notif_type, "chief_topic_coo")
+    try:
+        r = supabase.table("org_config").select("value").eq("key", cfg_key).execute()
+        if r.data:
+            val = r.data[0]["value"]
+            if isinstance(val, (int, float)):
+                return int(val)
+            v = str(val).strip()
+            return int(v) if v.lstrip("-").isdigit() else None
+    except Exception as e:
+        logger.warning(f"[CHIEF_TOPIC] {e}")
+    return None
+
+
+def send_project_notification(project_id, message, buttons=None, notif_type="general"):
+    """Invia notifica nel topic cantiere (se esiste) o nel topic Chief competente. Mai chat diretta."""
+    group_id = _get_telegram_group_id()
+    if not group_id:
+        return
+    topic_id = None
+    # 1. Topic cantiere del progetto (se già creato)
+    if project_id:
+        try:
+            r = supabase.table("projects").select("topic_id").eq("id", project_id).execute()
+            if r.data:
+                topic_id = r.data[0].get("topic_id")
+        except Exception:
+            pass
+    # 2. Fallback: topic Chief competente
+    if not topic_id:
+        topic_id = get_chief_topic_id(notif_type)
+    if topic_id:
+        _send_to_topic(group_id, topic_id, message, reply_markup=buttons)
+    else:
+        logger.warning(f"[NOTIF] Nessun topic per project_id={project_id} notif_type={notif_type}")
+
+
+def _delete_forum_topic(group_id, topic_id):
+    """Elimina un Forum Topic dal gruppo Telegram. Ritorna True se OK."""
+    if not TELEGRAM_BOT_TOKEN or not group_id or not topic_id:
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteForumTopic",
+            json={"chat_id": group_id, "message_thread_id": topic_id},
+            timeout=15,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        logger.warning(f"[DELETE_TOPIC] {e}")
+        return False
+
+
 def _slugify(text, max_len=20):
     """Genera slug da testo: lowercase, trattini, max_len chars."""
     slug = text.lower().strip()

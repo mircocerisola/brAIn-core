@@ -608,7 +608,7 @@ async def run_memory_cleanup_endpoint(request):
 
 
 async def run_resend_spec_endpoint(request):
-    """POST /admin/resend-spec — {solution_id} — rimanda la SPEC a Mirco via chat diretta."""
+    """POST /admin/resend-spec — {solution_id} — rimanda la SPEC nel topic #strategy."""
     import os as _os
     import requests as _requests
     try:
@@ -623,9 +623,22 @@ async def run_resend_spec_endpoint(request):
             return web.json_response({"error": f"nessun progetto per solution_id={solution_id}"}, status=404)
         project = r.data[0]
         project_id = project["id"]
-        # Recupera chat_id Mirco
-        rc = supabase.table("org_config").select("value").eq("key", "telegram_user_id").execute()
-        mirco_chat_id = int(rc.data[0]["value"]) if rc.data else 8307106544
+
+        # Leggi group_id e strategy_topic_id da org_config
+        def _get_cfg(key):
+            rr = supabase.table("org_config").select("value").eq("key", key).execute()
+            if rr.data:
+                v = rr.data[0]["value"]
+                if isinstance(v, (int, float)):
+                    return int(v)
+                sv = str(v).strip()
+                return int(sv) if sv.lstrip("-").isdigit() else None
+            return None
+
+        group_id = _get_cfg("telegram_group_id")
+        strategy_topic_id = _get_cfg("chief_topic_cso")
+        mirco_chat_id = _get_cfg("telegram_user_id") or 8307106544
+
         # Prepara messaggio
         spec_human = project.get("spec_human_md") or ""
         name = project.get("name", f"Progetto {project_id}")
@@ -646,9 +659,21 @@ async def run_resend_spec_endpoint(request):
         token = _os.getenv("TELEGRAM_BOT_TOKEN", "")
         if not token:
             return web.json_response({"error": "TELEGRAM_BOT_TOKEN non configurato"}, status=500)
+
+        # Invia al topic #strategy (o fallback DM Mirco)
+        if group_id and strategy_topic_id:
+            tg_payload = {
+                "chat_id": group_id,
+                "message_thread_id": strategy_topic_id,
+                "text": msg[:4000],
+                "reply_markup": reply_markup,
+            }
+        else:
+            tg_payload = {"chat_id": mirco_chat_id, "text": msg[:4000], "reply_markup": reply_markup}
+
         resp = _requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": mirco_chat_id, "text": msg[:4000], "reply_markup": reply_markup},
+            json=tg_payload,
             timeout=15,
         )
 
@@ -671,6 +696,7 @@ async def run_resend_spec_endpoint(request):
             "project_name": name,
             "project_status": project.get("status"),
             "telegram_ok": resp.status_code == 200,
+            "sent_to": "strategy_topic" if (group_id and strategy_topic_id) else "direct_dm",
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -703,6 +729,98 @@ async def run_founder_pipeline_endpoint(request):
             "status": "ok",
             "triggered": triggered,
             "skipped": skipped,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cleanup_old_topics_endpoint(request):
+    """POST /admin/cleanup-old-topics — elimina topic Forum e dati DB di cantieri obsoleti."""
+    import os as _os
+    import requests as _requests
+    try:
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+
+        token = _os.getenv("TELEGRAM_BOT_TOKEN", "")
+        deleted_topics = []
+        deleted_projects = []
+        errors = []
+
+        def _get_group():
+            rr = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if rr.data:
+                v = rr.data[0]["value"]
+                if isinstance(v, (int, float)):
+                    return int(v)
+                sv = str(v).strip()
+                return int(sv) if sv.lstrip("-").isdigit() else None
+            return None
+
+        group_id = _get_group()
+
+        # Trova progetti da eliminare
+        slugs_filter = body.get("slugs", [])
+        if slugs_filter:
+            projects_r = supabase.table("projects").select("id,name,slug,topic_id,bos_id").in_("slug", slugs_filter).execute()
+            projects_list = projects_r.data or []
+        else:
+            all_p = supabase.table("projects").select("id,name,slug,topic_id,bos_id").execute()
+            OBSOLETE_KEYWORDS = ("ristorante", "prenotazioni", "test", "demo", "sandbox")
+            projects_list = [
+                p for p in (all_p.data or [])
+                if any(kw in (p.get("slug") or "").lower() or kw in (p.get("name") or "").lower()
+                       for kw in OBSOLETE_KEYWORDS)
+            ]
+
+        for proj in projects_list:
+            proj_id = proj["id"]
+            topic_id = proj.get("topic_id")
+
+            # Elimina Forum Topic Telegram
+            if token and group_id and topic_id:
+                try:
+                    r = _requests.post(
+                        f"https://api.telegram.org/bot{token}/deleteForumTopic",
+                        json={"chat_id": group_id, "message_thread_id": topic_id},
+                        timeout=10,
+                    )
+                    if r.status_code == 200:
+                        deleted_topics.append({"project_id": proj_id, "topic_id": topic_id})
+                    else:
+                        errors.append({"project_id": proj_id, "topic_id": topic_id, "error": r.text[:200]})
+                except Exception as _te:
+                    errors.append({"project_id": proj_id, "error": str(_te)})
+
+            # Pulisci action_queue per questo progetto
+            try:
+                supabase.table("action_queue").delete().eq("project_id", proj_id).execute()
+            except Exception:
+                pass
+
+            # Reset soluzione a 'proposed' per permettere retry
+            if proj.get("bos_id"):
+                try:
+                    supabase.table("solutions").update({"status": "proposed", "bos_approved": False}) \
+                        .eq("id", proj["bos_id"]).execute()
+                except Exception:
+                    pass
+
+            # Elimina progetto dal DB
+            try:
+                supabase.table("projects").delete().eq("id", proj_id).execute()
+                deleted_projects.append({"id": proj_id, "name": proj.get("name"), "slug": proj.get("slug")})
+            except Exception as _de:
+                errors.append({"project_id": proj_id, "error": f"DB delete: {_de}"})
+
+        return web.json_response({
+            "status": "ok",
+            "deleted_topics": deleted_topics,
+            "deleted_projects": deleted_projects,
+            "errors": errors,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

@@ -91,6 +91,56 @@ USD_TO_EUR = 0.92
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 _chat_history_available = None  # None=not checked yet, True/False
 
+# ---- TOPIC ROUTING HELPERS ----
+_cached_group_id = None
+_cached_ops_topic_id = None
+_cached_strategy_topic_id = None
+
+
+def _get_group_id_from_config():
+    """Legge telegram_group_id da org_config con cache in-process."""
+    global _cached_group_id
+    if _cached_group_id:
+        return _cached_group_id
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+        if r.data:
+            val = r.data[0]["value"]
+            _cached_group_id = int(val) if isinstance(val, (int, float)) else json.loads(str(val))
+    except Exception:
+        pass
+    return _cached_group_id
+
+
+def _get_ops_topic_id():
+    """Legge chief_topic_coo (#operations) da org_config con cache."""
+    global _cached_ops_topic_id
+    if _cached_ops_topic_id:
+        return _cached_ops_topic_id
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "chief_topic_coo").execute()
+        if r.data:
+            v = str(r.data[0]["value"]).strip()
+            _cached_ops_topic_id = int(v) if v.lstrip("-").isdigit() else None
+    except Exception:
+        pass
+    return _cached_ops_topic_id
+
+
+def _get_strategy_topic_id():
+    """Legge chief_topic_cso (#strategy) da org_config con cache."""
+    global _cached_strategy_topic_id
+    if _cached_strategy_topic_id:
+        return _cached_strategy_topic_id
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "chief_topic_cso").execute()
+        if r.data:
+            v = str(r.data[0]["value"]).strip()
+            _cached_strategy_topic_id = int(v) if v.lstrip("-").isdigit() else None
+    except Exception:
+        pass
+    return _cached_strategy_topic_id
+
 
 # ---- ACTIVE SESSION ----
 
@@ -1263,7 +1313,42 @@ def send_next_action(chat_id):
     pending = count_pending_actions(user_id)
     msg = format_action_message(action, pending)
     _current_action[chat_id] = action
-    _send_notification_now(msg)
+
+    # BOS → #strategy con inline keyboard; altri → #operations
+    if action.get("action_type") == "approve_bos":
+        _payload_d = action.get("payload") or {}
+        if isinstance(_payload_d, str):
+            try:
+                _payload_d = json.loads(_payload_d)
+            except Exception:
+                _payload_d = {}
+        _sol_id = _payload_d.get("solution_id", "")
+        _act_id = action.get("id")
+        _bos_markup = {
+            "inline_keyboard": [[
+                {"text": "\u2705 Avvia", "callback_data": f"bos_approve:{_act_id}:{_sol_id}"},
+                {"text": "\u274c Scarta", "callback_data": f"bos_reject:{_act_id}"},
+                {"text": "\U0001f50d Dettagli", "callback_data": f"bos_details:{_act_id}"},
+            ]]
+        }
+        _tok = os.getenv("TELEGRAM_BOT_TOKEN")
+        _grp = _get_group_id_from_config()
+        _strat = _get_strategy_topic_id()
+        if _tok and _grp and _strat:
+            try:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_tok}/sendMessage",
+                    json={"chat_id": _grp, "message_thread_id": _strat,
+                          "text": msg, "reply_markup": _bos_markup, "parse_mode": "Markdown"},
+                    timeout=10,
+                )
+            except Exception as _ne:
+                logger.warning(f"[BOS_NOTIFY] {_ne}")
+                _send_notification_now(msg)
+        else:
+            _send_notification_now(msg)
+    else:
+        _send_notification_now(msg)
 
     # Salva active_session per BOS review
     try:
@@ -1923,24 +2008,29 @@ def queue_or_send_notification(message, is_critical=False):
 
 
 def _send_notification_now(message, parse_mode="Markdown"):
-    """Invia notifica Telegram immediatamente. Usa formato card se non già formattato."""
+    """Invia notifica in #operations (mai chat diretta). Fallback su AUTHORIZED_USER_ID."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = AUTHORIZED_USER_ID
-    if not token or not chat_id:
+    if not token:
         return
-    # Se non è già una card (non contiene ━), wrappa in card
+    # Se non è già una card, wrappa
     if _SEP not in message and not message.startswith("📊") and not message.startswith("💶") and not message.startswith("⚙️"):
-        emoji = "\U0001f514"  # 🔔
+        emoji = "\U0001f514"
         first_line = message.split("\n")[0][:80]
         rest_lines = message.split("\n")[1:]
         body = rest_lines if rest_lines else []
         message = _make_card(emoji, "NOTIFICA brAIn", first_line, body) if body else f"\U0001f514 *{first_line}*"
+    group_id = _get_group_id_from_config()
+    ops_topic = _get_ops_topic_id()
+    payload = {"text": message, "parse_mode": parse_mode}
+    if group_id and ops_topic:
+        payload["chat_id"] = group_id
+        payload["message_thread_id"] = ops_topic
+    elif AUTHORIZED_USER_ID:
+        payload["chat_id"] = AUTHORIZED_USER_ID
+    else:
+        return
     try:
-        http_requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": message, "parse_mode": parse_mode},
-            timeout=10,
-        )
+        http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         logger.error(f"[NOTIFY] {e}")
 
@@ -2237,6 +2327,78 @@ def start_team_setup(project_id, chat_id, thread_id=None):
         http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
     except Exception as e:
         logger.warning(f"[TEAM_SETUP] messaggio: {e}")
+
+
+def _create_cantiere_and_setup(project_id):
+    """FIX 3: Crea Forum Topic cantiere, salva topic_id, invia welcome card, avvia team_setup."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    group_id = _get_group_id_from_config()
+    if not token or not group_id:
+        logger.warning(f"[CANTIERE] Token o group_id mancanti per project {project_id}")
+        if AUTHORIZED_USER_ID:
+            start_team_setup(project_id, AUTHORIZED_USER_ID, None)
+        return
+    try:
+        r = supabase.table("projects").select("name,status").eq("id", project_id).execute()
+        if not r.data:
+            return
+        name = r.data[0].get("name", f"Progetto {project_id}")
+    except Exception as e:
+        logger.error(f"[CANTIERE] DB read: {e}")
+        return
+
+    # Crea Forum Topic nel gruppo
+    cantiere_topic_id = None
+    try:
+        resp = http_requests.post(
+            f"https://api.telegram.org/bot{token}/createForumTopic",
+            json={"chat_id": group_id, "name": f"\U0001f3d7\ufe0f {name}", "icon_color": 7322096},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            cantiere_topic_id = resp.json().get("result", {}).get("message_thread_id")
+        else:
+            logger.warning(f"[CANTIERE] createForumTopic -> {resp.status_code}: {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"[CANTIERE] createForumTopic: {e}")
+
+    if not cantiere_topic_id:
+        logger.warning(f"[CANTIERE] topic non creato per project {project_id}, fallback DM")
+        if AUTHORIZED_USER_ID:
+            start_team_setup(project_id, AUTHORIZED_USER_ID, None)
+        return
+
+    # Salva topic_id in DB
+    try:
+        supabase.table("projects").update({"topic_id": cantiere_topic_id}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[CANTIERE] DB update topic_id: {e}")
+
+    # Welcome card nel cantiere
+    welcome_msg = _make_card(
+        "\U0001f3d7\ufe0f", "CANTIERE APERTO", name,
+        [
+            "SPEC validata! Cantiere attivo.",
+            "Tutte le notifiche del progetto arriveranno qui.",
+            "Prossimo step: team setup e avvio build.",
+        ],
+    )
+    try:
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={
+                "chat_id": group_id,
+                "message_thread_id": cantiere_topic_id,
+                "text": welcome_msg,
+                "parse_mode": "Markdown",
+            },
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning(f"[CANTIERE] welcome card: {e}")
+
+    # Avvia team setup nel cantiere
+    start_team_setup(project_id, group_id, cantiere_topic_id)
 
 
 def trigger_build_start(project_id, chat_id, thread_id=None):
@@ -2666,7 +2828,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         project_id = int(data.split(":")[1])
         await query.answer("SPEC validata!")
         threading.Thread(target=_clear_active_session, args=(chat_id,), daemon=True).start()
-        threading.Thread(target=start_team_setup, args=(project_id, chat_id, thread_id), daemon=True).start()
+        threading.Thread(target=_create_cantiere_and_setup, args=(project_id,), daemon=True).start()
 
     elif data.startswith("spec_full:"):
         # MACRO-TASK 4: invia SPEC_CODE.md (versione tecnica completa)
@@ -2993,11 +3155,12 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             _call_agents_runner_sync("/marketing/run", {"project_id": project_id, "phase": "retention"})
         threading.Thread(target=_mkt_opt_cb, daemon=True).start()
 
-    # BOS approval inline (Fix 3)
+    # BOS approval inline
     elif data.startswith("bos_approve:") or data.startswith("bos_reject:"):
         parts = data.split(":")
         approved = data.startswith("bos_approve:")
-        action_db_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+        # formato: bos_approve:{action_id}:{sol_id} o bos_reject:{action_id}
+        action_db_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         await query.answer("Approvato!" if approved else "Rifiutato!")
 
         try:
@@ -3021,30 +3184,39 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 result_text = _execute_action("approve_bos", payload, approved)
                 token = os.getenv("TELEGRAM_BOT_TOKEN")
                 if token and result_text:
+                    # Risposta nello stesso topic dove era il BOS (chat_id=group, thread_id=strategy)
+                    resp_payload = {"chat_id": chat_id, "text": result_text, "parse_mode": "Markdown"}
+                    if thread_id:
+                        resp_payload["message_thread_id"] = thread_id
                     http_requests.post(
                         f"https://api.telegram.org/bot{token}/sendMessage",
-                        json={"chat_id": chat_id, "text": result_text},
+                        json=resp_payload,
                         timeout=10,
                     )
         except Exception as e:
             logger.error(f"[BOS_CALLBACK] {e}")
 
-    elif data.startswith("bos_detail:"):
-        action_db_id = int(data.split(":")[1])
+    elif data.startswith("bos_details:"):
+        action_db_id = int(data.split(":")[1]) if data.split(":")[1].isdigit() else None
         await query.answer()
         try:
-            ar = supabase.table(ACTION_QUEUE_TABLE).select("*").eq("id", action_db_id).execute()
-            action = ar.data[0] if ar.data else None
+            action = None
+            if action_db_id:
+                ar = supabase.table(ACTION_QUEUE_TABLE).select("*").eq("id", action_db_id).execute()
+                action = ar.data[0] if ar.data else None
             token = os.getenv("TELEGRAM_BOT_TOKEN")
             if action and token:
                 detail = action.get("description", "Nessun dettaglio.")
+                resp_payload = {"chat_id": chat_id, "text": detail[:4000]}
+                if thread_id:
+                    resp_payload["message_thread_id"] = thread_id
                 http_requests.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": detail[:4000]},
+                    json=resp_payload,
                     timeout=10,
                 )
         except Exception as e:
-            logger.error(f"[BOS_DETAIL] {e}")
+            logger.error(f"[BOS_DETAILS] {e}")
 
     # Validation callbacks SCALE/PIVOT/KILL (Fix 3)
     elif data.startswith("val_proceed:"):

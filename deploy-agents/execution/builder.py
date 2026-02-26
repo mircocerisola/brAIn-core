@@ -11,7 +11,8 @@ from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, e
 from execution.project import (_github_project_api, _commit_to_project_repo,
     _get_telegram_group_id, _create_forum_topic, _send_to_topic, _slugify,
     _create_supabase_project, _save_gcp_secret, _create_github_repo,
-    SPEC_SYSTEM_PROMPT_AR, SPEC_HUMAN_SYSTEM_PROMPT, get_project_db)
+    SPEC_SYSTEM_PROMPT_AR, SPEC_HUMAN_SYSTEM_PROMPT, get_project_db,
+    send_project_notification, get_chief_topic_id)
 try:
     from intelligence.memory import update_project_episode as _update_project_episode
 except Exception:
@@ -712,8 +713,8 @@ def enqueue_spec_review_action(project_id):
         ]
     }
 
-    group_id = _get_telegram_group_id()
-    _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+    # Invia SPEC al topic Chief #strategy (topic cantiere non esiste ancora prima di spec_validate)
+    send_project_notification(project_id, msg, buttons=reply_markup, notif_type="spec")
 
     # Salva active_session su Supabase per contesto persistente
     _as_user_id = chat_id or get_telegram_chat_id()
@@ -824,29 +825,15 @@ def init_project(solution_id):
     else:
         logger.warning(f"[INIT] GitHub repo creation fallita, procedo senza")
 
-    # 5. Crea Forum Topic
-    group_id = _get_telegram_group_id()
+    # 5. Forum Topic: NON creato qui — verrà creato da command-center dopo spec_validate
     topic_id = None
-    if group_id:
-        topic_id = _create_forum_topic(group_id, name)
-        if topic_id:
-            try:
-                supabase.table("projects").update({"topic_id": topic_id}).eq("id", project_id).execute()
-            except:
-                pass
-            logger.info(f"[INIT] Forum Topic creato: topic_id={topic_id}")
-            # Messaggio di benvenuto nel topic
-            _send_to_topic(group_id, topic_id,
-                           f"\U0001f680 Progetto '{name}' avviato!\nBOS score: {bos_score:.2f}\nGenerazione SPEC in corso...")
-    else:
-        logger.info("[INIT] telegram_group_id non configurato, Forum Topic non creato")
+    logger.info("[INIT] Forum Topic: verrà creato automaticamente dopo spec_validate")
 
     # 6. Genera SPEC
     spec_result = run_spec_generator(project_id)
     if spec_result.get("status") != "ok":
         logger.error(f"[INIT] Spec generation fallita: {spec_result}")
-        if group_id and topic_id:
-            _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Errore generazione SPEC: {spec_result.get('error')}")
+        send_project_notification(project_id, f"\u26a0\ufe0f Errore generazione SPEC: {spec_result.get('error')}", notif_type="build")
         return {"status": "error", "error": "spec generation failed", "detail": spec_result}
 
     logger.info(f"[INIT] SPEC generata: {spec_result.get('spec_length')} chars")
@@ -855,8 +842,6 @@ def init_project(solution_id):
     lp_result = run_landing_page_generator(project_id)
     if lp_result.get("status") == "ok":
         logger.info(f"[INIT] Landing page generata: {lp_result.get('html_length')} chars")
-        if group_id and topic_id:
-            _send_to_topic(group_id, topic_id, "Landing page HTML generata. Pronta per deploy quando vuoi.")
     else:
         logger.warning(f"[INIT] Landing page generation fallita (non critico): {lp_result}")
 
@@ -876,7 +861,6 @@ def init_project(solution_id):
         "project_id": project_id,
         "slug": slug,
         "github_repo": github_repo,
-        "topic_id": topic_id,
     }
 
 
