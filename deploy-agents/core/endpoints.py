@@ -651,6 +651,20 @@ async def run_resend_spec_endpoint(request):
             json={"chat_id": mirco_chat_id, "text": msg[:4000], "reply_markup": reply_markup},
             timeout=15,
         )
+
+        # Salva active_session su Supabase per contesto persistente
+        from datetime import timezone as _tz
+        try:
+            supabase.table("active_session").upsert({
+                "telegram_user_id": int(mirco_chat_id),
+                "context_type": "spec_review",
+                "project_id": project_id,
+                "solution_id": None,
+                "updated_at": datetime.now(_tz.utc).isoformat(),
+            }, on_conflict="telegram_user_id").execute()
+        except Exception as _ae:
+            logger.warning(f"[ACTIVE_SESSION] save resend-spec: {_ae}")
+
         return web.json_response({
             "status": "ok",
             "project_id": project_id,

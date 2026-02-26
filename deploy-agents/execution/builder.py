@@ -715,6 +715,20 @@ def enqueue_spec_review_action(project_id):
     group_id = _get_telegram_group_id()
     _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
 
+    # Salva active_session su Supabase per contesto persistente
+    _as_user_id = chat_id or get_telegram_chat_id()
+    if _as_user_id:
+        try:
+            supabase.table("active_session").upsert({
+                "telegram_user_id": int(_as_user_id),
+                "context_type": "spec_review",
+                "project_id": project_id,
+                "solution_id": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="telegram_user_id").execute()
+        except Exception as _e:
+            logger.warning(f"[ACTIVE_SESSION] save spec_review: {_e}")
+
     logger.info(f"[SPEC_REVIEW] Enqueued action_id={action_db_id} per project={project_id}")
 
 

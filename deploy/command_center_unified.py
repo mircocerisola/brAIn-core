@@ -91,6 +91,47 @@ USD_TO_EUR = 0.92
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 _chat_history_available = None  # None=not checked yet, True/False
 
+
+# ---- ACTIVE SESSION ----
+
+def _save_active_session(user_id, context_type, project_id=None, solution_id=None):
+    """Salva/aggiorna sessione attiva su Supabase (upsert per user_id)."""
+    try:
+        from datetime import timezone
+        data = {
+            "telegram_user_id": int(user_id),
+            "context_type": context_type,
+            "project_id": project_id,
+            "solution_id": solution_id,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        supabase.table("active_session").upsert(data, on_conflict="telegram_user_id").execute()
+    except Exception as e:
+        logger.warning(f"[ACTIVE_SESSION] save: {e}")
+
+
+def _load_active_session(user_id):
+    """Carica sessione attiva se aggiornata negli ultimi 30 minuti. Ritorna dict o None."""
+    try:
+        from datetime import timezone, timedelta
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        r = supabase.table("active_session").select("*") \
+            .eq("telegram_user_id", int(user_id)) \
+            .gt("updated_at", cutoff) \
+            .execute()
+        return r.data[0] if r.data else None
+    except Exception as e:
+        logger.warning(f"[ACTIVE_SESSION] load: {e}")
+        return None
+
+
+def _clear_active_session(user_id):
+    """Cancella sessione attiva."""
+    try:
+        supabase.table("active_session").delete().eq("telegram_user_id", int(user_id)).execute()
+    except Exception as e:
+        logger.warning(f"[ACTIVE_SESSION] clear: {e}")
+
 # Buffer messaggi per Forum Topic — usato per contesto risposte brevi + episodic memory trigger
 _topic_recent_msgs = {}  # "chat_id:thread_id" -> [{"role": "user/bot", "text": str}, ...]
 _TOPIC_BUFFER_SIZE = 10
@@ -291,7 +332,7 @@ def transcribe_voice(audio_bytes):
 
 # ---- SYSTEM PROMPT ----
 
-def build_system_prompt(chat_id=None, conversation_summary=None):
+def build_system_prompt(chat_id=None, conversation_summary=None, active_project_context=None):
     ctx = get_minimal_context()
     session = ""
     if chat_id and chat_id in _session_context:
@@ -311,6 +352,10 @@ def build_system_prompt(chat_id=None, conversation_summary=None):
     summary_section = ""
     if conversation_summary:
         summary_section = f"\nRIASSUNTO CONVERSAZIONI PRECEDENTI:\n{conversation_summary}\n"
+
+    active_section = ""
+    if active_project_context:
+        active_section = f"\nPROGETTO ATTIVO (non chiedere di che progetto si tratta — usa questo contesto):\n{active_project_context}\n"
 
     oggi = datetime.now().strftime("%d/%m/%Y")
 
@@ -423,7 +468,7 @@ Quando sei in un topic di Cantiere e Mirco risponde con una parola breve ("si", 
 - MAI interpretare una risposta breve come "ok lancio" se il contesto era una discussione tecnica
 - Il lancio richiede sempre un comando esplicito ("ok lanciamo", "lancia", "lanciamo")
 
-{ctx}{session}{summary_section}"""
+{ctx}{session}{summary_section}{active_section}"""
 
 
 def get_minimal_context():
@@ -1219,6 +1264,31 @@ def send_next_action(chat_id):
     msg = format_action_message(action, pending)
     _current_action[chat_id] = action
     _send_notification_now(msg)
+
+    # Salva active_session per BOS review
+    try:
+        _payload = action.get("payload") or {}
+        if isinstance(_payload, str):
+            import json as _j
+            try:
+                _payload = _j.loads(_payload)
+            except Exception:
+                _payload = {}
+        _sol_id = _payload.get("solution_id")
+        _proj_id = _payload.get("project_id")
+        if _sol_id or _proj_id:
+            threading.Thread(
+                target=_save_active_session,
+                args=(chat_id, action.get("action_type", "bos_review")),
+                kwargs={
+                    "project_id": int(_proj_id) if _proj_id else None,
+                    "solution_id": int(_sol_id) if _sol_id else None,
+                },
+                daemon=True,
+            ).start()
+    except Exception as _e:
+        logger.warning(f"[ACTIVE_SESSION] send_next_action save: {_e}")
+
     return True
 
 
@@ -1648,7 +1718,7 @@ def _update_session_context(chat_id, messages):
                                 pass
 
 
-def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
+def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None, active_project_context=None):
     start = time.time()
     cid = chat_id or "default"
 
@@ -1659,7 +1729,7 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None):
         # Carica contesto da DB (summary + ultimi 30 messaggi)
         summary_text, history_messages = _load_chat_context(cid)
 
-        system = build_system_prompt(chat_id=cid, conversation_summary=summary_text)
+        system = build_system_prompt(chat_id=cid, conversation_summary=summary_text, active_project_context=active_project_context)
 
         # Costruisci messaggi dalla storia DB
         messages = list(history_messages)
@@ -2595,6 +2665,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("spec_validate:"):
         project_id = int(data.split(":")[1])
         await query.answer("SPEC validata!")
+        threading.Thread(target=_clear_active_session, args=(chat_id,), daemon=True).start()
         threading.Thread(target=start_team_setup, args=(project_id, chat_id, thread_id), daemon=True).start()
 
     elif data.startswith("spec_full:"):
@@ -3457,6 +3528,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Traccia ultimo messaggio per notifiche intelligenti
     _last_mirco_message_time = time.time()
 
+    # ---- ACTIVE SESSION — carica contesto progetto attivo ----
+    _active_proj_ctx = None
+    try:
+        _sess = _load_active_session(chat_id)
+        if _sess:
+            _ctx_type = _sess.get("context_type", "")
+            _proj_id = _sess.get("project_id")
+            _sol_id = _sess.get("solution_id")
+            if _proj_id:
+                _pr = supabase.table("projects").select("name,status,spec_human_md").eq("id", _proj_id).execute()
+                if _pr.data:
+                    _p = _pr.data[0]
+                    _spec = (_p.get("spec_human_md") or "")[:500]
+                    _active_proj_ctx = (
+                        f"Contesto attivo: {_ctx_type}. "
+                        f"Progetto: {_p.get('name', '?')} (status: {_p.get('status', '?')}). "
+                        + (f"SPEC (prime 500 char): {_spec}" if _spec else "")
+                    )
+            elif _sol_id:
+                _sr = supabase.table("solutions").select("title,status,description").eq("id", _sol_id).execute()
+                if _sr.data:
+                    _s = _sr.data[0]
+                    _active_proj_ctx = (
+                        f"Contesto attivo: {_ctx_type}. "
+                        f"Soluzione BOS: {_s.get('title', '?')} (status: {_s.get('status', '?')}). "
+                        f"{(_s.get('description') or '')[:300]}"
+                    )
+    except Exception as _ae:
+        logger.warning(f"[ACTIVE_SESSION] load in handle_message: {_ae}")
+
     # ---- FORUM TOPIC ROUTING ----
     thread_id = update.message.message_thread_id if update.message else None
     if thread_id:
@@ -3760,7 +3861,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     await update.message.chat.send_action("typing")
-    reply = clean_reply(ask_claude(msg, chat_id=chat_id))
+    reply = clean_reply(ask_claude(msg, chat_id=chat_id, active_project_context=_active_proj_ctx))
     for i in range(0, len(reply), 4000):
         await update.message.reply_text(reply[i:i + 4000])
 
