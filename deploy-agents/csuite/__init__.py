@@ -70,6 +70,25 @@ def run_all_briefings():
     return results
 
 
+async def run_morning_reports():
+    """Report mattutino sequenziale: 7 Chief con 2 min di intervallo."""
+    import asyncio
+    order = ["strategy", "ops", "tech", "marketing", "finance", "legal", "people"]
+    results = {}
+    for i, domain in enumerate(order):
+        chief = _chiefs.get(domain)
+        if not chief:
+            continue
+        try:
+            text = chief.generate_brief_report()
+            results[domain] = {"chief": chief.name, "status": "ok" if text else "skipped"}
+        except Exception as e:
+            results[domain] = {"chief": domain, "status": "error", "error": str(e)}
+        if i < len(order) - 1:
+            await asyncio.sleep(120)
+    return results
+
+
 def run_all_anomaly_checks():
     """Controlla anomalie per tutti i Chief e notifica se trovate."""
     from core.utils import notify_telegram

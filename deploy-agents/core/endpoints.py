@@ -513,6 +513,16 @@ async def run_csuite_report_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_csuite_morning_report_endpoint(request):
+    """POST /csuite/morning-report — report mattutino sequenziale 7 Chief (2 min intervallo)"""
+    try:
+        from csuite import run_morning_reports
+        results = await run_morning_reports()
+        return web.json_response({"status": "ok", "results": results})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

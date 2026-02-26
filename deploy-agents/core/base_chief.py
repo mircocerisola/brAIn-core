@@ -706,13 +706,21 @@ class BaseChief(BaseAgent):
 
         ctx = "\n\n".join(ctx_parts) if ctx_parts else "Nessun dato significativo disponibile."
 
+        today_str = datetime.now(timezone.utc).strftime("%d %b").lstrip("0")
         prompt = (
-            f"Sei il {self.name} di brAIn. Genera un report di stato breve (max 8 righe, italiano).\n"
+            f"Sei il {self.name} di brAIn. Genera un report di stato breve (max 10 righe, italiano).\n"
             f"Dominio: {self.domain}\n"
+            f"Data: {today_str}\n"
             f"Dati disponibili:\n{ctx}\n\n"
-            "Formato: usa separatori \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501, emoji rilevanti, dati concreti. "
-            "Se non ci sono novit\u00e0, comunica lo stato attuale del dominio. "
-            "Zero fuffa. Vai al punto."
+            "FORMATO OBBLIGATORIO (Telegram, NO Markdown):\n"
+            f"- Prima riga: emoji + {self.name} + ' · ' + data (es: 📊 CFO · 26 feb)\n"
+            "- Separatore: ───────────  (ESATTAMENTE questo, 10 trattini Unicode)\n"
+            "- Sezioni: emoji + TITOLO MAIUSCOLO (es: 💰 COSTI)\n"
+            "- Dati concreti su righe separate con numeri reali\n"
+            "- Chiudi con lo stesso separatore ───────────\n"
+            "- VIETATO: ** grassetto **, ## titoli, ---- trattini ASCII, parole inglesi (tranne termini tecnici)\n"
+            "- Tutto in italiano. Zero fuffa. Vai al punto.\n"
+            "Se non ci sono novita, comunica lo stato attuale del dominio."
         )
 
         try:
