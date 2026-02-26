@@ -7,7 +7,7 @@ import json, time, re
 from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
-from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity
+from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity, get_pipeline_thresholds
 
 
 def run_action_queue_cleanup():

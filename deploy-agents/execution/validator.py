@@ -8,7 +8,28 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
-from execution.project import get_project_db, _send_to_topic, _commit_to_project_repo
+from execution.project import (get_project_db, _send_to_topic, _commit_to_project_repo,
+    _get_telegram_group_id, _github_project_api, SPEC_SYSTEM_PROMPT_AR)
+from execution.builder import FASE_DESCRIPTIONS, enqueue_spec_review_action
+
+
+VALIDATION_SYSTEM_PROMPT_AR = """Sei il Validation Agent di brAIn. Analizza le metriche di un progetto MVP e dai un verdetto SCALE/PIVOT/KILL.
+
+VERDETTI:
+- SCALE: metriche sopra target, crescita positiva, continua a investire
+- PIVOT: metriche sotto target ma segnali positivi, cambia approccio
+- KILL: metriche pessime, nessun segnale, chiudi il progetto
+
+FORMATO RISPOSTA (testo piano, no markdown):
+VERDETTO: [SCALE/PIVOT/KILL]
+
+Analisi:
+[2-3 righe su cosa stanno dicendo le metriche]
+
+Azione raccomandata:
+[1 riga concreta su cosa fare questa settimana]
+
+Sii onesto e diretto. Se i dati sono scarsi, dillo esplicitamente."""
 
 
 def run_validation_agent():
@@ -239,7 +260,7 @@ Genera il codice per la Fase {next_phase}."""
         return
 
     # Parse e commit dei file generati
-    file_pattern = _re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', _re.DOTALL)
+    file_pattern = re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', re.DOTALL)
     matches = list(file_pattern.finditer(code_output))
     files_committed = 0
 
@@ -403,7 +424,7 @@ Rispondi SOLO con il SPEC.md aggiornato completo."""
     stack = []
     kpis = {}
     try:
-        match = _re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', new_spec, _re.DOTALL)
+        match = re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', new_spec, re.DOTALL)
         if match:
             spec_meta = json.loads(match.group(1))
             stack = spec_meta.get("stack", [])

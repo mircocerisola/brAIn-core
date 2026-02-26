@@ -314,8 +314,9 @@ def run_solution_architect(problem_id=None):
 
             sol_id, overall = save_solution_v2(problem["id"], sol, assessment, ranking_rationale, dossier)
             if sol_id:
-                if overall < PIPELINE_THRESHOLDS["soluzione"]:
-                    logger.info(f"[SA] {title[:40]}: overall={overall:.2f} sotto soglia {PIPELINE_THRESHOLDS['soluzione']}, salvata ma non prioritaria")
+                _sa_thresholds = get_pipeline_thresholds()
+                if overall < _sa_thresholds["soluzione"]:
+                    logger.info(f"[SA] {title[:40]}: overall={overall:.2f} sotto soglia {_sa_thresholds['soluzione']}, salvata ma non prioritaria")
                 total_saved += 1
                 problem_solution_ids.append(sol_id)
                 all_solution_ids.append(sol_id)

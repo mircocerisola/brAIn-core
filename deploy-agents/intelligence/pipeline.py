@@ -8,13 +8,14 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import (log_to_supabase, notify_telegram, extract_json, search_perplexity,
-                        get_telegram_chat_id, emit_event,
+                        get_telegram_chat_id, emit_event, get_pending_events, mark_event_done,
                         get_mirco_preferences, get_sector_preference_modifier,
                         get_pipeline_thresholds, get_scan_strategy, get_scan_schedule_strategy,
                         get_sector_with_fewest_problems, get_last_sector_rotation,
-                        get_high_bos_problem_sectors, build_strategy_queries)
+                        get_high_bos_problem_sectors, build_strategy_queries, MIN_SCORE_THRESHOLD)
 from intelligence.architect import run_solution_architect
 from intelligence.feasibility import run_feasibility_engine, run_bos_endpoint_logic, enqueue_bos_action
+from memory.knowledge import run_knowledge_keeper
 
 
 def process_events():

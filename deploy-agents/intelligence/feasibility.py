@@ -6,14 +6,50 @@ from __future__ import annotations
 import json, time, re, hashlib
 from datetime import datetime, timezone, timedelta
 import requests
-from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
+from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, COMMAND_CENTER_URL, logger
 from core.utils import (log_to_supabase, notify_telegram, extract_json, search_perplexity,
                         get_telegram_chat_id, emit_event,
                         get_mirco_preferences, get_sector_preference_modifier,
                         get_pipeline_thresholds, get_scan_strategy, get_scan_schedule_strategy,
                         get_sector_with_fewest_problems, get_last_sector_rotation,
                         get_high_bos_problem_sectors, build_strategy_queries)
-from intelligence.architect import run_solution_architect
+from intelligence.architect import (run_solution_architect, research_problem,
+    generate_solutions_unconstrained, assess_feasibility, save_solution_v2)
+
+
+FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn. Valuta la fattibilita' tecnica ed economica di una soluzione MVP.
+
+Rispondi SOLO con JSON valido:
+{
+  "bos_feasibility": {
+    "mvp_cost_score": 0.7,
+    "time_to_market": 0.8,
+    "ai_buildability": 0.9,
+    "margin_potential": 0.7,
+    "market_access": 0.6,
+    "recurring_revenue": 0.8,
+    "scalability": 0.7
+  },
+  "recommendation": {
+    "decision": "GO",
+    "confidence": 0.8,
+    "rationale": "Motivazione concisa in italiano"
+  },
+  "risks": ["rischio 1", "rischio 2"],
+  "opportunities": ["opportunita 1", "opportunita 2"]
+}
+
+SCALE 0.0-1.0 per ogni parametro:
+- mvp_cost_score: 1.0 = costo <5k EUR, 0.0 = costo >100k EUR
+- time_to_market: 1.0 = build <2 settimane, 0.0 = >6 mesi
+- ai_buildability: 1.0 = costruibile al 100% con AI e Python, 0.0 = richiede hardware/infrastruttura fisica
+- margin_potential: 1.0 = margine >80%, 0.0 = margine <20%
+- market_access: 1.0 = canale diretto chiaro (es. cold email, Telegram), 0.0 = richiede partnership/retail
+- recurring_revenue: 1.0 = SaaS mensile, 0.0 = vendita una tantum
+- scalability: 1.0 = scala automaticamente senza costi fissi, 0.0 = scala linearmente col personale
+
+decision: "GO" se tutti i parametri chiave sono alti, "CONDITIONAL_GO" se ci sono rischi mitigabili, "NO_GO" se non realizzabile nel budget/tempo.
+SOLO JSON."""
 
 
 def feasibility_calculate_score(analysis):
@@ -78,6 +114,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
     evaluated = 0
     go_solutions = []
     conditional_solutions = []
+    _pipeline_thresholds = get_pipeline_thresholds()
 
     for sol in solutions:
         title = sol.get("title", "Senza titolo")
@@ -161,8 +198,8 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
         feasibility_score = feasibility_calculate_score(analysis)
 
-        if feasibility_score < PIPELINE_THRESHOLDS["feasibility"]:
-            logger.info(f"[FE] {title[:40]}: feasibility={feasibility_score:.2f} sotto soglia {PIPELINE_THRESHOLDS['feasibility']}")
+        if feasibility_score < _pipeline_thresholds["feasibility"]:
+            logger.info(f"[FE] {title[:40]}: feasibility={feasibility_score:.2f} sotto soglia {_pipeline_thresholds['feasibility']}")
 
         try:
             supabase.table("solutions").update({

@@ -7,10 +7,11 @@ import os, json, time, re, uuid
 from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
-from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
+from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json, search_perplexity
 from execution.project import (_github_project_api, _commit_to_project_repo,
     _get_telegram_group_id, _create_forum_topic, _send_to_topic, _slugify,
-    _create_supabase_project, get_project_db)
+    _create_supabase_project, _save_gcp_secret, _create_github_repo,
+    SPEC_SYSTEM_PROMPT_AR, SPEC_HUMAN_SYSTEM_PROMPT, get_project_db)
 
 
 def run_spec_generator(project_id):
@@ -173,7 +174,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
     stack = []
     kpis = {}
     try:
-        match = _re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', spec_md, _re.DOTALL)
+        match = re.search(r'<!-- JSON_SPEC:\s*(.*?)\s*:JSON_SPEC_END -->', spec_md, re.DOTALL)
         if match:
             spec_meta = json.loads(match.group(1))
             stack = spec_meta.get("stack", [])
@@ -382,7 +383,7 @@ def generate_build_prompt(project_id):
     env_vars_section = ""
     spec_md = project.get("spec_md", "")
     if spec_md:
-        match = _re.search(r'## 7\. Variabili d.Ambiente.*?\n(.*?)(?=## 8\.)', spec_md, _re.DOTALL)
+        match = re.search(r'## 7\. Variabili d.Ambiente.*?\n(.*?)(?=## 8\.)', spec_md, re.DOTALL)
         if match:
             env_vars_section = match.group(1).strip()[:800]
 
@@ -509,7 +510,7 @@ Genera SOLO i file della struttura base."""
         return
 
     # Parse e commit dei file generati
-    file_pattern = _re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', _re.DOTALL)
+    file_pattern = re.compile(r'=== FILE: (.+?) ===\n(.*?)(?==== END FILE ===)', re.DOTALL)
     matches = list(file_pattern.finditer(code_output))
     files_committed = 0
 

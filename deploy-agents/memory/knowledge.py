@@ -7,7 +7,19 @@ import json, time, re
 from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
-from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity
+from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity, extract_json, emit_event
+
+
+KNOWLEDGE_PROMPT = """Sei il Knowledge Keeper di brAIn.
+Analizza i log degli agenti e estrai lezioni apprese.
+
+LINGUA: Rispondi SEMPRE in italiano. Titoli e contenuti delle lezioni in italiano.
+
+Rispondi SOLO con JSON:
+{"lessons":[{"title":"titolo","content":"descrizione","category":"process","actionable":"azione"}],"patterns":[{"pattern":"descrizione","frequency":"quanto"}],"summary":"riassunto breve"}
+
+Categorie: process, technical, strategic, cost, performance.
+SOLO JSON."""
 
 
 def run_knowledge_keeper():
