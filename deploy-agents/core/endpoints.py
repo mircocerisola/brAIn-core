@@ -7,8 +7,8 @@ from datetime import datetime
 from aiohttp import web
 
 from core.config import supabase, logger
-from core.utils import get_telegram_chat_id
-from intelligence.scanner import run_world_scanner, run_custom_scan, run_scan, get_standard_queries
+from core.utils import get_telegram_chat_id, get_standard_queries
+from intelligence.scanner import run_world_scanner, run_custom_scan, run_scan
 from intelligence.architect import run_solution_architect
 from intelligence.feasibility import run_feasibility_engine, run_bos_endpoint_logic, run_auto_pipeline
 from intelligence.pipeline import process_events

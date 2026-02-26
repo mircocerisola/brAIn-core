@@ -13,6 +13,7 @@ from core.utils import (log_to_supabase, notify_telegram, extract_json, search_p
                         get_pipeline_thresholds, get_scan_strategy, get_scan_schedule_strategy,
                         get_sector_with_fewest_problems, get_last_sector_rotation,
                         get_high_bos_problem_sectors, build_strategy_queries)
+from intelligence.scanner import RESEARCH_PROMPT, GENERATION_PROMPT, SA_FEASIBILITY_PROMPT
 
 
 def research_problem(problem):

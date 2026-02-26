@@ -472,3 +472,36 @@ def build_strategy_queries(strategy):
     return get_standard_queries(sources), "standard"
 
 
+def get_standard_queries(sources):
+    """Costruisce query standard per World Scanner basate sulle fonti attive."""
+    all_sectors = set()
+    for s in sources:
+        sectors = s.get("sectors", [])
+        if isinstance(sectors, str):
+            sectors = json.loads(sectors)
+        all_sectors.update(sectors)
+
+    sector_queries = {
+        "food": "food waste restaurants expired inventory unsold meals problem",
+        "health": "patients waiting time mental health access rural areas problem",
+        "finance": "small business cash flow invoicing late payments problem",
+        "education": "tutoring affordable access learning disabilities students problem",
+        "legal": "small business contract disputes legal costs too high problem",
+        "ecommerce": "product returns fraud fake reviews online sellers problem",
+        "hr": "employee burnout retention turnover small companies problem",
+        "real_estate": "rental scams tenant landlord disputes maintenance problem",
+        "sustainability": "food packaging waste recycling confusion consumers problem",
+        "cybersecurity": "password reuse data breach small business protection problem",
+        "entertainment": "independent creators monetization copyright content theft problem",
+        "logistics": "last mile delivery cost small business shipping rural problem",
+    }
+
+    queries = []
+    for sector in all_sectors:
+        if sector in sector_queries:
+            queries.append((sector, sector_queries[sector]))
+    queries.append(("cross", "most frustrating everyday problems people pay to solve"))
+    queries.append(("cross", "biggest complaints small business owners daily operations"))
+    queries.append(("cross", "underserved customer needs no good solution exists"))
+    return queries
+

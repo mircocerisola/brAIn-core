@@ -3,19 +3,21 @@ brAIn module: execution/project.py
 Auto-extracted from agents_runner.py
 """
 from __future__ import annotations
-import os, json, time, re, uuid
+import os, json, time, re, uuid, base64
 from datetime import datetime, timezone, timedelta
 import requests
+
+GITHUB_API_BASE_AR = "https://api.github.com"
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
 
 
 def _github_project_api(method, repo, endpoint, data=None):
     """GitHub API per un repo di progetto specifico."""
-    if not GITHUB_TOKEN_AR:
+    if not GITHUB_TOKEN:
         return None
     headers = {
-        "Authorization": f"token {GITHUB_TOKEN_AR}",
+        "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
     }
     url = f"{GITHUB_API_BASE_AR}/repos/{repo}{endpoint}"
@@ -39,7 +41,7 @@ def _github_project_api(method, repo, endpoint, data=None):
 
 def _commit_to_project_repo(repo, path, content, message):
     """Committa un file (crea o aggiorna) su un repo di progetto."""
-    content_b64 = _base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    content_b64 = base64.b64encode(content.encode("utf-8")).decode("utf-8")
     existing = _github_project_api("GET", repo, f"/contents/{path}")
     data = {"message": message, "content": content_b64}
     if existing and "sha" in existing:
@@ -50,11 +52,11 @@ def _commit_to_project_repo(repo, path, content, message):
 
 def _create_github_repo(slug, name):
     """Crea repo privato brain-[slug] tramite GitHub API."""
-    if not GITHUB_TOKEN_AR:
+    if not GITHUB_TOKEN:
         logger.warning("[INIT] GITHUB_TOKEN non disponibile")
         return None
     headers = {
-        "Authorization": f"token {GITHUB_TOKEN_AR}",
+        "Authorization": f"token {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json",
     }
     try:
@@ -136,9 +138,9 @@ def _send_to_topic(group_id, topic_id, text, reply_markup=None):
 def _slugify(text, max_len=20):
     """Genera slug da testo: lowercase, trattini, max_len chars."""
     slug = text.lower().strip()
-    slug = _re.sub(r"[^\w\s-]", "", slug)
-    slug = _re.sub(r"[\s_]+", "-", slug)
-    slug = _re.sub(r"-+", "-", slug).strip("-")
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
     return slug[:max_len].rstrip("-")
 
 
@@ -150,7 +152,7 @@ def _create_supabase_project(slug):
         logger.warning("[SUPABASE_MGMT] SUPABASE_ACCESS_TOKEN mancante, skip creazione DB separato")
         return None, None
     try:
-        resp = http_requests.post(
+        resp = requests.post(
             "https://api.supabase.com/v1/projects",
             headers={
                 "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}",
@@ -172,7 +174,7 @@ def _create_supabase_project(slug):
         project_ref = data.get("id", "")
         db_url = f"postgresql://postgres@db.{project_ref}.supabase.co:5432/postgres"
         # Recupera API key (anon)
-        keys_resp = http_requests.get(
+        keys_resp = requests.get(
             f"https://api.supabase.com/v1/projects/{project_ref}/api-keys",
             headers={"Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"},
             timeout=30,
@@ -202,7 +204,7 @@ def _save_gcp_secret(secret_id, value):
     project_id_gcp = "brain-core-487914"
     # Usa metadata token su Cloud Run
     try:
-        meta = http_requests.get(
+        meta = requests.get(
             "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
             headers={"Metadata-Flavor": "Google"},
             timeout=5,
@@ -219,7 +221,7 @@ def _save_gcp_secret(secret_id, value):
     encoded = base64.b64encode(value.encode()).decode()
     # Crea secret se non esiste
     try:
-        http_requests.post(
+        requests.post(
             f"{base}/secrets",
             headers=headers,
             json={"replication": {"automatic": {}}},
@@ -230,7 +232,7 @@ def _save_gcp_secret(secret_id, value):
         pass
     # Aggiungi versione
     try:
-        resp = http_requests.post(
+        resp = requests.post(
             f"{base}/secrets/{secret_id}:addVersion",
             headers=headers,
             json={"payload": {"data": encoded}},
@@ -259,13 +261,13 @@ def get_project_db(project_id):
         if secret_name:
             project_id_gcp = "brain-core-487914"
             try:
-                meta = http_requests.get(
+                meta = requests.get(
                     "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
                     headers={"Metadata-Flavor": "Google"}, timeout=5,
                 )
                 access_token = meta.json().get("access_token", "")
                 if access_token:
-                    resp = http_requests.get(
+                    resp = requests.get(
                         f"https://secretmanager.googleapis.com/v1/projects/{project_id_gcp}/secrets/{secret_name}/versions/latest:access",
                         headers={"Authorization": f"Bearer {access_token}"}, timeout=10,
                     )

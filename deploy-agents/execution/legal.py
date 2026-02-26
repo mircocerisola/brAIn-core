@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
-from execution.project import get_project_db, _send_to_topic
+from execution.project import get_project_db, _send_to_topic, _get_telegram_group_id, _commit_to_project_repo
 
 
 def run_legal_review(project_id):
@@ -58,8 +58,7 @@ Analizza i rischi legali per operare in Europa con questo progetto."""
         tokens_in = response.usage.input_tokens
         tokens_out = response.usage.output_tokens
         # Estrai JSON
-        import re as _re2
-        m = _re2.search(r'\{[\s\S]*\}', raw)
+        m = re.search(r'\{[\s\S]*\}', raw)
         if m:
             review_data = json.loads(m.group(0))
         else:
@@ -248,7 +247,7 @@ COMPLIANCE CHECK brAIn — [data]
         token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         if token:
             try:
-                http_requests.post(
+                requests.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
                     json={"chat_id": chat_id, "text": report},
                     timeout=15,

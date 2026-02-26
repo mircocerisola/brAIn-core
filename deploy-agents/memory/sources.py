@@ -3,7 +3,7 @@ brAIn module: memory/sources.py
 Auto-extracted from agents_runner.py
 """
 from __future__ import annotations
-import json, time, re
+import os, json, time, re
 from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
@@ -227,17 +227,5 @@ def run_sources_cleanup_weekly():
         "dynamic_threshold": dynamic_threshold,
         "active_count": active_count,
     }
-
-
-# ============================================================
-# LAYER 3: EXECUTION PIPELINE — init_project, spec, landing, build, validation
-# ============================================================
-
-import re as _re
-import base64 as _base64
-
-GITHUB_TOKEN_AR = os.getenv("GITHUB_TOKEN")
-GITHUB_API_BASE_AR = "https://api.github.com"
-GITHUB_OWNER_AR = "mircocerisola"
 
 
