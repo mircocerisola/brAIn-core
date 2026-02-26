@@ -605,3 +605,35 @@ async def run_memory_cleanup_endpoint(request):
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_founder_pipeline_endpoint(request):
+    """POST /admin/founder-pipeline — avvia init_project per soluzioni founder bos_approved senza progetto."""
+    try:
+        import threading as _t
+        # Trova soluzioni founder non archiviate senza progetto associato
+        r = supabase.table("solutions").select("id,title,bos_score,status") \
+            .eq("source", "founder").neq("status", "archived").execute()
+        founder_sols = r.data or []
+        triggered = []
+        skipped = []
+        for sol in founder_sols:
+            sol_id = sol["id"]
+            # Anti-dup: controlla se esiste già un progetto per questa soluzione
+            existing = supabase.table("projects").select("id,status") \
+                .eq("bos_id", sol_id).execute()
+            if existing.data:
+                proj = existing.data[0]
+                if proj.get("status") not in ("new", "init", "failed"):
+                    skipped.append({"solution_id": sol_id, "title": sol.get("title"), "reason": "progetto già in corso"})
+                    continue
+            # Avvia in background
+            _t.Thread(target=init_project, args=(sol_id,), daemon=True).start()
+            triggered.append({"solution_id": sol_id, "title": sol.get("title")})
+        return web.json_response({
+            "status": "ok",
+            "triggered": triggered,
+            "skipped": skipped,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)

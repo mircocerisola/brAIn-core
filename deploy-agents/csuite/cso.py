@@ -10,7 +10,7 @@ class CSO(BaseChief):
     default_model = "claude-sonnet-4-6"
     briefing_prompt_template = (
         "Sei il CSO di brAIn. Genera un briefing strategico settimanale includendo: "
-        "1) Stato del portfolio problemi/soluzioni, "
+        "1) Portfolio soluzioni in due sezioni: 'Pipeline sistema' (generate automaticamente) e 'Idee founder' (create da Mirco, NON archiviabili automaticamente), "
         "2) Trend di mercato emersi dai scan, "
         "3) Gap competitivi identificati, "
         "4) Opportunità di pivot o scale, "
@@ -19,12 +19,22 @@ class CSO(BaseChief):
 
     def get_domain_context(self):
         ctx = super().get_domain_context()
+        # Soluzioni pipeline sistema (source='system' o NULL)
         try:
-            r = supabase.table("solutions").select("id,title,bos_score,status") \
+            r = supabase.table("solutions").select("id,title,bos_score,status,source") \
+                .or_("source.eq.system,source.is.null") \
                 .order("bos_score", desc=True).limit(5).execute()
-            ctx["top_solutions"] = r.data or []
+            ctx["pipeline_solutions"] = r.data or []
         except Exception:
-            ctx["top_solutions"] = []
+            ctx["pipeline_solutions"] = []
+        # Idee founder (source='founder') — mai archiviabili automaticamente
+        try:
+            r = supabase.table("solutions").select("id,title,bos_score,status,source") \
+                .eq("source", "founder") \
+                .order("bos_score", desc=True).limit(10).execute()
+            ctx["founder_ideas"] = r.data or []
+        except Exception:
+            ctx["founder_ideas"] = []
         try:
             r = supabase.table("problems").select("id,title,weighted_score,status") \
                 .order("weighted_score", desc=True).limit(5).execute()

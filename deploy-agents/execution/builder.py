@@ -705,9 +705,9 @@ def enqueue_spec_review_action(project_id):
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "\U0001f4c4 Scarica SPEC", "callback_data": f"spec_download:{project_id}"},
                 {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
                 {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
+                {"text": "\U0001f4c4 Versione completa", "callback_data": f"spec_full:{project_id}"},
             ],
         ]
     }
