@@ -3319,7 +3319,7 @@ def generate_activity_report():
 
     # --- CANTIERI ---
     try:
-        cantieri = supabase.table("projects").select("id,name,status,updated_at").neq("status", "archived").execute().data or []
+        cantieri = supabase.table("projects").select("id,name,status,created_at,build_phase").neq("status", "archived").execute().data or []
     except Exception:
         cantieri = []
 
@@ -3348,10 +3348,10 @@ def generate_activity_report():
     ]
     if cantieri:
         first = cantieri[0]
-        last_upd = _format_rome_time(first.get("updated_at"))
+        last_upd = _format_rome_time(first.get("created_at"))
         lines.append(f"\u251c Attivi:                    {len(cantieri)} \u2014 {first.get('name', '?')[:25]}")
         lines.append(f"\u251c Status:                    {first.get('status', '?')}")
-        lines.append(f"\u2514 Ultimo aggiornamento:      {last_upd}")
+        lines.append(f"\u2514 Creato:                    {last_upd}")
     else:
         lines.append("\u2514 Nessun cantiere attivo")
 
@@ -3404,7 +3404,7 @@ def update_kpi_daily():
     except Exception:
         active_cantieri = 0
     try:
-        mvps_launched = len(supabase.table("projects").select("id").eq("status", "launch_approved").gte("updated_at", today_start).execute().data or [])
+        mvps_launched = len(supabase.table("projects").select("id").eq("status", "launch_approved").gte("created_at", today_start).execute().data or [])
     except Exception:
         mvps_launched = 0
     cost_today, _ = _get_period_cost(today_start)

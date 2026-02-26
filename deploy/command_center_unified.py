@@ -2436,16 +2436,16 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "act_cantieri":
         await query.answer()
         try:
-            cantieri = supabase.table("projects").select("id,name,status,updated_at,build_phase").neq(
+            cantieri = supabase.table("projects").select("id,name,status,created_at,build_phase").neq(
                 "status", "archived").execute().data or []
             sep = "\u2501" * 15
             if cantieri:
                 lines = [f"\U0001f3d7\ufe0f *Cantieri attivi ({len(cantieri)})*", sep]
                 for c in cantieri:
-                    upd = c.get("updated_at", "")[:16].replace("T", " ")
+                    created = c.get("created_at", "")[:16].replace("T", " ")
                     phase = c.get("build_phase") or 0
                     lines.append(f"\u2022 {c['name'][:30]}")
-                    lines.append(f"  Status: {c.get('status','?')} | Fase: {phase} | Agg: {upd}")
+                    lines.append(f"  Status: {c.get('status','?')} | Fase: {phase} | Creato: {created}")
             else:
                 lines = ["\U0001f3d7\ufe0f Nessun cantiere attivo."]
             token = os.getenv("TELEGRAM_BOT_TOKEN")
