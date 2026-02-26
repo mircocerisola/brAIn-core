@@ -33,6 +33,8 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = None
 COMMAND_CENTER_URL = os.getenv("COMMAND_CENTER_URL", "")
+SUPABASE_ACCESS_TOKEN = os.getenv("SUPABASE_ACCESS_TOKEN", "")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 
 
 # ============================================================
@@ -5397,6 +5399,67 @@ async def run_generate_invite_endpoint(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
+async def run_migration_endpoint(request):
+    """POST /migration/apply — esegue SQL via psycopg2.
+    Body: {"sql": "...", "filename": "20260227_example.sql"}
+    """
+    try:
+        import psycopg2
+
+        data = await request.json()
+        sql_content = data.get("sql", "").strip()
+        filename = data.get("filename", "manual")
+
+        if not sql_content:
+            return web.json_response({"error": "campo 'sql' obbligatorio"}, status=400)
+
+        db_pass = DB_PASSWORD
+        if not db_pass:
+            return web.json_response({"error": "DB_PASSWORD non configurata come env var"}, status=500)
+
+        supabase_url = os.getenv("SUPABASE_URL", "")
+        host = supabase_url.replace("https://", "").replace("http://", "").rstrip("/")
+        db_host = f"db.{host}"
+
+        conn = psycopg2.connect(
+            host=db_host, port=5432, dbname="postgres",
+            user="postgres", password=db_pass, sslmode="require",
+        )
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS migration_history (
+                    id serial PRIMARY KEY,
+                    filename text UNIQUE NOT NULL,
+                    applied_at timestamptz DEFAULT now()
+                );
+            """)
+            cur.execute("SELECT filename FROM migration_history WHERE filename=%s;", (filename,))
+            already = cur.fetchone()
+        conn.commit()
+
+        if already:
+            conn.close()
+            return web.json_response({"status": "skipped", "filename": filename, "reason": "gia applicata"})
+
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql_content)
+                cur.execute("INSERT INTO migration_history (filename) VALUES (%s) ON CONFLICT DO NOTHING;", (filename,))
+            conn.commit()
+            conn.close()
+            logger.info(f"[MIGRATION] Applicata: {filename}")
+            return web.json_response({"status": "ok", "filename": filename})
+        except Exception as e:
+            conn.rollback()
+            conn.close()
+            logger.error(f"[MIGRATION] Errore {filename}: {e}")
+            return web.json_response({"status": "error", "filename": filename, "error": str(e)}, status=500)
+
+    except Exception as e:
+        logger.error(f"[MIGRATION] {e}")
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
@@ -5440,6 +5503,7 @@ async def main():
     app.router.add_post("/validation", run_validation_endpoint)
     app.router.add_post("/project/continue_build", run_continue_build_endpoint)
     app.router.add_post("/project/generate_invite", run_generate_invite_endpoint)
+    app.router.add_post("/migration/apply", run_migration_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)
