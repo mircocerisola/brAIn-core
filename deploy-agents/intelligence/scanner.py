@@ -47,6 +47,61 @@ SCANNER_GENERIC_TERMS = [
     "individui", "individuals", "clienti", "customers", "lavoratori", "workers",
 ]
 
+SCANNER_WEIGHTS = {
+    "market_size": 0.20, "willingness_to_pay": 0.20, "urgency": 0.15,
+    "competition_gap": 0.15, "ai_solvability": 0.15, "time_to_market": 0.10,
+    "recurring_potential": 0.05,
+}
+
+SCANNER_ANALYSIS_PROMPT = """Sei il World Scanner di brAIn, un'organizzazione AI-native che cerca problemi SPECIFICI e AZIONABILI.
+
+REGOLA FONDAMENTALE: ogni problema deve riguardare un segmento PRECISO di persone in un contesto geografico PRECISO con prove CONCRETE.
+
+ESEMPIO SBAGLIATO (troppo generico, rifiutato):
+"Le PMI faticano con la gestione finanziaria"
+
+ESEMPIO CORRETTO (specifico, azionabile):
+"Gli elettricisti autonomi italiani tra 30-45 anni non hanno accesso a corsi di aggiornamento normativo certificati a meno di 500 EUR"
+
+Per ogni problema identificato (massimo 3), fornisci TUTTI questi campi:
+
+1. IDENTIFICAZIONE TARGET (OBBLIGATORIO — rifiuta se non hai dati specifici):
+   - target_customer: segmento SPECIFICO — professione + fascia d'eta' + contesto (NON "aziende" o "persone")
+   - target_geography: paese/regione SPECIFICA + perche' proprio li'
+   - problem_frequency: daily/weekly/monthly/quarterly
+
+2. DESCRIZIONE PROBLEMA (OBBLIGATORIO):
+   - current_workaround: come il target risolve OGGI il problema e perche' e' insufficiente
+   - pain_intensity: 1 (fastidio) a 5 (blocca il business/la vita)
+   - evidence: dato CONCRETO e verificabile — statistica con fonte, numero persone colpite, dimensione mercato
+
+3. TIMING (OBBLIGATORIO):
+   - why_now: perche' questo problema e' rilevante ORA (cambio normativo, tecnologia, comportamento)
+
+4. DATI QUANTITATIVI — 7 score da 0.0 a 1.0 — usa TUTTA la scala, ogni problema DEVE avere almeno 2 score sotto 0.4:
+   - market_size: 0.1=nicchia <1M EUR, 0.5=medio 10-100M EUR, 1.0=miliardi
+   - willingness_to_pay: 0.1=difficile convincerli, 1.0=pagano gia' o chiedono attivamente
+   - urgency: 0.1=fastidio, 1.0=perde soldi/clienti oggi
+   - competition_gap: 1.0=nessuna soluzione, 0.0=mercato saturo
+   - ai_solvability: 0.1=richiede umani, 1.0=100% automatizzabile
+   - time_to_market: 1.0=1 settimana, 0.3=3 mesi, 0.0=anni
+   - recurring_potential: 1.0=quotidiano, 0.3=mensile, 0.0=una tantum
+
+5. CLASSIFICAZIONE:
+   - sector: uno tra food, health, finance, education, legal, ecommerce, hr, real_estate, sustainability, cybersecurity, entertainment, logistics
+   - geographic_scope: global, continental, national, regional
+   - top_markets: lista 3-5 codici paese ISO
+   - who_is_affected, real_world_example, why_it_matters: testo descrittivo in italiano
+
+SCARTA qualsiasi problema senza target_customer specifico, evidence con dati numerici, o why_now chiaro.
+REGOLA DIVERSITA SETTORI: i problemi devono riguardare settori DIVERSI.
+
+{preferences_block}
+
+Rispondi SOLO con JSON:
+{{"problems":[{{"title":"titolo specifico","description":"descrizione","target_customer":"elettricisti autonomi italiani 30-45 anni","target_geography":"Italia nord e centro","problem_frequency":"monthly","current_workaround":"cercano corsi online generici","pain_intensity":4,"evidence":"In Italia ci sono 180.000 elettricisti autonomi (CGIA 2024)","why_now":"Norma CEI 64-8/7 del 2023 obbligatoria dal 2025","who_is_affected":"chi soffre","real_world_example":"storia concreta","why_it_matters":"perche conta","sector":"education","geographic_scope":"national","top_markets":["IT"],"market_size":0.4,"willingness_to_pay":0.7,"urgency":0.8,"competition_gap":0.7,"ai_solvability":0.8,"time_to_market":0.8,"recurring_potential":0.6,"source_name":"CGIA Mestre","source_url":"https://cgia.it"}}],"new_sources":[{{"name":"nome","url":"url","category":"tipo","sectors":["settore"]}}]}}
+SOLO JSON."""
+
 
 def scanner_calculate_weighted_score(problem):
     base_score = 0.0

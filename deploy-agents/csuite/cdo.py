@@ -65,7 +65,7 @@ def audit_data_quality() -> Dict[str, Any]:
     Controlla qualità dei dati nel DB:
     - Tabelle con >80% NULL su colonne chiave
     - Duplicati in problems
-    - org_knowledge con importance=1 da >30gg
+    - org_knowledge entries da >60gg
     - chief_knowledge non aggiornato da >14gg per un Chief
     Produce report al CTO nel topic #technology.
     """
@@ -91,14 +91,14 @@ def audit_data_quality() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[CDO] duplicates check: {e}")
 
-    # 2. org_knowledge con importance=1 da >30gg
+    # 2. org_knowledge entries da >60gg (candidati archiviazione)
     try:
-        cutoff = (start - timedelta(days=30)).isoformat()
-        r = supabase.table("org_knowledge").select("id,category").eq("importance", 1) \
+        cutoff = (start - timedelta(days=60)).isoformat()
+        r = supabase.table("org_knowledge").select("id,category") \
             .lt("created_at", cutoff).execute()
         stale_count = len(r.data or [])
-        if stale_count > 5:
-            issues.append(f"📦 {stale_count} entries org_knowledge importance=1 da >30gg — candidati archiviazione")
+        if stale_count > 10:
+            issues.append(f"📦 {stale_count} entries org_knowledge da >60gg — candidati archiviazione")
     except Exception as e:
         logger.warning(f"[CDO] org_knowledge check: {e}")
 
