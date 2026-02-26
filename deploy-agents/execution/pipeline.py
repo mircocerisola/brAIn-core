@@ -344,11 +344,13 @@ def create_build_blocker(project_id: int, problem: str, action: str,
 # ── CSO Smoke Test Design ─────────────────────────────────────────────────────
 def design_smoke_test(project_id: int) -> dict:
     """CSO progetta il piano smoke test e lo presenta a Mirco nel topic cantiere.
+    Include brand identity, metodo selezionato, blocker per Mirco.
     Avanza pipeline a smoke_test_designing.
     """
     try:
         r = supabase.table("projects").select(
-            "name,spec_md,spec_human_md,topic_id,bos_id"
+            "name,spec_md,spec_human_md,topic_id,bos_id,"
+            "brand_name,brand_email,brand_domain,smoke_test_method"
         ).eq("id", project_id).execute()
         if not r.data:
             return {"status": "error", "error": "project not found"}
@@ -356,24 +358,69 @@ def design_smoke_test(project_id: int) -> dict:
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-    name = project.get("name", f"Progetto {project_id}")
+    name = project.get("name", "Progetto " + str(project_id))
+    brand_name = project.get("brand_name", name)
+    brand_email = project.get("brand_email", "")
+    brand_domain = project.get("brand_domain", "")
+    method = project.get("smoke_test_method", "cold_outreach")
     spec_md = (project.get("spec_md") or "")[:3000]
     topic_id = project.get("topic_id")
     group_id = _get_group_id()
 
-    # CSO genera piano smoke test con Sonnet
+    # Carica soluzione per contesto
+    solution_ctx = ""
+    bos_id = project.get("bos_id")
+    if bos_id:
+        try:
+            sol = supabase.table("solutions").select(
+                "title,description,sector,target_audience"
+            ).eq("id", bos_id).execute()
+            if sol.data:
+                s = sol.data[0]
+                sol_title = s.get("title", "")
+                sol_desc = (s.get("description") or "")[:500]
+                sol_sector = s.get("sector", "")
+                sol_target = s.get("target_audience", "")
+                solution_ctx = (
+                    "Soluzione: " + sol_title + "\n"
+                    "Descrizione: " + sol_desc + "\n"
+                    "Settore: " + sol_sector + "\n"
+                    "Target: " + sol_target
+                )
+        except Exception:
+            pass
+
+    # Metodi disponibili
+    method_names = {
+        "cold_outreach": "Cold Outreach B2B (email/LinkedIn)",
+        "landing_page_ads": "Landing Page + Ads (Google/Meta)",
+        "concierge": "Concierge MVP (servizio manuale)",
+        "pre_order": "Pre-Order / Deposito (landing con prezzo)",
+        "paid_ads": "Paid Ads puri (Google Ads intent)",
+        "cold_outreach_landing": "Cold Outreach + Landing Page",
+    }
+    method_label = method_names.get(method, method)
+
+    # CSO genera piano smoke test con Sonnet, informato dal metodo scelto
     prompt = (
-        f"Sei il CSO (Chief Strategy Officer) di brAIn. Devi progettare uno smoke test "
-        f"per validare la domanda reale PRIMA di costruire il prodotto '{name}'.\n\n"
-        f"SPEC progetto:\n{spec_md}\n\n"
-        f"Rispondi SOLO con JSON valido:\n"
-        f'{{"method": "descrizione metodo concreto (es. outreach 50 ristoranti Nord Italia via LinkedIn/email con demo video)",'
-        f'"kpi_success": "criterio successo concreto con % (es. 30% risposta positiva, 10% richiesta demo live)",'
-        f'"kpi_failure": "criterio fallimento concreto con % (es. <10% risposta, 0 richieste demo)",'
-        f'"duration_days": 7,'
-        f'"materials_needed": "lista materiali (es. video demo 60s, landing page, script outreach)",'
-        f'"prospect_count": 50,'
-        f'"target_description": "chi contatteremo (specifico)"}}'
+        "Sei il CSO (Chief Strategy Officer) di brAIn. Devi progettare uno smoke test "
+        "per validare la domanda reale PRIMA di costruire il prodotto.\n\n"
+        "Brand: " + brand_name + "\n"
+        "Email brand: " + brand_email + "\n"
+        + solution_ctx + "\n"
+        + ("SPEC progetto:\n" + spec_md + "\n\n" if spec_md else "\n")
+        + "METODO SCELTO: " + method_label + "\n\n"
+        "Progetta il piano basandoti su questo metodo specifico.\n"
+        "Rispondi SOLO con JSON valido:\n"
+        '{"method": "descrizione specifica del metodo per questo progetto",'
+        '"kpi_success": "criterio successo concreto con % o numero",'
+        '"kpi_failure": "criterio fallimento concreto con % o numero",'
+        '"duration_days": 7,'
+        '"materials_needed": "lista materiali specifici per questo metodo",'
+        '"prospect_count": 50,'
+        '"target_description": "chi contatteremo (specifico)",'
+        '"budget_eur": 0,'
+        '"blockers_for_mirco": ["azione 1 per Mirco", "azione 2"]}'
     )
 
     try:
@@ -387,15 +434,17 @@ def design_smoke_test(project_id: int) -> dict:
         m = re.search(r'\{[\s\S]*\}', raw)
         plan = json.loads(m.group(0)) if m else {}
     except Exception as e:
-        logger.warning(f"[SMOKE_DESIGN] Sonnet error: {e}")
+        logger.warning("[SMOKE_DESIGN] Sonnet error: %s", e)
         plan = {
-            "method": f"Outreach 50 prospect target via email/LinkedIn",
-            "kpi_success": "30% risposta positiva, 10% richiesta demo",
-            "kpi_failure": "<10% risposta, 0 richieste demo",
+            "method": method_label + " per " + brand_name,
+            "kpi_success": "15% risposta positiva",
+            "kpi_failure": "<5% risposta",
             "duration_days": 7,
-            "materials_needed": "Video demo 60s, landing page, script outreach",
+            "materials_needed": "Email template, landing page",
             "prospect_count": 50,
             "target_description": "target da definire",
+            "budget_eur": 0,
+            "blockers_for_mirco": [],
         }
 
     # Salva piano in DB
@@ -406,47 +455,83 @@ def design_smoke_test(project_id: int) -> dict:
                 "success": plan.get("kpi_success", ""),
                 "failure": plan.get("kpi_failure", ""),
             }),
+            "smoke_test_kpi_target": json.dumps({
+                "success": plan.get("kpi_success", ""),
+                "failure": plan.get("kpi_failure", ""),
+            }),
         }).eq("id", project_id).execute()
     except Exception as e:
-        logger.warning(f"[SMOKE_DESIGN] DB update: {e}")
+        logger.warning("[SMOKE_DESIGN] DB update: %s", e)
 
     # Avanza pipeline
     advance_pipeline_step(project_id, "smoke_test_designing")
 
-    # Manda card a Mirco nel topic cantiere
+    # Costruisci card con blockers
+    blockers = plan.get("blockers_for_mirco", [])
+    # Aggiungi blocker email se metodo richiede outreach
+    if method in ("cold_outreach", "cold_outreach_landing") and brand_domain:
+        email_blocker = "Registra " + brand_domain + " e crea " + brand_email + " — stima 10min"
+        if email_blocker not in blockers:
+            blockers.insert(0, email_blocker)
+
+    blockers_text = ""
+    if blockers:
+        blockers_text = "\nAzioni richieste da Mirco prima di partire:\n"
+        for b in blockers:
+            blockers_text += "- " + b + "\n"
+
+    budget_line = ""
+    budget = plan.get("budget_eur", 0)
+    if budget and budget > 0:
+        budget_line = "Budget stimato: EUR" + str(budget) + "\n"
+
+    plan_method = plan.get("method", "N/A")
+    plan_target = plan.get("target_description", "N/A")
+    plan_prospect = str(plan.get("prospect_count", 50))
+    plan_dur = str(plan.get("duration_days", 7))
+    plan_kpi_ok = plan.get("kpi_success", "N/A")
+    plan_kpi_ko = plan.get("kpi_failure", "N/A")
+    plan_materials = plan.get("materials_needed", "N/A")
+
     card = (
-        f"SMOKE TEST — {name}\n"
-        f"{SEP}\n"
-        f"Obiettivo: validare domanda reale prima di costruire\n"
-        f"Metodo: {plan.get('method', 'N/A')}\n"
-        f"KPI successo: {plan.get('kpi_success', 'N/A')}\n"
-        f"KPI fallimento: {plan.get('kpi_failure', 'N/A')}\n"
-        f"Durata: {plan.get('duration_days', 7)} giorni\n"
-        f"Materiali necessari: {plan.get('materials_needed', 'N/A')}\n"
-        f"{SEP}"
+        "PIANO SMOKE TEST — " + brand_name + "\n"
+        + SEP + "\n"
+        "Metodo scelto: " + method_label + "\n"
+        "Perche': il CSO lo ritiene il piu' adatto per questo settore/audience\n"
+        "Audience target: " + plan_target + "\n"
+        "Prospect: " + plan_prospect + " contatti\n"
+        "Durata: " + plan_dur + " giorni\n"
+        + budget_line
+        + "KPI successo: " + plan_kpi_ok + "\n"
+        "KPI fallimento: " + plan_kpi_ko + "\n"
+        "Materiali: " + plan_materials + "\n"
+        + blockers_text
+        + SEP
     )
     reply_markup = {
         "inline_keyboard": [
             [
                 {"text": "Avvia smoke test",
-                 "callback_data": f"smoke_design_approve:{project_id}"},
+                 "callback_data": "smoke_design_approve:" + str(project_id)},
                 {"text": "Modifica piano",
-                 "callback_data": f"smoke_design_modify:{project_id}"},
+                 "callback_data": "smoke_design_modify:" + str(project_id)},
             ],
             [
+                {"text": "Cambia metodo",
+                 "callback_data": "smoke_design_method:" + str(project_id)},
                 {"text": "Archivia idea",
-                 "callback_data": f"smoke_design_archive:{project_id}"},
+                 "callback_data": "smoke_design_archive:" + str(project_id)},
             ],
         ]
     }
     if group_id and topic_id:
         _send_topic_raw(group_id, topic_id, card, reply_markup)
     else:
-        # Fallback: manda in #strategy
         _send_to_chief_topic("cso", card, reply_markup)
 
-    logger.info(f"[SMOKE_DESIGN] Piano generato per {name} (project_id={project_id})")
-    return {"status": "ok", "project_id": project_id, "plan": plan}
+    logger.info("[SMOKE_DESIGN] Piano generato per %s method=%s (project_id=%s)",
+                brand_name, method, project_id)
+    return {"status": "ok", "project_id": project_id, "plan": plan, "method": method}
 
 
 def send_smoke_daily_update(project_id: int, day: int, total_days: int,
@@ -475,15 +560,21 @@ def send_smoke_daily_update(project_id: int, day: int, total_days: int,
 
 def generate_smoke_results_card(project_id: int, smoke_id: int) -> str:
     """Genera report completo risultati smoke test per Mirco.
+    Include dati quantitativi + qualitativi + raccomandazione CSO.
     Avanza pipeline a smoke_test_results_ready.
     """
     try:
-        proj = supabase.table("projects").select("name,smoke_test_kpi,topic_id").eq("id", project_id).execute()
+        proj = supabase.table("projects").select(
+            "name,brand_name,smoke_test_kpi,smoke_test_method,smoke_test_results,topic_id"
+        ).eq("id", project_id).execute()
         if not proj.data:
             return ""
-        name = proj.data[0].get("name", "")
-        kpi = json.loads(proj.data[0].get("smoke_test_kpi") or "{}")
-        topic_id = proj.data[0].get("topic_id")
+        pdata = proj.data[0]
+        brand_name = pdata.get("brand_name", pdata.get("name", ""))
+        method = pdata.get("smoke_test_method", "cold_outreach")
+        kpi = json.loads(pdata.get("smoke_test_kpi") or "{}")
+        results = json.loads(pdata.get("smoke_test_results") or "{}")
+        topic_id = pdata.get("topic_id")
     except Exception:
         return ""
 
@@ -496,95 +587,169 @@ def generate_smoke_results_card(project_id: int, smoke_id: int) -> str:
     except Exception:
         return ""
 
-    # Carica prospect
-    try:
-        prospects = supabase.table("smoke_test_prospects").select("status,name").eq("smoke_test_id", smoke_id).execute()
-        all_p = prospects.data or []
-    except Exception:
-        all_p = []
+    # Metriche
+    total = results.get("total_reached", smoke.get("prospects_count", 0))
+    positive = results.get("positive", smoke.get("positive_responses", 0))
+    negative = results.get("negative", smoke.get("negative_responses", 0))
+    no_resp = results.get("no_response", smoke.get("no_response", 0))
+    demos = results.get("demo_requests", smoke.get("demo_requests", 0))
+    landing_views = results.get("landing_views", smoke.get("landing_visits", 0))
+    landing_signups = results.get("landing_signups", smoke.get("forms_compiled", 0))
+    total_cost = results.get("total_cost_eur", smoke.get("total_cost_eur", 0))
+    cost_per_lead = results.get("cost_per_lead", 0)
 
-    total = len(all_p)
-    positive = smoke.get("positive_responses", 0)
-    negative = smoke.get("negative_responses", 0)
-    no_resp = smoke.get("no_response", 0)
-    demos = smoke.get("demo_requests", 0)
-    feedback = smoke.get("qualitative_feedback") or []
-    if isinstance(feedback, str):
-        feedback = json.loads(feedback)
-
-    pct_pos = round(positive / max(total, 1) * 100)
+    pct_pos = results.get("pct_positive", round(positive / max(total, 1) * 100))
     pct_neg = round(negative / max(total, 1) * 100)
     pct_no = round(no_resp / max(total, 1) * 100)
 
     kpi_success = kpi.get("success", "N/A")
-    kpi_met = pct_pos >= 30  # default threshold
 
-    # CSO raccomandazione via Haiku
-    cso_rec = "GO" if kpi_met else "NO-GO"
-    rec_reason = f"KPI raggiunto ({pct_pos}% risposte positive)" if kpi_met else f"KPI non raggiunto ({pct_pos}% < soglia)"
-    try:
-        rec_prompt = (
-            f"Sei il CSO di brAIn. Analizza questi risultati smoke test per '{name}':\n"
-            f"Prospect: {total}, Positive: {positive} ({pct_pos}%), Negative: {negative}, Demo: {demos}\n"
-            f"KPI successo definito: {kpi_success}\n"
-            f"Feedback qualitativo: {json.dumps(feedback[:3], ensure_ascii=False)}\n\n"
-            f"Dai una raccomandazione GO o NO-GO in 2 righe con motivazione basata sui dati. "
-            f"Solo la raccomandazione, niente altro."
-        )
-        rec_resp = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=150,
-            messages=[{"role": "user", "content": rec_prompt}],
-        )
-        cso_rec_text = rec_resp.content[0].text.strip()
-    except Exception:
-        cso_rec_text = f"Raccomandazione: {cso_rec}. {rec_reason}"
+    # Insights (gia' calcolati da analyze_smoke_results)
+    insights = json.loads(smoke.get("spec_insights") or "{}")
+    cso_rec = insights.get("recommendation", smoke.get("recommendation", ""))
+    cso_reasoning = insights.get("reasoning", smoke.get("cso_recommendation", ""))
+    risk_if_go = insights.get("risk_if_go", "")
+    opportunity = insights.get("opportunity", "")
+    kpi_met = insights.get("kpi_met", pct_pos >= 15)
+    kpi_result = "RAGGIUNTO" if kpi_met else "NON RAGGIUNTO"
+
+    # Se non ci sono insights pre-calcolati, genera raccomandazione via Haiku
+    if not cso_rec:
+        try:
+            fb_raw = smoke.get("qualitative_feedback") or "[]"
+            if isinstance(fb_raw, str):
+                fb_raw = json.loads(fb_raw)
+            fb_str = json.dumps(fb_raw[:3], ensure_ascii=False)
+            rec_prompt = (
+                "Sei il CSO di brAIn. Risultati smoke test per '" + brand_name + "':\n"
+                "Prospect: " + str(total) + ", Positive: " + str(positive) +
+                " (" + str(pct_pos) + "%), Negative: " + str(negative) +
+                ", Demo: " + str(demos) + "\n"
+                "KPI successo: " + kpi_success + "\n"
+                "Feedback: " + fb_str + "\n\n"
+                "Raccomandazione GO/PIVOT/NO-GO in 2 righe con motivazione basata sui dati."
+            )
+            rec_resp = claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=150,
+                messages=[{"role": "user", "content": rec_prompt}],
+            )
+            cso_reasoning = rec_resp.content[0].text.strip()
+            cso_rec = "GO" if kpi_met else "NO-GO"
+        except Exception:
+            cso_reasoning = "KPI " + kpi_result + " (" + str(pct_pos) + "% risposte positive)"
+            cso_rec = "GO" if kpi_met else "NO-GO"
 
     # Salva raccomandazione
     try:
         supabase.table("smoke_tests").update({
-            "cso_recommendation": cso_rec_text,
+            "cso_recommendation": cso_reasoning,
         }).eq("id", smoke_id).execute()
     except Exception:
         pass
 
-    # Feedback qualitativo top 3
+    # Feedback qualitativo
+    feedback = insights.get("top_feedback", [])
+    if not feedback:
+        raw_fb = smoke.get("qualitative_feedback") or []
+        if isinstance(raw_fb, str):
+            raw_fb = json.loads(raw_fb)
+        feedback = raw_fb[:3]
+
     fb_lines = ""
     for i, fb in enumerate(feedback[:3], 1):
-        quote = fb if isinstance(fb, str) else fb.get("quote", str(fb))
-        fb_lines += f"  {i}. \"{quote}\"\n"
+        quote = fb if isinstance(fb, str) else str(fb)
+        fb_lines += "  " + str(i) + ". \"" + quote + "\"\n"
     if not fb_lines:
         fb_lines = "  (nessun feedback qualitativo raccolto)\n"
 
-    kpi_result = "RAGGIUNTO" if kpi_met else "NON RAGGIUNTO"
+    # Obiezioni
+    objections = insights.get("objections", [])
+    obj_lines = ""
+    for obj in objections[:3]:
+        obj_lines += "  - " + obj + "\n"
+
+    # Landing page line
+    landing_line = ""
+    if landing_views or landing_signups:
+        landing_ctr = round(landing_signups / max(landing_views, 1) * 100, 1)
+        landing_line = (
+            "Email/lead raccolti: " + str(landing_signups) + "\n"
+            "CTR landing: " + str(landing_ctr) + "%\n"
+        )
+
+    cost_line = ""
+    if total_cost:
+        cost_line = (
+            "Costo totale: EUR" + str(total_cost) + "\n"
+            "Costo per lead: EUR" + str(cost_per_lead) + "\n"
+        )
+
+    method_names = {
+        "cold_outreach": "Cold Outreach B2B",
+        "landing_page_ads": "Landing Page + Ads",
+        "concierge": "Concierge MVP",
+        "pre_order": "Pre-Order / Deposito",
+        "paid_ads": "Paid Ads",
+        "cold_outreach_landing": "Cold Outreach + Landing",
+    }
+
+    # Date
+    started = smoke.get("started_at", "")
+    completed = smoke.get("completed_at", "")
+    dates_line = ""
+    if started and completed:
+        try:
+            s = datetime.fromisoformat(started.replace("Z", "+00:00")).strftime("%d/%m")
+            c = datetime.fromisoformat(completed.replace("Z", "+00:00")).strftime("%d/%m")
+            dates_line = "Durata: " + s + " -> " + c + "\n"
+        except Exception:
+            pass
 
     card = (
-        f"RISULTATI SMOKE TEST — {name}\n"
-        f"{SEP}\n"
-        f"Prospect contattati: {total}\n"
-        f"Risposte positive: {positive} ({pct_pos}%)\n"
-        f"Risposte negative: {negative} ({pct_neg}%)\n"
-        f"No risposta: {no_resp} ({pct_no}%)\n"
-        f"Richieste demo: {demos}\n"
-        f"Feedback qualitativo top 3:\n"
-        f"{fb_lines}"
-        f"KPI target: {kpi_success}\n"
-        f"Risultato: {kpi_result}\n\n"
-        f"Raccomandazione CSO: {cso_rec_text}\n"
-        f"{SEP}"
+        "RISULTATI SMOKE TEST — " + brand_name + "\n"
+        + SEP + "\n"
+        + dates_line
+        + "Metodo: " + method_names.get(method, method) + "\n\n"
+        "DATI QUANTITATIVI:\n"
+        "Prospect raggiunti: " + str(total) + "\n"
+        "Risposte positive: " + str(positive) + " (" + str(pct_pos) + "%)\n"
+        "Risposte negative: " + str(negative) + " (" + str(pct_neg) + "%)\n"
+        "No risposta: " + str(no_resp) + " (" + str(pct_no) + "%)\n"
+        "Richieste approfondimento: " + str(demos) + "\n"
+        + landing_line
+        + cost_line + "\n"
+        "SEGNALI QUALITATIVI:\n"
+        "Top 3 feedback:\n" + fb_lines + "\n"
     )
+
+    if obj_lines:
+        card += "Obiezioni principali:\n" + obj_lines + "\n"
+
+    card += (
+        "KPI target: " + kpi_success + " -> " + kpi_result + "\n\n"
+        "RACCOMANDAZIONE CSO:\n"
+        + cso_rec + " — " + cso_reasoning + "\n"
+    )
+
+    if risk_if_go:
+        card += "Rischio se vai avanti: " + risk_if_go + "\n"
+    if opportunity:
+        card += "Opportunita': " + opportunity + "\n"
+
+    card += SEP
 
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "GO — procedi al build",
-                 "callback_data": f"smoke_go:{project_id}:{smoke_id}"},
+                {"text": "GO — avvia build",
+                 "callback_data": "smoke_go:" + str(project_id) + ":" + str(smoke_id)},
                 {"text": "NO-GO — archivia",
-                 "callback_data": f"smoke_nogo:{project_id}:{smoke_id}"},
+                 "callback_data": "smoke_nogo:" + str(project_id) + ":" + str(smoke_id)},
             ],
             [
-                {"text": "Pivota — modifica soluzione",
-                 "callback_data": f"smoke_pivot:{project_id}:{smoke_id}"},
+                {"text": "PIVOT — modifica soluzione",
+                 "callback_data": "smoke_pivot:" + str(project_id) + ":" + str(smoke_id)},
             ],
         ]
     }

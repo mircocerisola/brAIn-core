@@ -45,6 +45,7 @@ from core.endpoints import (
     run_founder_pipeline_endpoint, run_resend_spec_endpoint, run_cleanup_old_topics_endpoint,
     run_health_check_endpoint,
     run_smoke_design_endpoint, run_restaurant_reposition_endpoint,
+    run_smoke_daily_update_endpoint,
 )
 
 
@@ -110,6 +111,7 @@ async def main():
     app.router.add_post("/smoke/design", run_smoke_design_endpoint)
     app.router.add_post("/smoke/setup", run_smoke_setup_endpoint)
     app.router.add_post("/smoke/analyze", run_smoke_analyze_endpoint)
+    app.router.add_post("/smoke/daily-update", run_smoke_daily_update_endpoint)
 
     # Marketing
     app.router.add_post("/marketing/run", run_marketing_run_endpoint)

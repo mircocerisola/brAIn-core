@@ -1,6 +1,43 @@
-"""CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunità."""
+"""CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunita'."""
 from core.base_chief import BaseChief
 from core.config import supabase, logger
+
+
+def select_smoke_test_method(solution):
+    """Seleziona il metodo smoke test ottimale in base a settore/audience."""
+    sector = (solution.get("sector") or "").lower()
+    audience = (solution.get("target_audience") or "").lower()
+    solution_type = (solution.get("solution_type") or solution.get("sub_sector") or "").lower()
+    market_size = solution.get("market_size") or solution.get("affected_population") or 0
+    if isinstance(market_size, str):
+        try:
+            market_size = int(market_size.replace(",", "").replace(".", ""))
+        except Exception:
+            market_size = 0
+
+    # B2B con decision maker identificabili -> outreach diretto
+    b2b_sectors = (
+        "food_tech", "saas", "fintech", "hr_tech", "legal_tech",
+        "real_estate", "logistics", "healthcare", "education",
+        "hospitality", "restaurant", "retail",
+    )
+    if sector in b2b_sectors and "business" in audience:
+        return "cold_outreach"
+
+    # B2C o audience ampia -> landing page + ads
+    if "consumer" in audience or market_size > 100000:
+        return "landing_page_ads"
+
+    # Servizio manuale validabile -> concierge MVP
+    if "service" in solution_type or "servizio" in solution_type:
+        return "concierge"
+
+    # SaaS B2B -> pre-order
+    if "saas" in sector or "software" in solution_type:
+        return "pre_order"
+
+    # Default B2B -> outreach + landing
+    return "cold_outreach_landing"
 
 
 class CSO(BaseChief):

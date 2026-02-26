@@ -3206,6 +3206,111 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
+    # ---- CAMBIO METODO SMOKE TEST ----
+    elif data.startswith("smoke_design_method:"):
+        project_id = int(data.split(":")[1])
+        await query.answer()
+        _method_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "Cold Outreach B2B", "callback_data": f"smoke_method_select:{project_id}:cold_outreach"},
+                    {"text": "Landing + Ads", "callback_data": f"smoke_method_select:{project_id}:landing_page_ads"},
+                ],
+                [
+                    {"text": "Concierge MVP", "callback_data": f"smoke_method_select:{project_id}:concierge"},
+                    {"text": "Pre-Order", "callback_data": f"smoke_method_select:{project_id}:pre_order"},
+                ],
+                [
+                    {"text": "Paid Ads puri", "callback_data": f"smoke_method_select:{project_id}:paid_ads"},
+                    {"text": "Outreach + Landing", "callback_data": f"smoke_method_select:{project_id}:cold_outreach_landing"},
+                ],
+            ]
+        }
+        _token_sm = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_sm:
+            _payload_sm = {"chat_id": chat_id, "text": "Scegli il metodo per lo smoke test:", "reply_markup": _method_markup}
+            if thread_id:
+                _payload_sm["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{_token_sm}/sendMessage", json=_payload_sm, timeout=10)
+
+    elif data.startswith("smoke_method_select:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        new_method = parts[2] if len(parts) > 2 else "cold_outreach"
+        _method_names = {
+            "cold_outreach": "Cold Outreach B2B",
+            "landing_page_ads": "Landing + Ads",
+            "concierge": "Concierge MVP",
+            "pre_order": "Pre-Order",
+            "paid_ads": "Paid Ads puri",
+            "cold_outreach_landing": "Outreach + Landing",
+        }
+        await query.answer(f"Metodo: {_method_names.get(new_method, new_method)}")
+        try:
+            supabase.table("projects").update({"smoke_test_method": new_method}).eq("id", project_id).execute()
+        except Exception as e:
+            logger.error(f"[SMOKE_METHOD] {e}")
+        # Re-run design con nuovo metodo
+        def _rerun_smoke_design():
+            try:
+                from execution.pipeline import design_smoke_test
+                design_smoke_test(project_id)
+            except Exception as e:
+                logger.warning(f"[SMOKE_METHOD] re-design: {e}")
+        threading.Thread(target=_rerun_smoke_design, daemon=True).start()
+
+    # ---- SMOKE TEST DATA VIEWS ----
+    elif data.startswith("smoke_prospects:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer()
+        _token_sp = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_sp:
+            try:
+                _prospects = supabase.table("smoke_test_prospects").select(
+                    "name,company,role,contact,channel"
+                ).eq("smoke_test_id", smoke_id).limit(20).execute()
+                _lines = ["Lista prospect (top 20):"]
+                for _p in (_prospects.data or []):
+                    _pn = _p.get("name", "N/A")
+                    _pc = _p.get("company", "")
+                    _pcontact = _p.get("contact", "N/A")
+                    _pl = _pn
+                    if _pc:
+                        _pl += f" ({_pc})"
+                    _pl += f" — {_pcontact}"
+                    _lines.append(f"- {_pl}")
+                _text_sp = "\n".join(_lines)[:4000]
+            except Exception:
+                _text_sp = "Errore nel recupero prospect."
+            _payload_sp = {"chat_id": chat_id, "text": _text_sp}
+            if thread_id:
+                _payload_sp["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{_token_sp}/sendMessage", json=_payload_sp, timeout=10)
+
+    elif data.startswith("smoke_emails:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer()
+        _token_se = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_se:
+            try:
+                _st = supabase.table("smoke_tests").select("cold_email_sequence").eq("id", smoke_id).execute()
+                _emails = json.loads(_st.data[0].get("cold_email_sequence") or "[]") if _st.data else []
+                _lines_e = ["Sequenza email:"]
+                for _em in _emails:
+                    _lines_e.append(f"\nGiorno {_em.get('day', '?')} — {_em.get('subject', 'N/A')}")
+                    _lines_e.append(_em.get("body", ""))
+                _text_se = "\n".join(_lines_e)[:4000]
+            except Exception:
+                _text_se = "Errore nel recupero email templates."
+            _payload_se = {"chat_id": chat_id, "text": _text_se}
+            if thread_id:
+                _payload_se["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{_token_se}/sendMessage", json=_payload_se, timeout=10)
+
     elif data.startswith("smoke_go:"):
         parts = data.split(":")
         project_id = int(parts[1])

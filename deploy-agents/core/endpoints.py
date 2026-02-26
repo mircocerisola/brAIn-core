@@ -27,7 +27,7 @@ from finance.reports import (
 from execution.builder import generate_build_prompt, init_project
 from execution.validator import run_validation_agent, continue_build_agent, run_spec_update, _generate_team_invite_link_sync
 from execution.legal import run_legal_review, generate_project_docs, monitor_brain_compliance
-from execution.smoke import run_smoke_test_setup, analyze_feedback_for_spec, run_smoke_design
+from execution.smoke import run_smoke_test_setup, analyze_feedback_for_spec, run_smoke_design, run_smoke_daily_update
 from execution.pipeline import send_restaurant_reposition
 from marketing.agents import run_marketing, generate_marketing_report
 
@@ -357,6 +357,14 @@ async def run_smoke_analyze_endpoint(request):
         if not project_id:
             return web.json_response({"error": "project_id obbligatorio"}, status=400)
         result = analyze_feedback_for_spec(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+async def run_smoke_daily_update_endpoint(request):
+    """POST /smoke/daily-update — aggiornamento giornaliero smoke test attivi."""
+    try:
+        result = run_smoke_daily_update()
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
