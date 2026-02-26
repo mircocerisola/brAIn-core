@@ -3271,6 +3271,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lower_msg = msg.strip().lower()
 
+    # ---- C-SUITE ROUTING ----
+    _CSUITE_KEYWORDS = {
+        "cso": "strategy", "strategia": "strategy", "pivot": "strategy",
+        "cfo": "finance", "costi": "finance", "budget": "finance", "burn rate": "finance",
+        "cmo": "marketing", "growth": "marketing", "conversione": "marketing",
+        "cto": "tech", "architettura": "tech", "deploy": "tech",
+        "coo": "ops", "operazioni": "ops", "pipeline": "ops",
+        "cpo": "product", "roadmap": "product", "ux": "product",
+        "clo": "legal", "legale": "legal", "compliance": "legal", "gdpr": "legal",
+        "cpeo": "people", "revenue share": "people",
+    }
+    _csuite_match = None
+    for kw, dom in _CSUITE_KEYWORDS.items():
+        if kw in lower_msg:
+            _csuite_match = dom
+            break
+
+    if _csuite_match and len(lower_msg) > 5:
+        # Routing a C-Suite: chiedi al Chief via agents-runner
+        await update.message.reply_text(
+            _make_card("🧠", "C-SUITE", f"Chief {_csuite_match.upper()}", ["Consultando il Chief in corso…"]),
+            parse_mode="Markdown",
+        )
+        _domain_cs = _csuite_match
+        _question_cs = msg
+        _chat_cs = chat_id
+        _token_cs = os.getenv("TELEGRAM_BOT_TOKEN")
+        def _csuite_ask():
+            result = _call_agents_runner_sync("/csuite/ask", {"domain": _domain_cs, "question": _question_cs})
+            if result and result.get("answer") and _token_cs and _chat_cs:
+                answer_text = f"🧠 *{result.get('chief', 'Chief')}*\n\n{result['answer']}"
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token_cs}/sendMessage",
+                    json={"chat_id": _chat_cs, "text": answer_text[:4000], "parse_mode": "Markdown"},
+                    timeout=30,
+                )
+        threading.Thread(target=_csuite_ask, daemon=True).start()
+        return
+
     # ---- MARKETING ROUTING ----
     _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
 

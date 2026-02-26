@@ -32,9 +32,6 @@ from core.endpoints import (
     run_smoke_setup_endpoint, run_smoke_analyze_endpoint,
     run_marketing_run_endpoint, run_marketing_brand_endpoint, run_marketing_report_endpoint,
     run_all_endpoint,
-    # C-Suite + Ethics
-    run_csuite_briefing_endpoint, run_csuite_ask_endpoint, run_csuite_anomalies_endpoint,
-    run_ethics_check_endpoint, run_ethics_check_active_endpoint,
 )
 
 
@@ -104,15 +101,6 @@ async def main():
     app.router.add_post("/marketing/run", run_marketing_run_endpoint)
     app.router.add_post("/marketing/brand", run_marketing_brand_endpoint)
     app.router.add_post("/marketing/report", run_marketing_report_endpoint)
-
-    # C-Suite
-    app.router.add_post("/csuite/briefing", run_csuite_briefing_endpoint)
-    app.router.add_post("/csuite/ask", run_csuite_ask_endpoint)
-    app.router.add_post("/csuite/anomalies", run_csuite_anomalies_endpoint)
-
-    # Ethics
-    app.router.add_post("/ethics/check", run_ethics_check_endpoint)
-    app.router.add_post("/ethics/check-active", run_ethics_check_active_endpoint)
 
     # All
     app.router.add_post("/all", run_all_endpoint)
