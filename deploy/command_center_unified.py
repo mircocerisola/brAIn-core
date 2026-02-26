@@ -3271,7 +3271,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "cmo": "marketing", "growth": "marketing", "conversione": "marketing",
         "cto": "tech", "architettura": "tech", "deploy": "tech",
         "coo": "ops", "operazioni": "ops", "pipeline": "ops",
-        "cpo": "product", "roadmap": "product", "ux": "product",
+        "cpo": "ops", "roadmap": "ops", "ux": "ops",
         "clo": "legal", "legale": "legal", "compliance": "legal", "gdpr": "legal",
         "cpeo": "people", "revenue share": "people",
     }

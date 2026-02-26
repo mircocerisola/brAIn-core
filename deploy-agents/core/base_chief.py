@@ -24,17 +24,13 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
                            "pipeline_thresholds", "chief_memory", "chief_decisions"],
         "tables_forbidden": [],
     },
-    "cpo": {
-        "file_allowed": ["execution/", "deploy-agents/execution/"],
-        "tables_allowed": ["projects", "project_metrics", "kpi_daily", "smoke_tests",
-                           "smoke_test_prospects", "smoke_test_events", "chief_memory", "chief_decisions"],
-        "tables_forbidden": ["agent_logs", "scan_sources", "org_config", "code_tasks"],
-    },
     "coo": {
-        "file_allowed": ["core/"],
+        "file_allowed": ["core/", "execution/", "deploy-agents/execution/"],
         "tables_allowed": ["agent_logs", "agent_events", "action_queue", "scan_schedule",
+                           "projects", "project_metrics", "kpi_daily", "smoke_tests",
+                           "smoke_test_prospects", "smoke_test_events",
                            "chief_memory", "chief_decisions"],
-        "tables_forbidden": ["projects", "solutions", "brand_assets"],
+        "tables_forbidden": ["solutions", "brand_assets", "org_config", "code_tasks"],
     },
     "cto": {
         "file_allowed": ["*"],
@@ -87,9 +83,9 @@ ROUTING_KEYWORDS: Dict[str, str] = {
     # CPeO
     "manager": "cpeo", "onboarding": "cpeo", "formazione": "cpeo",
     "persone": "cpeo", "collaboratori": "cpeo", "team building": "cpeo",
-    # CPO
-    "cantieri": "cpo", "build": "cpo", "spec": "cpo", "lancio": "cpo",
-    "mvp": "cpo", "roadmap": "cpo", "feature": "cpo",
+    # COO (ex-CPO)
+    "cantieri": "coo", "build": "coo", "spec": "coo", "lancio": "coo",
+    "mvp": "coo", "roadmap": "coo", "feature": "coo",
     # CSO
     "pipeline": "cso", "opportunità": "cso", "mercato": "cso",
     "bos": "cso", "problemi globali": "cso", "competizione": "cso", "pivot": "cso",
@@ -220,7 +216,7 @@ class BaseChief(BaseAgent):
             f"Domanda ricevuta: \"{question}\"\n\n"
             f"Chief disponibili e loro domini:\n"
             f"cso=strategy/pipeline, cfo=finance/budget, cmo=marketing/brand,\n"
-            f"cto=tech/code/infra, coo=operations/processes, cpo=product/build/projects,\n"
+            f"cto=tech/code/infra, coo=operations/processes/product/build/projects,\n"
             f"clo=legal/compliance, cpeo=people/team\n\n"
             f"Rispondi SOLO JSON: {{\"is_own_domain\": true/false, \"correct_chief\": \"cso\", \"reason\": \"...\"}}"
         )
@@ -250,7 +246,7 @@ class BaseChief(BaseAgent):
             from csuite import _chiefs
             chief_map = {
                 "cso": "strategy", "cfo": "finance", "cmo": "marketing",
-                "cto": "tech", "coo": "ops", "cpo": "product",
+                "cto": "tech", "coo": "ops", "cpo": "ops",
                 "clo": "legal", "cpeo": "people",
             }
             dest_domain = chief_map.get(correct_chief_id)

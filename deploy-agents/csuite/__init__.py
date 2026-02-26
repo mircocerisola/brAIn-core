@@ -1,5 +1,5 @@
 """
-brAIn C-Suite AI — 8 Chief agents.
+brAIn C-Suite AI — 7 Chief agents.
 Registry e routing per dominio.
 """
 from csuite.cso import CSO
@@ -7,7 +7,6 @@ from csuite.cfo import CFO
 from csuite.cmo import CMO
 from csuite.cto import CTO
 from csuite.coo import COO
-from csuite.cpo import CPO
 from csuite.clo import CLO
 from csuite.cpeo import CPeO
 
@@ -18,7 +17,6 @@ _chiefs = {
     "marketing": CMO(),
     "tech": CTO(),
     "ops": COO(),
-    "product": CPO(),
     "legal": CLO(),
     "people": CPeO(),
 }
@@ -35,8 +33,8 @@ KEYWORD_ROUTING = {
     "architettura": "tech", "sicurezza tecnica": "tech",
     "coo": "ops", "operazioni": "ops", "cantiere": "ops", "pipeline": "ops",
     "blocco": "ops", "collo di bottiglia": "ops",
-    "cpo": "product", "prodotto": "product", "ux": "product", "roadmap": "product",
-    "feedback utenti": "product", "mvp": "product",
+    "cpo": "ops", "prodotto": "ops", "ux": "ops", "roadmap": "ops",
+    "feedback utenti": "ops", "mvp": "ops",
     "clo": "legal", "legale": "legal", "compliance": "legal", "gdpr": "legal",
     "contratto": "legal", "rischio legale": "legal",
     "cpeo": "people", "team": "people", "manager": "people",
