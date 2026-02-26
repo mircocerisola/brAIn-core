@@ -7,18 +7,16 @@ from datetime import datetime
 from aiohttp import web
 
 from core.config import supabase, logger
-from core.utils import (
-    get_telegram_chat_id, get_standard_queries,
-)
-from intelligence.scanner import run_world_scanner, run_custom_scan, run_targeted_scan, run_scan
+from core.utils import get_telegram_chat_id
+from intelligence.scanner import run_world_scanner, run_custom_scan, run_scan, get_standard_queries
 from intelligence.architect import run_solution_architect
-from intelligence.feasibility import run_feasibility_engine, run_bos_endpoint_logic
-from intelligence.pipeline import process_events, run_auto_pipeline
+from intelligence.feasibility import run_feasibility_engine, run_bos_endpoint_logic, run_auto_pipeline
+from intelligence.pipeline import process_events
 from memory.knowledge import run_knowledge_keeper
 from memory.scout import run_capability_scout
 from memory.kpi import update_kpi_daily
 from memory.recycler import run_idea_recycler
-from memory.sources import run_source_refresh, run_sources_cleanup_weekly
+from memory.sources import run_source_refresh, run_sources_cleanup_weekly, run_targeted_scan
 from memory.thresholds import run_weekly_threshold_update, run_action_queue_cleanup
 from finance.finance import (
     run_finance_agent, finance_morning_report, finance_weekly_report, finance_monthly_report
@@ -26,9 +24,8 @@ from finance.finance import (
 from finance.reports import (
     generate_cost_report_v2, generate_activity_report_v2, _get_rome_tz
 )
-from execution.project import init_project, _generate_team_invite_link_sync
-from execution.builder import generate_build_prompt
-from execution.validator import run_validation_agent, continue_build_agent, run_spec_update
+from execution.builder import generate_build_prompt, init_project
+from execution.validator import run_validation_agent, continue_build_agent, run_spec_update, _generate_team_invite_link_sync
 from execution.legal import run_legal_review, generate_project_docs, monitor_brain_compliance
 from execution.smoke import run_smoke_test_setup, analyze_feedback_for_spec
 from marketing.agents import run_marketing, generate_marketing_report
