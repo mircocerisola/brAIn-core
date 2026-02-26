@@ -46,9 +46,10 @@ USD_TO_EUR = 0.92
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 _chat_history_available = None  # None=not checked yet, True/False
 
-# Buffer messaggi per Forum Topic (ultimi 7 per topic) — usato per capire contesto risposte brevi
+# Buffer messaggi per Forum Topic — usato per contesto risposte brevi + episodic memory trigger
 _topic_recent_msgs = {}  # "chat_id:thread_id" -> [{"role": "user/bot", "text": str}, ...]
-_TOPIC_BUFFER_SIZE = 7
+_TOPIC_BUFFER_SIZE = 10
+_topic_msg_count = {}   # scope_key -> count totale messaggi user (per trigger episodio ogni 10)
 _SPEC_KEYWORDS = frozenset({
     "spec", "modifica", "funzionalit", "aggiungi", "cambia", "rimuovi", "togli",
     "aggiorna", "integra", "api", "dashboard", "report", "feature",
@@ -68,6 +69,31 @@ def _topic_buffer_add(chat_id, thread_id, text, role="user"):
     buf.append({"role": role, "text": text})
     _topic_recent_msgs[key] = buf[-_TOPIC_BUFFER_SIZE:]
 
+    # L1: Persisti su Supabase in background (fire-and-forget)
+    def _persist():
+        try:
+            supabase.table("topic_conversation_history").insert({
+                "scope_id": key,
+                "role": role,
+                "text": text[:2000],
+            }).execute()
+        except Exception:
+            pass
+    threading.Thread(target=_persist, daemon=True).start()
+
+    # Trigger episodic memory ogni 10 messaggi user
+    if role == "user":
+        count = _topic_msg_count.get(key, 0) + 1
+        _topic_msg_count[key] = count
+        if count % 10 == 0:
+            # Crea episodio con gli ultimi messaggi
+            snapshot = list(buf)
+            threading.Thread(
+                target=_trigger_create_episode,
+                args=(key, snapshot),
+                daemon=True,
+            ).start()
+
 
 def _topic_buffer_get_recent(chat_id, thread_id, n=5):
     """Ultimi n messaggi del topic ESCLUSO l'ultimo appena aggiunto (= contesto precedente)."""
@@ -76,6 +102,40 @@ def _topic_buffer_get_recent(chat_id, thread_id, n=5):
     # esclude l'ultimo (il messaggio corrente) per vedere cosa c'era prima
     prior = msgs[:-1] if len(msgs) > 1 else []
     return prior[-n:]
+
+
+def _trigger_create_episode(scope_id: str, messages: list):
+    """Background: chiama agents-runner per creare un episodio riassuntivo."""
+    if not AGENTS_RUNNER_URL:
+        return
+    try:
+        oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+        headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+        http_requests.post(
+            f"{AGENTS_RUNNER_URL}/memory/create-episode",
+            json={"scope_type": "topic", "scope_id": scope_id, "messages": messages},
+            headers=headers,
+            timeout=30,
+        )
+    except Exception as e:
+        logger.debug(f"[MEMORY] create-episode trigger error: {e}")
+
+
+def _trigger_extract_facts(message: str, chief_id: str):
+    """Background: chiama agents-runner per estrarre fatti semantici dal messaggio."""
+    if not AGENTS_RUNNER_URL or not message or len(message.strip()) < 20:
+        return
+    try:
+        oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+        headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+        http_requests.post(
+            f"{AGENTS_RUNNER_URL}/memory/extract-facts",
+            json={"message": message[:1000], "chief_id": chief_id},
+            headers=headers,
+            timeout=20,
+        )
+    except Exception as e:
+        logger.debug(f"[MEMORY] extract-facts trigger error: {e}")
 
 
 def _is_short_affirmative(msg):
@@ -2370,7 +2430,10 @@ async def handle_project_message(update, project):
         _chief_display = _chief_name_map.get(_chief_id, "COO")
         sep = "\u2501" * 15
 
-        # Chiama Chief via agents-runner con project_context
+        # Chiama Chief via agents-runner con project_context + memoria
+        _topic_scope = f"{chat_id}:{thread_id}" if thread_id else f"{chat_id}:main"
+        _recent_msgs = _topic_buffer_get_recent(chat_id, thread_id or 0)
+
         def _project_chief_ask():
             _token = os.getenv("TELEGRAM_BOT_TOKEN")
             if not AGENTS_RUNNER_URL or not _token:
@@ -2384,6 +2447,9 @@ async def handle_project_message(update, project):
                         "domain": _domain_target,
                         "question": msg,
                         "project_context": project_context,
+                        "topic_scope_id": _topic_scope,
+                        "project_scope_id": str(project_id),
+                        "recent_messages": _recent_msgs,
                     },
                     headers=headers,
                     timeout=45,
@@ -2404,6 +2470,12 @@ async def handle_project_message(update, project):
                         json=payload, timeout=15,
                     )
                     _topic_buffer_add(chat_id, thread_id or 0, answer[:200], role="bot")
+                    # L3: estrai fatti semantici dal messaggio di Mirco
+                    threading.Thread(
+                        target=_trigger_extract_facts,
+                        args=(msg, _chief_id),
+                        daemon=True,
+                    ).start()
             except Exception as e:
                 logger.warning(f"[PROJECT_CHIEF_ASK] {e}")
 
@@ -3354,7 +3426,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if _csuite_match and len(lower_msg) > 5:
-        # Routing a C-Suite: chiedi al Chief via agents-runner
+        # Routing a C-Suite: chiedi al Chief via agents-runner con memoria
+        _topic_buffer_add(chat_id, 0, msg, role="user")
         await update.message.reply_text(
             _make_card("🧠", "C-SUITE", f"Chief {_csuite_match.upper()}", ["Consultando il Chief in corso…"]),
             parse_mode="Markdown",
@@ -3363,8 +3436,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _question_cs = msg
         _chat_cs = chat_id
         _token_cs = os.getenv("TELEGRAM_BOT_TOKEN")
+        _scope_cs = f"{chat_id}:main"
+        _recent_cs = _topic_buffer_get_recent(chat_id, 0)
+        # Mappa domain → chief_id per extract_facts
+        _domain_to_chief = {
+            "strategy": "cso", "finance": "cfo", "marketing": "cmo",
+            "tech": "cto", "ops": "coo", "legal": "clo", "people": "cpeo",
+        }
+        _chief_id_cs = _domain_to_chief.get(_domain_cs, "coo")
         def _csuite_ask():
-            result = _call_agents_runner_sync("/csuite/ask", {"domain": _domain_cs, "question": _question_cs})
+            result = _call_agents_runner_sync("/csuite/ask", {
+                "domain": _domain_cs,
+                "question": _question_cs,
+                "topic_scope_id": _scope_cs,
+                "recent_messages": _recent_cs,
+            })
             if result and result.get("answer") and _token_cs and _chat_cs:
                 answer_text = f"🧠 *{result.get('chief', 'Chief')}*\n\n{result['answer']}"
                 http_requests.post(
@@ -3372,6 +3458,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     json={"chat_id": _chat_cs, "text": answer_text[:4000], "parse_mode": "Markdown"},
                     timeout=30,
                 )
+                _topic_buffer_add(_chat_cs, 0, result["answer"][:200], role="bot")
+            # L3: estrai fatti semantici dal messaggio
+            _trigger_extract_facts(_question_cs, _chief_id_cs)
         threading.Thread(target=_csuite_ask, daemon=True).start()
         return
 

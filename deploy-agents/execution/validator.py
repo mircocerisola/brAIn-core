@@ -11,6 +11,10 @@ from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, e
 from execution.project import (get_project_db, _send_to_topic, _commit_to_project_repo,
     _get_telegram_group_id, _github_project_api, SPEC_SYSTEM_PROMPT_AR)
 from execution.builder import FASE_DESCRIPTIONS, enqueue_spec_review_action
+try:
+    from intelligence.memory import update_project_episode as _update_project_episode
+except Exception:
+    def _update_project_episode(*args, **kwargs): pass
 
 
 VALIDATION_SYSTEM_PROMPT_AR = """Sei il Validation Agent di brAIn. Analizza le metriche di un progetto MVP e dai un verdetto SCALE/PIVOT/KILL.
@@ -122,8 +126,17 @@ Analizza e dai il verdetto."""
                     "status": "killed",
                     "notes": f"KILL — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: {verdict_text[:200]}",
                 }).eq("id", project_id).execute()
+                _update_project_episode(project_id, f"Verdetto KILL: {verdict_text[:150]}", "killed", "Progetto archiviato")
             except:
                 pass
+        else:
+            verdict_tag = "SCALE" if "SCALE" in verdict_text.upper() else "PIVOT"
+            _update_project_episode(
+                project_id,
+                f"Verdetto {verdict_tag}: {verdict_text[:150]}",
+                "validating",
+                f"Seguire raccomandazioni {verdict_tag}",
+            )
 
         report_msg = (
             f"\U0001f4ca REPORT SETTIMANALE\n"
@@ -299,6 +312,12 @@ Genera il codice per la Fase {next_phase}."""
                 "status": f"review_phase{next_phase}",
                 "build_phase": next_phase,
             }).eq("id", project_id).execute()
+            _update_project_episode(
+                project_id,
+                f"Build Fase {next_phase} completata ({FASE_DESCRIPTIONS.get(next_phase, '')})",
+                f"review_phase{next_phase}",
+                f"Mirco revisiona fase {next_phase}",
+            )
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update: {e}")
 
@@ -328,6 +347,12 @@ Genera il codice per la Fase {next_phase}."""
                 "status": "build_complete",
                 "build_phase": next_phase,
             }).eq("id", project_id).execute()
+            _update_project_episode(
+                project_id,
+                "Build completo (tutte le fasi)",
+                "build_complete",
+                "Mirco approva lancio o avvia smoke test",
+            )
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update build_complete: {e}")
 

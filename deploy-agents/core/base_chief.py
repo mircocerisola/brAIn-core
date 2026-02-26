@@ -154,14 +154,20 @@ class BaseChief(BaseAgent):
             context["memory"] = {}
         return context
 
-    def build_system_prompt(self, project_context: Optional[str] = None) -> str:
+    def build_system_prompt(self, project_context: Optional[str] = None,
+                            topic_scope_id: Optional[str] = None,
+                            project_scope_id: Optional[str] = None,
+                            recent_messages: Optional[List[Dict]] = None) -> str:
         """
         Assembla il system prompt dinamico per il Chief:
         1. Profilo Chief (da chief_knowledge knowledge_type='profile')
         2. Top 10 org_shared_knowledge (importanza DESC)
         3. Top 20 chief_knowledge specialistica (escluso 'profile')
-        4. Contesto progetto (se presente)
-        5. Regola fondamentale
+        4. Episodic memory topic (sessioni precedenti)
+        5. Episodic memory progetto (storia cantiere)
+        6. Messaggi recenti verbatim (L1)
+        7. Contesto progetto (se presente)
+        8. Regola fondamentale
         """
         sep = "\u2501" * 20
         parts: List[str] = []
@@ -214,11 +220,39 @@ class BaseChief(BaseAgent):
         except Exception as e:
             logger.warning(f"[{self.name}] build_system_prompt chief_knowledge: {e}")
 
-        # 4. Contesto progetto (se presente)
+        # 4. Episodic memory — topic (sessioni precedenti)
+        if topic_scope_id:
+            try:
+                from intelligence.memory import get_episodes
+                episodes = get_episodes("topic", topic_scope_id, limit=5)
+                if episodes:
+                    parts.append("=== SESSIONI PRECEDENTI ===\n" + "\n---\n".join(episodes))
+            except Exception as e:
+                logger.warning(f"[{self.name}] episodic topic memory error: {e}")
+
+        # 5. Episodic memory — project (storia cantiere)
+        if project_scope_id:
+            try:
+                from intelligence.memory import get_episodes
+                proj_ep = get_episodes("project", str(project_scope_id), limit=5)
+                if proj_ep:
+                    parts.append("=== STORIA CANTIERE ===\n" + "\n---\n".join(proj_ep))
+            except Exception as e:
+                logger.warning(f"[{self.name}] episodic project memory error: {e}")
+
+        # 6. Messaggi recenti verbatim (L1 working memory)
+        if recent_messages:
+            msgs_text = "\n".join(
+                f"{m['role'].upper()}: {m['text'][:300]}"
+                for m in recent_messages[-10:]
+            )
+            parts.append(f"=== CONVERSAZIONE RECENTE ===\n{msgs_text}")
+
+        # 7. Contesto progetto (se presente)
         if project_context:
             parts.append(f"=== CONTESTO CANTIERE ===\n{project_context}")
 
-        # 5. Regola fondamentale
+        # 8. Regola fondamentale
         parts.append(
             "=== REGOLA FONDAMENTALE ===\n"
             "Rispondi SOLO su argomenti del tuo dominio come descritto nel PROFILO E RUOLO. "
@@ -230,12 +264,20 @@ class BaseChief(BaseAgent):
         return "\n\n".join(parts)
 
     def answer_question(self, question: str, user_context: Optional[str] = None,
-                        project_context: Optional[str] = None) -> str:
+                        project_context: Optional[str] = None,
+                        topic_scope_id: Optional[str] = None,
+                        project_scope_id: Optional[str] = None,
+                        recent_messages: Optional[List[Dict]] = None) -> str:
         """Risponde a una domanda nel proprio dominio usando system prompt dinamico."""
         if self.is_circuit_open():
             return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
 
-        system = self.build_system_prompt(project_context=project_context)
+        system = self.build_system_prompt(
+            project_context=project_context,
+            topic_scope_id=topic_scope_id,
+            project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )
         if user_context:
             system += f"\n\nContesto aggiuntivo: {user_context}"
 
@@ -247,22 +289,40 @@ class BaseChief(BaseAgent):
 
     def answer_question_with_routing(self, question: str, user_context: Optional[str] = None,
                                      no_redirect: bool = False,
-                                     project_context: Optional[str] = None) -> str:
+                                     project_context: Optional[str] = None,
+                                     topic_scope_id: Optional[str] = None,
+                                     project_scope_id: Optional[str] = None,
+                                     recent_messages: Optional[List[Dict]] = None) -> str:
         """
         Risponde con routing automatico: se la domanda non è di competenza,
         la passa al Chief corretto. Previene loop con no_redirect=True.
         """
         if not no_redirect:
-            routed = self.check_domain_routing(question, project_context=project_context)
+            routed = self.check_domain_routing(
+                question,
+                project_context=project_context,
+                topic_scope_id=topic_scope_id,
+                project_scope_id=project_scope_id,
+                recent_messages=recent_messages,
+            )
             if routed:
                 return routed  # risposta già inviata via Telegram
-        return self.answer_question(question, user_context, project_context=project_context)
+        return self.answer_question(
+            question, user_context,
+            project_context=project_context,
+            topic_scope_id=topic_scope_id,
+            project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )
 
     # ============================================================
     # TASK 4 — ROUTING AUTOMATICO TRA CHIEF
     # ============================================================
 
-    def check_domain_routing(self, question: str, project_context: Optional[str] = None) -> Optional[str]:
+    def check_domain_routing(self, question: str, project_context: Optional[str] = None,
+                             topic_scope_id: Optional[str] = None,
+                             project_scope_id: Optional[str] = None,
+                             recent_messages: Optional[List[Dict]] = None) -> Optional[str]:
         """
         Verifica se la domanda è di competenza del Chief.
         Se no, la passa al Chief corretto e notifica Mirco con card routing.
@@ -329,7 +389,13 @@ class BaseChief(BaseAgent):
 
         # Ottieni risposta dal Chief destinazione (no_redirect=True per evitare loop)
         try:
-            dest_answer = dest_chief.answer_question(question, project_context=project_context)
+            dest_answer = dest_chief.answer_question(
+                question,
+                project_context=project_context,
+                topic_scope_id=topic_scope_id,
+                project_scope_id=project_scope_id,
+                recent_messages=recent_messages,
+            )
         except Exception as e:
             logger.warning(f"[{self.name}] Routing to {correct_chief_id} error: {e}")
             return None

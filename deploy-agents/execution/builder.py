@@ -12,6 +12,10 @@ from execution.project import (_github_project_api, _commit_to_project_repo,
     _get_telegram_group_id, _create_forum_topic, _send_to_topic, _slugify,
     _create_supabase_project, _save_gcp_secret, _create_github_repo,
     SPEC_SYSTEM_PROMPT_AR, SPEC_HUMAN_SYSTEM_PROMPT, get_project_db)
+try:
+    from intelligence.memory import update_project_episode as _update_project_episode
+except Exception:
+    def _update_project_episode(*args, **kwargs): pass
 
 
 def run_spec_generator(project_id):
@@ -219,6 +223,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
             "kpis": json.dumps(kpis) if kpis else None,
             "status": "spec_generated",
         }).eq("id", project_id).execute()
+        _update_project_episode(project_id, "SPEC generata", "spec_generated", "Mirco approva SPEC")
     except Exception as e:
         logger.error(f"[SPEC] DB update error: {e}")
 
@@ -572,6 +577,7 @@ Genera SOLO i file della struttura base."""
             "status": "review_phase1",
             "build_phase": 1,
         }).eq("id", project_id).execute()
+        _update_project_episode(project_id, "Build Fase 1 completata", "review_phase1", "Mirco revisiona fase 1")
     except Exception as e:
         logger.warning(f"[BUILD_AGENT] DB update status: {e}")
 

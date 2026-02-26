@@ -418,7 +418,7 @@ async def run_csuite_briefing_endpoint(request):
 
 
 async def run_csuite_ask_endpoint(request):
-    """POST /csuite/ask — {domain?, question, context?, project_context?} — chiede al Chief"""
+    """POST /csuite/ask — {domain?, question, context?, project_context?, topic_scope_id?, project_scope_id?, recent_messages?} — chiede al Chief"""
     try:
         from csuite import get_chief, route_to_chief
         data = await request.json()
@@ -426,6 +426,9 @@ async def run_csuite_ask_endpoint(request):
         question = data.get("question", "")
         context = data.get("context")
         project_context = data.get("project_context")
+        topic_scope_id = data.get("topic_scope_id")
+        project_scope_id = data.get("project_scope_id")
+        recent_messages = data.get("recent_messages")
         if not question:
             return web.json_response({"error": "question obbligatoria"}, status=400)
         if domain:
@@ -434,7 +437,14 @@ async def run_csuite_ask_endpoint(request):
             chief, domain = route_to_chief(question)
         if not chief:
             return web.json_response({"error": "Impossibile identificare il Chief appropriato"}, status=400)
-        answer = chief.answer_question(question, user_context=context, project_context=project_context)
+        answer = chief.answer_question(
+            question,
+            user_context=context,
+            project_context=project_context,
+            topic_scope_id=topic_scope_id,
+            project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )
         return web.json_response({"status": "ok", "domain": domain, "chief": chief.name, "answer": answer})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -516,6 +526,50 @@ async def run_cpeo_coaching_endpoint(request):
     try:
         from csuite.cpeo import coach_chiefs
         result = coach_chiefs()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ── Memory endpoints ──────────────────────────────────────────
+
+
+async def run_memory_create_episode_endpoint(request):
+    """POST /memory/create-episode — {scope_type, scope_id, messages} — crea episodio riassuntivo"""
+    try:
+        from intelligence.memory import create_episode
+        data = await request.json()
+        scope_type = data.get("scope_type", "topic")
+        scope_id = data.get("scope_id", "")
+        messages = data.get("messages", [])
+        if not scope_id or not messages:
+            return web.json_response({"error": "scope_id e messages obbligatori"}, status=400)
+        result = create_episode(scope_type, scope_id, messages)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_memory_extract_facts_endpoint(request):
+    """POST /memory/extract-facts — {message, chief_id} — estrae fatti semantici"""
+    try:
+        from intelligence.memory import extract_semantic_facts
+        data = await request.json()
+        message = data.get("message", "")
+        chief_id = data.get("chief_id", "coo")
+        if not message:
+            return web.json_response({"facts_saved": 0})
+        result = extract_semantic_facts(message, chief_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_memory_cleanup_endpoint(request):
+    """POST /memory/cleanup — pulizia periodica tre livelli memoria"""
+    try:
+        from intelligence.memory import cleanup_memory
+        result = cleanup_memory()
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
