@@ -3117,6 +3117,81 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
+    # Smoke proposal approve
+    elif data.startswith("smoke_proposal_approve:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio smoke test...")
+        def _run_smoke_from_proposal():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/smoke/setup",
+                    json={"project_id": str(project_id)},
+                    headers=headers, timeout=120,
+                )
+            except Exception as e:
+                logger.warning(f"[SMOKE_PROPOSAL_APPROVE] {e}")
+        if AGENTS_RUNNER_URL:
+            threading.Thread(target=_run_smoke_from_proposal, daemon=True).start()
+
+    # Blocker: Mirco completa azione bloccante → sblocca pipeline
+    elif data.startswith("blocker_done:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        action_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("Pipeline sbloccata! Riprendo...")
+        try:
+            if action_id:
+                supabase.table("action_queue").update({"status": "completed"}).eq("id", action_id).execute()
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning(f"[BLOCKER_DONE] {e}")
+        # Notifica nel topic
+        _token_bd = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_bd and thread_id:
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_bd}/sendMessage",
+                json={"chat_id": chat_id, "message_thread_id": thread_id,
+                      "text": "\u2705 Azione completata. Riprendo la pipeline..."},
+                timeout=10,
+            )
+        # Riprende pipeline dal punto di blocco
+        def _resume_pipeline():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/pipeline",
+                    json={"project_id": str(project_id)},
+                    headers=headers, timeout=30,
+                )
+            except Exception as e:
+                logger.warning(f"[BLOCKER_RESUME] {e}")
+        if AGENTS_RUNNER_URL:
+            threading.Thread(target=_resume_pipeline, daemon=True).start()
+
+    # Blocker: Mirco chiede aiuto
+    elif data.startswith("blocker_help:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        action_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer()
+        try:
+            r = supabase.table("action_queue").select("payload").eq("id", action_id).execute()
+            payload_data = (r.data[0].get("payload") or {}) if r.data else {}
+            action_text = payload_data.get("action", "Segui le istruzioni sopra.")
+        except Exception:
+            action_text = "Contattami se hai bisogno di supporto."
+        _token_bh = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_bh and thread_id:
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_bh}/sendMessage",
+                json={"chat_id": chat_id, "message_thread_id": thread_id,
+                      "text": f"\U0001f4cb Guida passo-passo:\n\n{action_text}\n\nQuando hai finito, clicca \u2705 Ho completato l'azione."},
+                timeout=10,
+            )
+
     # Build continue/modify (Fix 2)
     elif data.startswith("build_continue:"):
         parts = data.split(":")
@@ -4391,6 +4466,31 @@ async def main():
 
     await tg_app.initialize()
     await tg_app.start()
+
+    # ---- STARTUP: manda smoke proposal per progetti in smoke_pending ----
+    def _startup_smoke_proposals():
+        """Invia proposta smoke test ai cantieri in smoke_pending (post-restart recovery)."""
+        try:
+            r = supabase.table("projects").select("id,name,topic_id,pipeline_step").eq("pipeline_step", "smoke_pending").execute()
+            for proj in (r.data or []):
+                pid = proj["id"]
+                tid = proj.get("topic_id")
+                if not tid:
+                    continue
+                _sm = supabase.table("smoke_tests").select("id").eq("project_id", pid).execute()
+                if not (_sm.data):
+                    # Nessun smoke test → manda proposta
+                    if AGENTS_RUNNER_URL:
+                        oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                        headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                        http_requests.post(
+                            f"{AGENTS_RUNNER_URL}/smoke/setup",
+                            json={"project_id": str(pid)},
+                            headers=headers, timeout=120,
+                        )
+        except Exception as e:
+            logger.warning(f"[STARTUP_SMOKE] {e}")
+    threading.Thread(target=_startup_smoke_proposals, daemon=True).start()
 
     if WEBHOOK_URL:
         await tg_app.bot.set_webhook(url=WEBHOOK_URL)

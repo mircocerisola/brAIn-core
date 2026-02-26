@@ -17,6 +17,17 @@ try:
     from intelligence.memory import update_project_episode as _update_project_episode
 except Exception:
     def _update_project_episode(*args, **kwargs): pass
+try:
+    from execution.pipeline import (
+        advance_pipeline_step, generate_phase_card,
+        count_lines_of_code, update_project_loc,
+    )
+except Exception as _pimp_err:
+    logger.warning(f"[BUILDER] pipeline import: {_pimp_err}")
+    def advance_pipeline_step(*a, **kw): pass
+    def generate_phase_card(*a, **kw): return ""
+    def count_lines_of_code(t): return len([l for l in t.split("\n") if l.strip()])
+    def update_project_loc(*a, **kw): return 0
 
 
 def run_spec_generator(project_id):
@@ -676,19 +687,20 @@ def run_build_agent(project_id):
                     f"project={project_id}", f"{files_committed} file committati",
                     "claude-sonnet-4-6", tokens_in, tokens_out, cost, 0)
 
-    # Card summary — Fix 2
-    file_list = "\n".join([f"  \u2022 {m.group(1).strip()}" for m in matches]) if matches else "  \u2022 main.py (fallback)"
-    sep = "\u2501" * 15
-    result_msg = (
-        f"\u256d\u2500\u2500 Fase 1 completata \u2500\u2500\u256e\n"
-        f"\U0001f4e6 {FASE_DESCRIPTIONS[1]}\n"
-        f"{sep}\n"
-        f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
-        f"{sep}\n"
-        f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
-        f"{sep}\n"
-        f"Come si comporta? Cosa vuoi cambiare?"
+    # LOC counter + pipeline step
+    file_list_names = [m.group(1).strip() for m in matches] if matches else ["main.py"]
+    new_loc = count_lines_of_code(code_output)
+    total_loc = update_project_loc(project_id, new_loc, files_committed, file_list_names, cost, "build_running")
+    advance_pipeline_step(project_id, "build_running")
+
+    # Phase card con spiegazione Haiku
+    file_list = "\n".join(f"  \u2022 {f}" for f in file_list_names)
+    result_msg = generate_phase_card(
+        name, 1, FASE_DESCRIPTIONS[1], code_output, spec_md, stack, total_loc, file_list
     )
+    if not result_msg:
+        result_msg = f"\u256d\u2500\u2500 Fase 1 completata \u2500\u2500\u256e\n{file_list}\n\U0001f4ca Codice: {total_loc} righe"
+
     reply_markup = {
         "inline_keyboard": [[
             {"text": "\u2705 Continua", "callback_data": f"build_continue:{project_id}:1"},

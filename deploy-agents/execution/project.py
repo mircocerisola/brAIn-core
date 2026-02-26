@@ -114,10 +114,28 @@ def _create_forum_topic(group_id, name):
     return None
 
 
+_send_topic_cache: dict = {}   # (group_id, topic_id, hash) → timestamp
+_SEND_DEDUP_TTL = 60
+
+
 def _send_to_topic(group_id, topic_id, text, reply_markup=None):
-    """Invia messaggio nel Forum Topic del progetto."""
+    """Invia messaggio nel Forum Topic del progetto. Dedup 60s su stesso contenuto."""
     if not TELEGRAM_BOT_TOKEN:
         return
+    # Dedup: skip se stesso contenuto mandato negli ultimi 60s
+    import hashlib as _hashlib, time as _time
+    h = _hashlib.md5((text or "")[:500].encode()).hexdigest()
+    _key = (group_id, topic_id, h)
+    _now = _time.time()
+    if _now - _send_topic_cache.get(_key, 0) < _SEND_DEDUP_TTL and not reply_markup:
+        logger.debug(f"[DEDUP] skip topic={topic_id}")
+        return
+    _send_topic_cache[_key] = _now
+    if len(_send_topic_cache) > 300:
+        _old = [k for k, t in _send_topic_cache.items() if _now - t > _SEND_DEDUP_TTL * 3]
+        for k in _old:
+            _send_topic_cache.pop(k, None)
+
     # Fallback a DM se group non configurato
     chat_id = group_id if group_id else get_telegram_chat_id()
     payload = {"chat_id": chat_id, "text": text}

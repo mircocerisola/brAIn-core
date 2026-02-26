@@ -15,6 +15,18 @@ try:
     from intelligence.memory import update_project_episode as _update_project_episode
 except Exception:
     def _update_project_episode(*args, **kwargs): pass
+try:
+    from execution.pipeline import (
+        advance_pipeline_step, generate_phase_card,
+        count_lines_of_code, update_project_loc, send_smoke_proposal,
+    )
+except Exception as _pimp_err:
+    logger.warning(f"[VALIDATOR] pipeline import: {_pimp_err}")
+    def advance_pipeline_step(*a, **kw): pass
+    def generate_phase_card(*a, **kw): return ""
+    def count_lines_of_code(t): return len([l for l in t.split("\n") if l.strip()])
+    def update_project_loc(*a, **kw): return 0
+    def send_smoke_proposal(*a, **kw): pass
 
 
 VALIDATION_SYSTEM_PROMPT_AR = """Sei il Validation Agent di brAIn. Analizza le metriche di un progetto MVP e dai un verdetto SCALE/PIVOT/KILL.
@@ -302,9 +314,13 @@ Genera il codice per la Fase {next_phase}."""
                     f"project={project_id} feedback={feedback[:100]}", f"{files_committed} file committati",
                     "claude-sonnet-4-6", tokens_in, tokens_out, cost, 0)
 
-    # Aggiorna DB e notifica
-    sep = "\u2501" * 15
-    file_list = "\n".join([f"  \u2022 {m.group(1).strip()}" for m in matches]) if matches else f"  \u2022 fase_{next_phase}.py (fallback)"
+    # LOC counter + step
+    file_list_names = [m.group(1).strip() for m in matches] if matches else [f"fase_{next_phase}.py"]
+    new_loc = count_lines_of_code(code_output)
+    total_loc = update_project_loc(project_id, new_loc, files_committed, file_list_names, cost, "build_running")
+    advance_pipeline_step(project_id, "build_running")
+
+    file_list = "\n".join(f"  \u2022 {f}" for f in file_list_names)
 
     if next_phase < 4:
         try:
@@ -321,17 +337,13 @@ Genera il codice per la Fase {next_phase}."""
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update: {e}")
 
-        # Card summary — Fix 2 + Fix 6
-        result_msg = (
-            f"\u256d\u2500\u2500 Fase {next_phase} completata \u2500\u2500\u256e\n"
-            f"\U0001f4e6 {fase_desc}\n"
-            f"{sep}\n"
-            f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
-            f"{sep}\n"
-            f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
-            f"{sep}\n"
-            f"Come si comporta? Cosa vuoi cambiare?"
+        # Phase card con spiegazione Haiku
+        result_msg = generate_phase_card(
+            name, next_phase, fase_desc, code_output,
+            project.get("spec_md", ""), stack, total_loc, file_list,
         )
+        if not result_msg:
+            result_msg = f"\u256d\u2500\u2500 Fase {next_phase} completata \u2500\u2500\u256e\n{file_list}\n\U0001f4ca Codice: {total_loc} righe"
         reply_markup = {
             "inline_keyboard": [[
                 {"text": "\u2705 Continua", "callback_data": f"build_continue:{project_id}:{next_phase}"},
@@ -341,7 +353,8 @@ Genera il codice per la Fase {next_phase}."""
         _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
 
     else:
-        # Fase 4 = build completo → auto-avvia smoke test
+        # Fase 4 = build completo → advance step + auto-smoke
+        advance_pipeline_step(project_id, "build_done")
         try:
             supabase.table("projects").update({
                 "status": "build_complete",
