@@ -27,6 +27,15 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# FIX 1 — Import diretto C-Suite (disponibile nel container root Dockerfile)
+try:
+    from csuite import get_chief as _csuite_get_chief
+    _CSUITE_DIRECT = True
+    logger.info("C-Suite direct import: OK")
+except ImportError:
+    _CSUITE_DIRECT = False
+    logger.info("C-Suite direct import: not available (fallback HTTP)")
+
 PORT = int(os.environ.get("PORT", 8080))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 AGENTS_RUNNER_URL = os.environ.get("AGENTS_RUNNER_URL", "")
@@ -2430,61 +2439,82 @@ async def handle_project_message(update, project):
         _chief_display = _chief_name_map.get(_chief_id, "COO")
         sep = "\u2501" * 15
 
-        # Chiama Chief via agents-runner con project_context + memoria
+        # FIX 1: Chief chiamata sincrona (no placeholder, no thread)
         _topic_scope = f"{chat_id}:{thread_id}" if thread_id else f"{chat_id}:main"
         _recent_msgs = _topic_buffer_get_recent(chat_id, thread_id or 0)
 
-        def _project_chief_ask():
-            _token = os.getenv("TELEGRAM_BOT_TOKEN")
-            if not AGENTS_RUNNER_URL or not _token:
-                return
+        _proj_answer = None
+        if _CSUITE_DIRECT:
+            _proj_chief = _csuite_get_chief(_domain_target)
+            if _proj_chief:
+                _ploop = asyncio.get_running_loop()
+                _pc = project_context
+                _ps = _topic_scope
+                _pr = _recent_msgs
+                _pm = msg
+                _pid = str(project_id)
+                def _call_project_chief_sync():
+                    return _proj_chief.answer_question(
+                        _pm, project_context=_pc,
+                        topic_scope_id=_ps, project_scope_id=_pid,
+                        recent_messages=_pr,
+                    )
+                try:
+                    _proj_answer = await asyncio.wait_for(
+                        _ploop.run_in_executor(None, _call_project_chief_sync), timeout=25.0
+                    )
+                except asyncio.TimeoutError:
+                    _proj_answer = f"[{_chief_display}] Risposta in elaborazione, riprova tra poco."
+                _proj_chief_name = _proj_chief.name
+            else:
+                _proj_answer = f"Chief '{_domain_target}' non trovato."
+                _proj_chief_name = _chief_display
+        else:
+            # Fallback HTTP
             try:
                 oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
                 headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
-                result = http_requests.post(
+                _http_res = http_requests.post(
                     f"{AGENTS_RUNNER_URL}/csuite/ask",
                     json={
-                        "domain": _domain_target,
-                        "question": msg,
+                        "domain": _domain_target, "question": msg,
                         "project_context": project_context,
                         "topic_scope_id": _topic_scope,
                         "project_scope_id": str(project_id),
                         "recent_messages": _recent_msgs,
                     },
-                    headers=headers,
-                    timeout=45,
+                    headers=headers, timeout=45,
                 )
-                if result.status_code == 200:
-                    answer = result.json().get("answer", "")
-                    chief_name = result.json().get("chief", _chief_display)
-                    card = (
-                        f"\U0001f464 {chief_name} risponde:\n"
-                        f"{sep}\n"
-                        f"{answer[:1200]}"
-                    )
-                    payload = {"chat_id": chat_id, "text": card}
-                    if thread_id:
-                        payload["message_thread_id"] = thread_id
-                    http_requests.post(
-                        f"https://api.telegram.org/bot{_token}/sendMessage",
-                        json=payload, timeout=15,
-                    )
-                    _topic_buffer_add(chat_id, thread_id or 0, answer[:200], role="bot")
-                    # L3: estrai fatti semantici dal messaggio di Mirco
-                    threading.Thread(
-                        target=_trigger_extract_facts,
-                        args=(msg, _chief_id),
-                        daemon=True,
-                    ).start()
+                if _http_res.status_code == 200:
+                    _proj_answer = _http_res.json().get("answer", "")
+                    _proj_chief_name = _http_res.json().get("chief", _chief_display)
+                else:
+                    _proj_answer = None
+                    _proj_chief_name = _chief_display
             except Exception as e:
-                logger.warning(f"[PROJECT_CHIEF_ASK] {e}")
+                logger.warning(f"[PROJECT_CHIEF_ASK HTTP] {e}")
+                _proj_answer = None
+                _proj_chief_name = _chief_display
 
-        import threading as _thr2
-        _thr2.Thread(target=_project_chief_ask, daemon=True).start()
-        await update.message.reply_text(
-            _make_card("\U0001f464", _chief_display, name, ["Consultando il Chief in corso\u2026"]),
-            parse_mode="Markdown",
-        )
+        if _proj_answer:
+            card = (
+                f"\U0001f464 {_proj_chief_name} risponde:\n"
+                f"{sep}\n"
+                f"{_proj_answer[:1200]}"
+            )
+            _token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if _token:
+                payload = {"chat_id": chat_id, "text": card}
+                if thread_id:
+                    payload["message_thread_id"] = thread_id
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token}/sendMessage",
+                    json=payload, timeout=15,
+                )
+            _topic_buffer_add(chat_id, thread_id or 0, _proj_answer[:200], role="bot")
+            threading.Thread(
+                target=_trigger_extract_facts, args=(msg, _chief_id), daemon=True
+            ).start()
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3426,42 +3456,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             break
 
     if _csuite_match and len(lower_msg) > 5:
-        # Routing a C-Suite: chiedi al Chief via agents-runner con memoria
+        # Routing a C-Suite — FIX 1: chiamata sincrona (no placeholder, no thread)
         _topic_buffer_add(chat_id, 0, msg, role="user")
-        await update.message.reply_text(
-            _make_card("🧠", "C-SUITE", f"Chief {_csuite_match.upper()}", ["Consultando il Chief in corso…"]),
-            parse_mode="Markdown",
-        )
-        _domain_cs = _csuite_match
-        _question_cs = msg
-        _chat_cs = chat_id
-        _token_cs = os.getenv("TELEGRAM_BOT_TOKEN")
         _scope_cs = f"{chat_id}:main"
         _recent_cs = _topic_buffer_get_recent(chat_id, 0)
-        # Mappa domain → chief_id per extract_facts
-        _domain_to_chief = {
+        _domain_to_chief_id = {
             "strategy": "cso", "finance": "cfo", "marketing": "cmo",
             "tech": "cto", "ops": "coo", "legal": "clo", "people": "cpeo",
         }
-        _chief_id_cs = _domain_to_chief.get(_domain_cs, "coo")
-        def _csuite_ask():
-            result = _call_agents_runner_sync("/csuite/ask", {
-                "domain": _domain_cs,
-                "question": _question_cs,
-                "topic_scope_id": _scope_cs,
-                "recent_messages": _recent_cs,
-            })
-            if result and result.get("answer") and _token_cs and _chat_cs:
-                answer_text = f"🧠 *{result.get('chief', 'Chief')}*\n\n{result['answer']}"
-                http_requests.post(
-                    f"https://api.telegram.org/bot{_token_cs}/sendMessage",
-                    json={"chat_id": _chat_cs, "text": answer_text[:4000], "parse_mode": "Markdown"},
-                    timeout=30,
+        _chief_id_cs = _domain_to_chief_id.get(_csuite_match, "coo")
+
+        if _CSUITE_DIRECT:
+            chief = _csuite_get_chief(_csuite_match)
+            if chief:
+                _loop = asyncio.get_running_loop()
+                _scope = _scope_cs
+                _recent = _recent_cs
+                _q = msg
+                def _call_chief_sync():
+                    return chief.answer_question(
+                        _q, topic_scope_id=_scope, recent_messages=_recent
+                    )
+                try:
+                    _answer = await asyncio.wait_for(
+                        _loop.run_in_executor(None, _call_chief_sync), timeout=25.0
+                    )
+                except asyncio.TimeoutError:
+                    _answer = f"[{chief.name}] Risposta in elaborazione, riprova tra un momento."
+                await update.message.reply_text(
+                    f"\U0001f9e0 *{chief.name}*\n\n{_answer[:3800]}", parse_mode="Markdown"
                 )
-                _topic_buffer_add(_chat_cs, 0, result["answer"][:200], role="bot")
-            # L3: estrai fatti semantici dal messaggio
-            _trigger_extract_facts(_question_cs, _chief_id_cs)
-        threading.Thread(target=_csuite_ask, daemon=True).start()
+                _topic_buffer_add(chat_id, 0, _answer[:200], role="bot")
+            else:
+                await update.message.reply_text(f"Chief per '{_csuite_match}' non trovato.")
+        else:
+            # Fallback HTTP (sviluppo locale senza moduli csuite)
+            result = _call_agents_runner_sync("/csuite/ask", {
+                "domain": _csuite_match, "question": msg,
+                "topic_scope_id": _scope_cs, "recent_messages": _recent_cs,
+            })
+            if result and result.get("answer"):
+                _answer_text = f"\U0001f9e0 *{result.get('chief', 'Chief')}*\n\n{result['answer']}"
+                await update.message.reply_text(_answer_text[:4000], parse_mode="Markdown")
+                _topic_buffer_add(chat_id, 0, result["answer"][:200], role="bot")
+
+        threading.Thread(
+            target=_trigger_extract_facts, args=(msg, _chief_id_cs), daemon=True
+        ).start()
         return
 
     # ---- MARKETING ROUTING ----
@@ -3722,6 +3763,49 @@ async def health_check(request):
     return web.Response(text="brAIn Command Center v3.0 OK", status=200)
 
 
+async def handle_admin_fix_topics(request):
+    """FIX 3: One-time — nascondi General + unpinna tutti i messaggi nei topic Chief."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return web.json_response({"error": "TELEGRAM_BOT_TOKEN mancante"}, status=500)
+    try:
+        group_id = int(
+            (supabase.table("org_config").select("value")
+             .eq("key", "telegram_group_id").execute()).data[0]["value"]
+        )
+    except Exception:
+        group_id = -1003799456981  # fallback hardcoded
+
+    chief_topic_ids = [36, 38, 39, 40, 41, 42, 43]
+    results = []
+
+    # 1. Nascondi General forum topic
+    r = http_requests.post(
+        f"https://api.telegram.org/bot{token}/hideGeneralForumTopic",
+        json={"chat_id": group_id}, timeout=10,
+    )
+    results.append({
+        "action": "hideGeneralForumTopic",
+        "status": r.status_code,
+        "ok": r.json().get("ok", False),
+    })
+
+    # 2. Unpinna tutti i messaggi in ogni topic Chief
+    for tid in chief_topic_ids:
+        r = http_requests.post(
+            f"https://api.telegram.org/bot{token}/unpinAllChatMessages",
+            json={"chat_id": group_id, "message_thread_id": tid}, timeout=10,
+        )
+        results.append({
+            "action": f"unpinAllChatMessages_topic_{tid}",
+            "status": r.status_code,
+            "ok": r.json().get("ok", False),
+        })
+
+    logger.info(f"[FIX_TOPICS] completato: {results}")
+    return web.json_response({"status": "ok", "results": results})
+
+
 async def telegram_webhook(request):
     try:
         data = await request.json()
@@ -3849,6 +3933,7 @@ async def main():
     app.router.add_post("/alert", handle_alert)
     app.router.add_post("/action", handle_enqueue_action)
     app.router.add_post("/action/set", handle_set_current_action)
+    app.router.add_post("/admin/fix-topics", handle_admin_fix_topics)
 
     runner = web.AppRunner(app)
     await runner.setup()

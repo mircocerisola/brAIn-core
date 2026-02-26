@@ -128,6 +128,61 @@ class BaseChief(BaseAgent):
     default_model: str = "claude-sonnet-4-6"
     briefing_prompt_template: str = ""  # Override nelle sottoclassi
 
+    # FIX 5 — model routing
+    _ALWAYS_SONNET = {"cso", "cmo", "cpeo", "cto"}
+    _ADAPTIVE_MODEL = {"cfo", "clo", "coo"}
+
+    def _select_model(self, question: str) -> str:
+        """FIX 5: Seleziona modello ottimale.
+        CSO/CMO/CPeO/CTO → sempre Sonnet (dominio creativo/strategico).
+        CFO/CLO/COO → Haiku se query semplice, Sonnet se complessa.
+        """
+        chief_id = self.chief_id or ""
+        if chief_id in self._ALWAYS_SONNET:
+            return "claude-sonnet-4-6"
+        if chief_id in self._ADAPTIVE_MODEL:
+            classify_prompt = (
+                f"Classifica questa domanda per il {self.name}:\n\"{question[:200]}\"\n\n"
+                "Risposta: SOLO una parola: simple (lookup/calcolo/status/dato diretto) "
+                "oppure complex (analisi/raccomandazione/strategia/pianificazione)"
+            )
+            try:
+                raw = self.call_claude(
+                    classify_prompt, model="claude-haiku-4-5-20251001", max_tokens=10
+                )
+                if "simple" in raw.lower():
+                    return "claude-haiku-4-5-20251001"
+            except Exception:
+                pass
+        return "claude-sonnet-4-6"
+
+    def _send_to_chief_topic(self, text: str) -> None:
+        """FIX 2: Invia testo al Forum Topic del Chief (ricava topic_id da org_config)."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            topic_key = f"chief_topic_{self.chief_id}"
+            r = supabase.table("org_config").select("value").eq("key", topic_key).execute()
+            if not r.data:
+                return
+            topic_id = int(r.data[0]["value"])
+            group_r = supabase.table("org_config").select("value") \
+                .eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+            _requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": group_id,
+                    "message_thread_id": topic_id,
+                    "text": text[:4000],
+                },
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning(f"[{self.name}] _send_to_chief_topic error: {e}")
+
     def get_domain_context(self) -> Dict[str, Any]:
         """
         Ritorna contesto DB rilevante per il dominio.
@@ -268,7 +323,10 @@ class BaseChief(BaseAgent):
                         topic_scope_id: Optional[str] = None,
                         project_scope_id: Optional[str] = None,
                         recent_messages: Optional[List[Dict]] = None) -> str:
-        """Risponde a una domanda nel proprio dominio usando system prompt dinamico."""
+        """Risponde a una domanda nel proprio dominio usando system prompt dinamico.
+        FIX 4: inietta get_domain_context() live prima di rispondere.
+        FIX 5: usa modello ottimale via _select_model().
+        """
         if self.is_circuit_open():
             return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
 
@@ -278,11 +336,29 @@ class BaseChief(BaseAgent):
             project_scope_id=project_scope_id,
             recent_messages=recent_messages,
         )
+
+        # FIX 4: inietta dati live dal dominio
+        try:
+            domain_ctx = self.get_domain_context()
+            live_parts = []
+            for k, v in domain_ctx.items():
+                if k not in ("recent_decisions", "memory") and v:
+                    live_parts.append(
+                        f"{k}: {json.dumps(v, ensure_ascii=False, default=str)[:400]}"
+                    )
+            if live_parts:
+                system += "\n\n=== DATI LIVE ===\n" + "\n\n".join(live_parts)
+        except Exception as e:
+            logger.warning(f"[{self.name}] get_domain_context in answer_question: {e}")
+
         if user_context:
             system += f"\n\nContesto aggiuntivo: {user_context}"
 
+        # FIX 5: seleziona modello ottimale
+        model = self._select_model(question)
+
         try:
-            return self.call_claude(question, system=system, max_tokens=1500)
+            return self.call_claude(question, system=system, max_tokens=1500, model=model)
         except Exception as e:
             logger.error(f"[{self.name}] answer_question error: {e}")
             return f"[{self.name}] Errore nella risposta: {e}"
@@ -570,6 +646,83 @@ class BaseChief(BaseAgent):
     # ============================================================
     # BRIEFING, ANOMALY, CAPABILITY (invariati)
     # ============================================================
+
+    def generate_brief_report(self) -> Optional[str]:
+        """FIX 2: Genera report breve (max 8 righe) se ci sono aggiornamenti nelle ultime 4h.
+        Invia al Forum Topic del Chief. Ritorna il testo o None se nulla da segnalare.
+        Override nelle sottoclassi per dati specifici di dominio.
+        """
+        four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+
+        # Controlla decisioni recenti
+        try:
+            r = supabase.table("chief_decisions") \
+                .select("summary,decision_type,created_at") \
+                .eq("chief_domain", self.domain) \
+                .neq("decision_type", "brief_report") \
+                .gte("created_at", four_hours_ago) \
+                .order("created_at", desc=True).limit(5).execute()
+            recent_decisions = r.data or []
+        except Exception:
+            recent_decisions = []
+
+        # Controlla anomalie
+        try:
+            anomalies = self.check_anomalies()
+        except Exception:
+            anomalies = []
+
+        # Se nulla di nuovo → skip silenzioso
+        if not recent_decisions and not anomalies:
+            logger.info(f"[{self.name}] generate_brief_report: nulla da segnalare, skip")
+            return None
+
+        ctx_parts = []
+        if recent_decisions:
+            dec_text = "\n".join(
+                f"- {d['decision_type']}: {d['summary'][:100]}"
+                for d in recent_decisions[:3]
+            )
+            ctx_parts.append(f"Decisioni recenti (4h):\n{dec_text}")
+        if anomalies:
+            anom_text = "\n".join(
+                f"- [{a.get('severity','?')}] {a.get('description','')}"
+                for a in anomalies[:3]
+            )
+            ctx_parts.append(f"Anomalie:\n{anom_text}")
+
+        ctx = "\n\n".join(ctx_parts)
+        prompt = (
+            f"Sei il {self.name} di brAIn. Genera un report breve di aggiornamento (max 8 righe, italiano).\n"
+            f"Dominio: {self.domain}\n"
+            f"Dati ultimi 4 ore:\n{ctx}\n\n"
+            "Formato: usa separatori ━━━━━━━━━━━━━━━, emoji rilevanti, dati concreti. "
+            "Zero fuffa. Solo novità reali."
+        )
+
+        try:
+            text = self.call_claude(prompt, model="claude-haiku-4-5-20251001", max_tokens=400)
+        except Exception as e:
+            logger.warning(f"[{self.name}] generate_brief_report call_claude error: {e}")
+            return None
+
+        # Salva in chief_decisions
+        try:
+            supabase.table("chief_decisions").insert({
+                "chief_domain": self.domain,
+                "decision_type": "brief_report",
+                "summary": text[:500],
+                "full_text": text,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning(f"[{self.name}] generate_brief_report save error: {e}")
+
+        # Invia al topic del Chief
+        self._send_to_chief_topic(text)
+
+        logger.info(f"[{self.name}] generate_brief_report: inviato ({len(text)} chars)")
+        return text
 
     def generate_weekly_briefing(self) -> Dict[str, Any]:
         """Genera un briefing settimanale nel dominio del Chief."""

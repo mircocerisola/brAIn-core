@@ -460,6 +460,38 @@ async def run_csuite_anomalies_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_csuite_report_endpoint(request):
+    """POST /csuite/report — {domain?} — genera report breve 4h per un Chief o tutti"""
+    try:
+        from csuite import get_chief, _chiefs
+        data = await request.json() if request.content_length else {}
+        domain = data.get("domain") if data else None
+
+        if domain:
+            chief = get_chief(domain)
+            if not chief:
+                return web.json_response({"error": f"Chief '{domain}' non trovato"}, status=400)
+            text = chief.generate_brief_report()
+            return web.json_response({
+                "status": "ok" if text else "skipped",
+                "chief": chief.name,
+                "domain": domain,
+                "report": text,
+            })
+        else:
+            # Tutti i Chief
+            results = {}
+            for d, chief in _chiefs.items():
+                try:
+                    text = chief.generate_brief_report()
+                    results[d] = {"chief": chief.name, "status": "ok" if text else "skipped"}
+                except Exception as e:
+                    results[d] = {"chief": d, "status": "error", "error": str(e)}
+            return web.json_response({"status": "ok", "results": results})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

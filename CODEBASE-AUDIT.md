@@ -536,7 +536,7 @@ STOP                                          → blocco emergenza sistema
 
 ### Errori ricorrenti nei log
 
-1. **`brain_god` agent_id deprecato** — tutti gli errori recenti (2026-02-23) sono loggati con `agent_id=brain_god` invece di `command_center`. Questo è il vecchio naming, il codice ora usa `command_center` ma i log storici mostrano l'errore precedente.
+1. **`command_center` agent_id** — tutti gli errori sono ora loggati con `agent_id=command_center` (v5.4+).
 
 2. **Modelli inesistenti (404 error)** — errori `claude-sonnet-4-5` (senza versione data). Il codice ora usa `claude-sonnet-4-6` / `claude-haiku-4-5-20251001`. Verificare se tutti i riferimenti model nei file sono aggiornati.
 

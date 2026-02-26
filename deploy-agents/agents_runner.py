@@ -34,6 +34,7 @@ from core.endpoints import (
     run_all_endpoint,
     # C-Suite + Ethics
     run_csuite_briefing_endpoint, run_csuite_ask_endpoint, run_csuite_anomalies_endpoint,
+    run_csuite_report_endpoint,
     run_ethics_check_endpoint, run_ethics_check_active_endpoint,
     # CDO + CPeO
     run_cto_data_audit_endpoint, run_cto_knowledge_monitor_endpoint,
@@ -114,6 +115,7 @@ async def main():
     app.router.add_post("/csuite/briefing", run_csuite_briefing_endpoint)
     app.router.add_post("/csuite/ask", run_csuite_ask_endpoint)
     app.router.add_post("/csuite/anomalies", run_csuite_anomalies_endpoint)
+    app.router.add_post("/csuite/report", run_csuite_report_endpoint)
 
     # Ethics
     app.router.add_post("/ethics/check", run_ethics_check_endpoint)
