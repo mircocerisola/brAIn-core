@@ -36,6 +36,42 @@ except ImportError:
     _CSUITE_DIRECT = False
     logger.info("C-Suite direct import: not available (fallback HTTP)")
 
+# Cache topic_id → domain per routing diretto ai Chief
+_chief_topic_cache: dict = {}   # thread_id (int) → domain (str)
+_chief_topic_cache_loaded: bool = False
+_CHIEF_ID_TO_DOMAIN = {
+    "cso": "strategy", "coo": "ops", "cto": "tech",
+    "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
+}
+
+
+def _load_chief_topic_cache():
+    """Carica una volta la mappa thread_id → domain da org_config (chief_topic_*)."""
+    global _chief_topic_cache, _chief_topic_cache_loaded
+    if _chief_topic_cache_loaded:
+        return
+    try:
+        r = supabase.table("org_config").select("key,value").ilike("key", "chief_topic_%").execute()
+        for row in (r.data or []):
+            chief_id = row["key"].replace("chief_topic_", "")
+            domain = _CHIEF_ID_TO_DOMAIN.get(chief_id)
+            if domain:
+                _chief_topic_cache[int(row["value"])] = domain
+        _chief_topic_cache_loaded = True
+        logger.info(f"[CHIEF_TOPIC_CACHE] {_chief_topic_cache}")
+    except Exception as e:
+        logger.warning(f"[CHIEF_TOPIC_CACHE] load error: {e}")
+
+
+def _lookup_chief_by_topic(thread_id: int):
+    """FIX 1: Restituisce il Chief associato al Forum Topic. Il topic definisce il Chief."""
+    if not _CSUITE_DIRECT:
+        return None
+    if not _chief_topic_cache_loaded:
+        _load_chief_topic_cache()
+    domain = _chief_topic_cache.get(thread_id)
+    return _csuite_get_chief(domain) if domain else None
+
 PORT = int(os.environ.get("PORT", 8080))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 AGENTS_RUNNER_URL = os.environ.get("AGENTS_RUNNER_URL", "")
@@ -3427,6 +3463,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         project = lookup_project_by_topic_id(thread_id)
         if project:
             await handle_project_message(update, project)
+            return
+
+    # ---- CHIEF TOPIC ROUTING (FIX 1) ----
+    # Il topic_id definisce il Chief senza ambiguità — nessuna classificazione Haiku
+    if thread_id and _CSUITE_DIRECT:
+        _chief_by_topic = _lookup_chief_by_topic(thread_id)
+        if _chief_by_topic:
+            _topic_buffer_add(chat_id, thread_id, msg, role="user")
+            _scope_t = f"{chat_id}:{thread_id}"
+            _recent_t = _topic_buffer_get_recent(chat_id, thread_id)
+            _loop_t = asyncio.get_running_loop()
+            _q_t = msg
+            _chief_t = _chief_by_topic
+            def _call_chief_topic():
+                return _chief_t.answer_question(
+                    _q_t, topic_scope_id=_scope_t, recent_messages=_recent_t
+                )
+            try:
+                _answer_t = await asyncio.wait_for(
+                    _loop_t.run_in_executor(None, _call_chief_topic), timeout=25.0
+                )
+            except asyncio.TimeoutError:
+                _answer_t = f"[{_chief_t.name}] Risposta in elaborazione, riprova tra un momento."
+            _token_t = os.getenv("TELEGRAM_BOT_TOKEN")
+            if _token_t:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token_t}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "message_thread_id": thread_id,
+                        "text": f"\U0001f464 *{_chief_t.name}*\n\n{_answer_t[:3800]}",
+                        "parse_mode": "Markdown",
+                    },
+                    timeout=15,
+                )
+            _topic_buffer_add(chat_id, thread_id, _answer_t[:200], role="bot")
+            threading.Thread(
+                target=_trigger_extract_facts, args=(msg, _chief_t.chief_id), daemon=True
+            ).start()
             return
 
     if msg.strip().upper() == "STOP":
