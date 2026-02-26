@@ -46,6 +46,58 @@ USD_TO_EUR = 0.92
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 _chat_history_available = None  # None=not checked yet, True/False
 
+# Buffer messaggi per Forum Topic (ultimi 7 per topic) — usato per capire contesto risposte brevi
+_topic_recent_msgs = {}  # "chat_id:thread_id" -> [{"role": "user/bot", "text": str}, ...]
+_TOPIC_BUFFER_SIZE = 7
+_SPEC_KEYWORDS = frozenset({
+    "spec", "modifica", "funzionalit", "aggiungi", "cambia", "rimuovi", "togli",
+    "aggiorna", "integra", "api", "dashboard", "report", "feature",
+    "pagina", "schermata", "login", "notifica", "email", "webhook",
+    "struttura", "architettura", "kpi", "stack", "gtm", "implementa", "sezione",
+    "metti", "inserisci", "elimina", "sostituisci",
+})
+_SHORT_AFFIRMATIVES = frozenset({
+    "si", "sì", "ok", "va bene", "certo", "esatto", "perfetto",
+    "fatto", "procedi", "vai", "dai", "sure", "yes", "yep", "ok go",
+})
+
+
+def _topic_buffer_add(chat_id, thread_id, text, role="user"):
+    key = f"{chat_id}:{thread_id}"
+    buf = _topic_recent_msgs.setdefault(key, [])
+    buf.append({"role": role, "text": text})
+    _topic_recent_msgs[key] = buf[-_TOPIC_BUFFER_SIZE:]
+
+
+def _topic_buffer_get_recent(chat_id, thread_id, n=5):
+    """Ultimi n messaggi del topic ESCLUSO l'ultimo appena aggiunto (= contesto precedente)."""
+    key = f"{chat_id}:{thread_id}"
+    msgs = _topic_recent_msgs.get(key, [])
+    # esclude l'ultimo (il messaggio corrente) per vedere cosa c'era prima
+    prior = msgs[:-1] if len(msgs) > 1 else []
+    return prior[-n:]
+
+
+def _is_short_affirmative(msg):
+    return msg.lower().strip() in _SHORT_AFFIRMATIVES
+
+
+def _context_is_spec_discussion(msgs):
+    """True se i messaggi recenti riguardano modifiche alla SPEC."""
+    if not msgs:
+        return False
+    combined = " ".join(m.get("text", "").lower() for m in msgs[-4:])
+    return any(kw in combined for kw in _SPEC_KEYWORDS)
+
+
+def _extract_spec_modification(msgs):
+    """Estrae la descrizione della modifica dal contesto recente (ultimo messaggio utente non affermativo)."""
+    for m in reversed(msgs):
+        text = m.get("text", "").strip()
+        if m.get("role") == "user" and not _is_short_affirmative(text) and len(text) > 5:
+            return text[:200]
+    return "modifica discussa nel topic"
+
 # ---- NOTIFICHE INTELLIGENTI ----
 # Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
 # Vengono inviate raggruppate dopo 2 minuti di silenzio. Solo CRITICAL interrompono.
@@ -254,6 +306,17 @@ approve_problem esiste SOLO per override manuale esplicito tipo "approva problem
 
 NOTA STATUS_DETAIL: problems e solutions hanno status_detail (active/archived/rejected). Default sempre active. Per vedere archiviati o rifiutati, specifica filters=status_detail=archived o filters=status_detail=rejected.
 CONTEGGI TRASPARENTI: quando Mirco chiede quanti problemi/soluzioni ci sono, rispondi SEMPRE con attivi + archiviati. Es: "Problemi attivi: 0 (archiviati: 117)". Se tutti i dati sono in archivio, spiega esplicitamente che il DB è stato ripulito e il sistema sta raccogliendo nuovi dati.
+
+REGOLA CRITICA — MAI INVENTARE AGENTI O RUOLI:
+Gli agenti reali di brAIn sono SOLO: world_scanner, solution_architect, spec_generator, knowledge_keeper, capability_scout, validation_agent, command_center (tu).
+MAI citare agenti, ruoli o figure che non esistono nel sistema: "Business Operator", "Growth Hacker", "Marketing Manager", "Sales Agent", "Finance Officer", "Project Manager", "Customer Success" o qualsiasi altra figura inventata.
+Se non sai come gestire una richiesta, chiedi direttamente a Mirco cosa vuole fare. Non inventare processi o figure.
+
+REGOLA CRITICA — NEI TOPIC CANTIERE:
+Quando sei in un topic di Cantiere e Mirco risponde con una parola breve ("si", "ok", "perfetto", ecc.), leggi il CONTESTO TOPIC sotto per capire a cosa sta rispondendo.
+- Se stava discutendo di modifiche SPEC → interpreta come conferma della modifica
+- MAI interpretare una risposta breve come "ok lancio" se il contesto era una discussione tecnica
+- Il lancio richiede sempre un comando esplicito ("ok lanciamo", "lancia", "lanciamo")
 
 {ctx}{session}{summary_section}"""
 
@@ -1970,6 +2033,10 @@ async def handle_project_message(update, project):
     user_id = update.effective_user.id if update.effective_user else None
     username = update.effective_user.username or "" if update.effective_user else ""
 
+    # Salva nel buffer topic per contesto conversazione
+    if thread_id and msg.strip():
+        _topic_buffer_add(chat_id, thread_id, msg, role="user")
+
     # 1. Identifica mittente
     _is_mirco = is_authorized(update)
     _is_collab = is_project_collaborator(user_id, project_id) if user_id else False
@@ -2038,6 +2105,39 @@ async def handle_project_message(update, project):
             await update.message.reply_text("Avvio build...")
             return
 
+    # 4.5 Risposta breve nel topic: risolvi con contesto conversazione
+    if thread_id and _is_mirco and _is_short_affirmative(msg):
+        recent = _topic_buffer_get_recent(chat_id, thread_id)
+        if _context_is_spec_discussion(recent):
+            mod_desc = _extract_spec_modification(recent)
+            await update.message.reply_text(f"Aggiorno la SPEC con: {mod_desc[:120]}...")
+            if AGENTS_RUNNER_URL:
+                try:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/spec/update",
+                        json={"project_id": str(project_id), "modification": mod_desc},
+                        headers=headers,
+                        timeout=15,
+                    )
+                    token = os.getenv("TELEGRAM_BOT_TOKEN")
+                    if token:
+                        markup = {"inline_keyboard": [[
+                            {"text": "\U0001f4c4 Vedi SPEC aggiornata", "callback_data": f"spec_download:{project_id}"}
+                        ]]}
+                        payload = {
+                            "chat_id": chat_id,
+                            "text": f"\u2705 SPEC aggiornata con: {mod_desc[:120]}\nVuoi vedere il file aggiornato?",
+                            "reply_markup": markup,
+                            "message_thread_id": thread_id,
+                        }
+                        http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+                        _topic_buffer_add(chat_id, thread_id, f"SPEC aggiornata con: {mod_desc[:80]}", role="bot")
+                except Exception as e:
+                    await update.message.reply_text(f"Errore aggiornamento SPEC: {e}")
+            return
+
     # 5. "ok lanciamo" / "lancia" / "lanciamo"
     if msg.lower().strip() in ("ok lanciamo", "lancia", "lanciamo", "lancio", "ok lancia"):
         if _is_collab and not _is_mirco:
@@ -2098,15 +2198,39 @@ async def handle_project_message(update, project):
                     headers=headers,
                     timeout=10,
                 )
-                await update.message.reply_text("Modifica avviata. Ti mando la nuova SPEC review.")
+                token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if token:
+                    markup = {"inline_keyboard": [[
+                        {"text": "\U0001f4c4 Vedi SPEC aggiornata", "callback_data": f"spec_download:{project_id}"}
+                    ]]}
+                    payload = {
+                        "chat_id": chat_id,
+                        "text": f"\u2705 SPEC aggiornata con: {msg[:120]}\nVuoi vedere il file aggiornato?",
+                        "reply_markup": markup,
+                    }
+                    if thread_id:
+                        payload["message_thread_id"] = thread_id
+                    http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+                    _topic_buffer_add(chat_id, thread_id or 0, f"SPEC aggiornata con: {msg[:80]}", role="bot")
+                else:
+                    await update.message.reply_text("Modifica avviata. Ti mando la nuova SPEC review.")
             except Exception as e:
                 await update.message.reply_text(f"Errore: {e}")
         return
 
-    # 8. Fallback: risposta generica con contesto progetto
+    # 8. Fallback: risposta generica con contesto progetto + contesto topic
     if _is_mirco or _is_collab:
-        context_note = f"[Progetto: {name} | Status: {project_status} | BOS: {project.get('bos_score', 0):.2f}]"
+        topic_ctx = ""
+        if thread_id:
+            recent = _topic_buffer_get_recent(chat_id, thread_id)
+            if recent:
+                topic_ctx = "\n[Ultimi messaggi nel topic Cantiere]\n" + "\n".join(
+                    f"{m['role'].upper()}: {m['text'][:120]}" for m in recent
+                ) + "\n"
+        context_note = f"[Progetto: {name} | Status: {project_status} | BOS: {project.get('bos_score', 0):.2f}]{topic_ctx}"
         reply = clean_reply(ask_claude(f"{context_note}\n{msg}", chat_id=chat_id))
+        if thread_id:
+            _topic_buffer_add(chat_id, thread_id, reply[:200], role="bot")
         for i in range(0, len(reply), 4000):
             await update.message.reply_text(reply[i:i + 4000])
 
