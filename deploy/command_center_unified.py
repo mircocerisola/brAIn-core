@@ -359,11 +359,30 @@ Per ogni file da creare o modificare, rispondi con JSON:
 {"files":[{"path":"agents/nome_file.py","content":"contenuto completo del file","action":"create o update"}],"summary":"cosa hai fatto in 2 frasi"}
 SOLO JSON."""
 
-# ---- VOICE TRANSCRIPTION (Google Speech-to-Text) ----
+# ---- VOICE TRANSCRIPTION (Whisper primary, Google Speech fallback) ----
 
-def transcribe_voice(audio_bytes):
+def _transcribe_whisper(audio_bytes: bytes) -> str | None:
+    """Whisper-1 via OpenAI API. Richiede OPENAI_API_KEY."""
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        return None
     try:
-        url = "https://speech.googleapis.com/v1/speech:recognize"
+        import openai as _openai
+        client = _openai.OpenAI(api_key=key)
+        result = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=("voice.ogg", audio_bytes, "audio/ogg"),
+            language="it",
+        )
+        return result.text or None
+    except Exception as e:
+        logger.warning(f"[WHISPER] {e}")
+        return None
+
+
+def _transcribe_google(audio_bytes: bytes) -> str | None:
+    """Google Speech-to-Text via Cloud Run service account."""
+    try:
         token_url = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
         token_r = http_requests.get(token_url, headers={"Metadata-Flavor": "Google"}, timeout=5)
         if token_r.status_code != 200:
@@ -382,7 +401,7 @@ def transcribe_voice(audio_bytes):
             "audio": {"content": audio_b64},
         }
         r = http_requests.post(
-            url,
+            "https://speech.googleapis.com/v1/speech:recognize",
             headers={"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"},
             json=payload,
             timeout=30,
@@ -394,11 +413,19 @@ def transcribe_voice(audio_bytes):
                     alt["transcript"]
                     for res in result["results"]
                     for alt in res.get("alternatives", [])[:1]
-                ).strip()
+                ).strip() or None
         return None
     except Exception as e:
-        logger.error(f"[VOICE] {e}")
+        logger.warning(f"[GOOGLE_SPEECH] {e}")
         return None
+
+
+def transcribe_voice(audio_bytes: bytes) -> str | None:
+    """Whisper-1 primary, Google Speech fallback. Mai risponde 'non ho capito'."""
+    text = _transcribe_whisper(audio_bytes)
+    if text:
+        return text
+    return _transcribe_google(audio_bytes)
 
 
 # ---- SYSTEM PROMPT ----
@@ -2584,6 +2611,35 @@ async def handle_project_message(update, project):
                     )
             return
 
+    # 4b. Progetto launch_approved → smoke test automatico (se non ancora avviato)
+    if project_status == "launch_approved" and _is_mirco:
+        # Controlla se smoke test già esiste
+        try:
+            _sm = supabase.table("smoke_tests").select("id").eq("project_id", project_id).execute()
+            _smoke_exists = bool(_sm.data)
+        except Exception:
+            _smoke_exists = False
+        if not _smoke_exists and AGENTS_RUNNER_URL:
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                _smpl = {"chat_id": chat_id, "text": f"\u2705 Build completato — avvio smoke test per *{name}*...", "parse_mode": "Markdown"}
+                if thread_id:
+                    _smpl["message_thread_id"] = thread_id
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=_smpl, timeout=10)
+            def _start_smoke():
+                try:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL)
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/smoke/setup",
+                        json={"project_id": str(project_id)},
+                        headers=headers, timeout=120,
+                    )
+                except Exception as e:
+                    logger.warning(f"[AUTO_SMOKE] {e}")
+            threading.Thread(target=_start_smoke, daemon=True).start()
+            return
+
     # 5. "ok lanciamo" / "lancia" / "lanciamo"
     if msg.lower().strip() in ("ok lanciamo", "lancia", "lanciamo", "lancio", "ok lancia"):
         if _is_collab and not _is_mirco:
@@ -3716,8 +3772,27 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global _last_mirco_message_time
     if not is_authorized(update):
         return
-    msg = update.message.text
     chat_id = update.effective_chat.id
+
+    # ---- VOCALE — trascrivi PRIMA di qualsiasi altra logica ----
+    if update.message and update.message.voice:
+        await update.message.chat.send_action("typing")
+        try:
+            _vf = await context.bot.get_file(update.message.voice.file_id)
+            _vaudio = bytes(await _vf.download_as_bytearray())
+            _vtext = transcribe_voice(_vaudio)
+        except Exception as _ve:
+            logger.warning(f"[VOICE] download error: {_ve}")
+            _vtext = None
+        if not _vtext:
+            return  # silenzio — mai rispondere "non ho capito"
+        # Tratta il trascritto come testo normale
+        msg = _vtext
+        logger.info(f"[VOICE] trascritto: {msg[:80]}")
+    else:
+        msg = update.message.text
+    if not msg:
+        return
 
     # Traccia ultimo messaggio per notifiche intelligenti
     _last_mirco_message_time = time.time()
@@ -3803,6 +3878,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     },
                     timeout=15,
                 )
+            # Storia garantita — scrittura sincrona DOPO risposta Chief
+            _scope_write = f"{chat_id}:{thread_id}"
+            _cid_write = _chief_t.chief_id
+            try:
+                supabase.table("topic_conversation_history").insert({
+                    "scope_id": _scope_write, "role": "user",
+                    "text": (msg or "")[:2000], "chief_id": _cid_write,
+                }).execute()
+                supabase.table("topic_conversation_history").insert({
+                    "scope_id": _scope_write, "role": "bot",
+                    "text": (_answer_t or "")[:2000], "chief_id": _cid_write,
+                }).execute()
+            except Exception as _hw:
+                logger.warning(f"[HISTORY_WRITE] {_hw}")
             _topic_buffer_add(chat_id, thread_id, _answer_t, role="bot")
             threading.Thread(
                 target=_trigger_extract_facts, args=(msg, _chief_t.chief_id), daemon=True
@@ -4296,7 +4385,7 @@ async def main():
     tg_app.add_handler(CommandHandler("code", handle_code_command))
     tg_app.add_handler(CallbackQueryHandler(handle_callback_query))
     tg_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    tg_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    tg_app.add_handler(MessageHandler(filters.VOICE, handle_message))
     tg_app.add_handler(MessageHandler(filters.COMMAND, handle_command_as_message))
     tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

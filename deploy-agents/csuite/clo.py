@@ -25,6 +25,27 @@ class CLO(BaseChief):
             ctx["open_violations"] = r.data or []
         except Exception:
             ctx["open_violations"] = []
+        try:
+            r = supabase.table("legal_reviews").select(
+                "project_id,status,risks_found,created_at"
+            ).order("created_at", desc=True).limit(10).execute()
+            ctx["legal_reviews"] = r.data if r.data else "nessun dato ancora registrato"
+        except Exception:
+            ctx["legal_reviews"] = "nessun dato ancora registrato"
+        try:
+            r = supabase.table("projects").select(
+                "id,name,status,legal_status"
+            ).neq("status", "archived").execute()
+            ctx["projects_legal_status"] = r.data or []
+        except Exception:
+            ctx["projects_legal_status"] = []
+        try:
+            r = supabase.table("agent_logs").select("action,status,error").eq(
+                "agent_id", "ethics_monitor"
+            ).order("created_at", desc=True).limit(10).execute()
+            ctx["ethics_monitor_log"] = r.data or []
+        except Exception:
+            ctx["ethics_monitor_log"] = []
         return ctx
 
     def check_anomalies(self):

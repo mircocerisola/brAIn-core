@@ -341,7 +341,7 @@ Genera il codice per la Fase {next_phase}."""
         _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
 
     else:
-        # Fase 4 = build completo
+        # Fase 4 = build completo → auto-avvia smoke test
         try:
             supabase.table("projects").update({
                 "status": "build_complete",
@@ -351,7 +351,7 @@ Genera il codice per la Fase {next_phase}."""
                 project_id,
                 "Build completo (tutte le fasi)",
                 "build_complete",
-                "Mirco approva lancio o avvia smoke test",
+                "Avvio automatico smoke test",
             )
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] DB update build_complete: {e}")
@@ -361,14 +361,19 @@ Genera il codice per la Fase {next_phase}."""
             f"{sep}\n"
             f"\U0001f4c1 File ({files_committed}):\n{file_list}\n"
             f"{sep}\n"
-            f"\U0001f4c1 Repo: brain-{slug} (privato)"
+            f"\U0001f4c1 Repo: brain-{slug} (privato)\n"
+            f"{sep}\n"
+            f"\u2705 Avvio smoke test automatico..."
         )
-        reply_markup = {
-            "inline_keyboard": [[
-                {"text": "\U0001f680 Lancia", "callback_data": f"launch_confirm:{project_id}"},
-            ]]
-        }
-        _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
+        _send_to_topic(group_id, topic_id, result_msg)
+
+        # Auto-trigger smoke test senza aspettare input Mirco
+        try:
+            from execution.smoke import run_smoke_test_setup
+            run_smoke_test_setup(project_id)
+        except Exception as e:
+            logger.warning(f"[CONTINUE_BUILD] smoke trigger: {e}")
+            _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Smoke test non avviato: {e}")
 
     logger.info(f"[CONTINUE_BUILD] Fase {next_phase} completata project={project_id}")
 
