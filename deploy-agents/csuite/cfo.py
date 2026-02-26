@@ -6,6 +6,7 @@ from core.config import supabase, logger
 
 class CFO(BaseChief):
     name = "CFO"
+    chief_id = "cfo"
     domain = "finance"
     default_model = "claude-sonnet-4-6"
     briefing_prompt_template = (

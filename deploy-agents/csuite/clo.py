@@ -5,6 +5,7 @@ from core.config import supabase
 
 class CLO(BaseChief):
     name = "CLO"
+    chief_id = "clo"
     domain = "legal"
     default_model = "claude-sonnet-4-6"
     briefing_prompt_template = (

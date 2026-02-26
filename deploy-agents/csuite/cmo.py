@@ -5,6 +5,7 @@ from core.config import supabase
 
 class CMO(BaseChief):
     name = "CMO"
+    chief_id = "cmo"
     domain = "marketing"
     default_model = "claude-sonnet-4-6"
     briefing_prompt_template = (

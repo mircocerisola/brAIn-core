@@ -5,6 +5,7 @@ from core.config import supabase, logger
 
 class CSO(BaseChief):
     name = "CSO"
+    chief_id = "cso"
     domain = "strategy"
     default_model = "claude-sonnet-4-6"
     briefing_prompt_template = (
