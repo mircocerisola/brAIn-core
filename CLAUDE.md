@@ -1,5 +1,5 @@
 # brAIn — DNA dell'Organismo
-# Ultima modifica: 25 Febbraio 2026
+# Ultima modifica: 26 Febbraio 2026
 # Questo file viene letto automaticamente ad ogni sessione.
 # NON eliminare. Aggiornare tramite Knowledge Keeper o manualmente.
 
@@ -59,6 +59,11 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ### MEMORY (Sistema di Memoria)
 - Knowledge Keeper v1.1: estrae lezioni da agent_logs, salva in org_knowledge. Notturno.
+- Memory v1.0 (v5.4): tre livelli di memoria persistente per i Chief Agent.
+  L1 Working: topic_conversation_history — ogni messaggio in ogni topic salvato su Supabase.
+  L2 Episodic: episodic_memory — riassunti sessioni via Haiku, ogni 10 messaggi + aggiornamenti pipeline.
+  L3 Semantic: chief_knowledge + org_shared_knowledge — fatti permanenti estratti automaticamente via Haiku.
+  Cleanup settimanale (domenica 03:00): elimina vecchi, unifica episodi antichi.
 - Idea Recycler: rivaluta idee archiviate periodicamente. DA COSTRUIRE.
 - Supabase pgvector: memoria vettoriale per tutti gli agenti. Operativo.
 
@@ -100,17 +105,24 @@ Non layer sequenziali. Sistemi interconnessi come un corpo umano.
 
 ## DATABASE SUPABASE
 
-22+ tabelle. Principali:
+26+ tabelle. Principali:
 - problems: id, title, description, weighted_score (7 parametri), status (new/approved/rejected/archived), sector, geo_scope, affected_population, real_examples, why_it_matters, source_urls, fingerprint (deduplicazione).
 - solutions: id, problem_id, title, description, sector, sub_sector, status, feasibility_score, market_analysis.
 - scan_sources: 40+ fonti con reliability_score auto-ranking. Fonti accademiche + Reddit + settoriali.
 - agent_logs: ogni azione di ogni agente con cost_usd, tokens, duration, status, error.
 - org_knowledge: lezioni apprese categorizzate. Popolata da Knowledge Keeper.
+- org_shared_knowledge: conoscenza condivisa tra tutti i Chief (categoria: dna/decision/process/value). Colonna source ('manual'|'extracted').
+- chief_knowledge: profili, coaching, conoscenza specialistica per Chief. Colonna source ('manual'|'extracted').
 - capability_log: nuovi tool/modelli scoperti da Capability Scout.
 - org_config: configurazione chiave-valore dell'organizzazione.
 - authorization_matrix: regole verde/giallo/rosso per ogni tipo di azione.
 - solution_scores: valutazioni dettagliate per soluzione.
 - reevaluation_log: rivalutazioni periodiche idee archiviate.
+- topic_conversation_history (v5.4): L1 Working Memory — ogni messaggio topic con scope_id (chat_id:thread_id), role, text.
+- episodic_memory (v5.4): L2 Episodic Memory — riassunti sessioni con scope_type, scope_id, summary, importance, access_count.
+- code_tasks: task C-Suite con sandbox check, stato approvazione, routing chain.
+- chief_memory: memoria chiave-valore per dominio Chief.
+- chief_decisions: decisioni/raccomandazioni dei Chief con tipo, summary, full_text.
 - 3 tabelle memoria pgvector per agenti.
 
 ## SCORING PROBLEMI — 7 PARAMETRI
@@ -186,18 +198,23 @@ PRINCIPIO: i guardrails sono nel CODICE Python, NON nel prompt. Il modello non p
 5. Layer 5 prima del Layer 3: abbiamo costruito Knowledge Keeper e Capability Scout prima dei progetti. Decisione corretta perche' servono per informare il primo progetto.
 6. Bot unico per tutto: confusione tra business e infrastruttura. Risolto con 2 bot separati.
 7. Deploy manuale lento: ogni modifica richiedeva 4 comandi CMD. Risolto con Code Agent + Cloud Build auto-deploy.
+8. f-string con backslash in Python 3.11: py 3.14 locale non rileva l'errore, Cloud Run (3.11) crasha al boot. Pre-computare le stringhe prima dell'f-string.
+9. import a modulo-level di variabili non definite: crashano il container al boot (non a runtime). Sempre testare import con dry-run o verificare in locale.
+
+## VERSIONI DEPLOY
+
+- agents-runner: rev 00048-c7c (v5.4)
+- command-center: rev 00045-t5s (v5.4)
 
 ## PROSSIMI STEP (in ordine di priorita')
 
-1. Completare auto-deploy: Code Agent fa build + deploy con approvazione Mirco via Telegram. Zero CMD.
-2. CLAUDE.md e MEMORY.md operativi: questo file va nel repo, letto ad ogni sessione.
-3. METABOLISM base: aggregazione costi da agent_logs, alerting soglie, report giornaliero.
-4. IMMUNE base: Legal Monitor con feed normativo, valutazione rischi per azione.
-5. HANDS: primo progetto live. Project Builder genera MVP. Marketing Agent lancia.
-6. Feasibility Engine: valutazione automatica fattibilita' tecnica + economica.
-7. Portfolio Manager: raccomandazioni scale/pivot/kill basate su dati reali.
-8. Idea Recycler: rivalutazione periodica problemi e soluzioni archiviate.
-9. Auto-miglioramento continuo: ogni ciclo rende l'organismo piu' intelligente.
+1. HANDS: primo progetto live. Pipeline SENSES->THINKING->HANDS completa.
+2. METABOLISM base: aggregazione costi da agent_logs, alerting soglie, report giornaliero.
+3. IMMUNE base: Legal Monitor con feed normativo, valutazione rischi per azione.
+4. Feasibility Engine: valutazione automatica fattibilita' tecnica + economica.
+5. Portfolio Manager: raccomandazioni scale/pivot/kill basate su dati reali.
+6. Idea Recycler: rivalutazione periodica problemi e soluzioni archiviate.
+7. Auto-miglioramento continuo: ogni ciclo rende l'organismo piu' intelligente.
 
 ## CREDENZIALI E ACCESSI
 
@@ -221,8 +238,15 @@ File nel repo GitHub, directory agents/:
 - capability_scout.py: v1.1, scopre nuovi tool
 
 Versioni cloud in deploy/ e deploy-agents/:
-- command_center_unified.py: Command Center v2.3 con Code Agent, notifiche intelligenti, auto-deploy
-- agents_runner.py: runner HTTP event-driven per tutti gli agenti
+- command_center_unified.py: Command Center v3.0 con Code Agent, notifiche intelligenti, auto-deploy, L1 memory persistence
+- agents_runner.py: runner HTTP event-driven per tutti gli agenti (v5.4, moduli in core/ intelligence/ execution/ marketing/ memory/ finance/ csuite/ ethics/)
+
+Moduli deploy-agents/ principali:
+- core/base_chief.py: BaseChief con sandbox, routing automatico, build_system_prompt con L1+L2+L3
+- intelligence/memory.py (v5.4): create_episode, get_episodes, extract_semantic_facts, update_project_episode, cleanup_memory
+- csuite/: 7 Chief AI (CSO, COO, CTO, CMO, CFO, CLO, CPeO) + CDO audit + CPeO coaching
+- execution/: builder.py (spec, build), validator.py (continue_build, validation), legal.py, smoke.py
+- ethics/ethics_monitor.py: Codice Etico v1.0 hardcoded
 
 ## FLUSSO OPERATIVO TIPO
 
