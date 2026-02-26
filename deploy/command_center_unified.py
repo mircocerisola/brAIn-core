@@ -2276,12 +2276,54 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
     elif data.startswith("spec_validate:"):
         project_id = int(data.split(":")[1])
-        await query.answer("SPEC validata!")
-        threading.Thread(
-            target=start_team_setup,
-            args=(project_id, chat_id, thread_id),
-            daemon=True,
-        ).start()
+        await query.answer("Avvio review legale...")
+        # MACRO-TASK 2: spec_validate ora triggera legal review invece di team_setup
+        def _trigger_legal_review():
+            try:
+                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                http_requests.post(
+                    f"{AGENTS_RUNNER_URL}/legal/review",
+                    json={"project_id": project_id},
+                    headers=headers, timeout=10,
+                )
+            except Exception as e:
+                logger.warning(f"[LEGAL_REVIEW_CB] {e}")
+        if AGENTS_RUNNER_URL:
+            threading.Thread(target=_trigger_legal_review, daemon=True).start()
+        else:
+            # fallback: team_setup se agents_runner non disponibile
+            threading.Thread(target=start_team_setup, args=(project_id, chat_id, thread_id), daemon=True).start()
+
+    elif data.startswith("spec_full:"):
+        # MACRO-TASK 4: invia SPEC_CODE.md (versione tecnica completa)
+        project_id = int(data.split(":")[1])
+        await query.answer("Invio SPEC tecnica...")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            try:
+                proj = supabase.table("projects").select("spec_md,name").eq("id", project_id).execute()
+                if proj.data and proj.data[0].get("spec_md"):
+                    spec_md = proj.data[0]["spec_md"]
+                    proj_name = proj.data[0].get("name", f"progetto_{project_id}")
+                    safe_name = proj_name.replace(" ", "_").replace("/", "_")[:40]
+                    tg_data = {"chat_id": chat_id}
+                    if thread_id:
+                        tg_data["message_thread_id"] = str(thread_id)
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendDocument",
+                        data=tg_data,
+                        files={"document": (f"SPEC_CODE_{safe_name}.md", spec_md.encode("utf-8"), "text/plain")},
+                        timeout=30,
+                    )
+                else:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={"chat_id": chat_id, "text": "SPEC non ancora disponibile."},
+                        timeout=10,
+                    )
+            except Exception as e:
+                logger.error(f"[SPEC_FULL] {e}")
 
     elif data.startswith("spec_edit:"):
         project_id = int(data.split(":")[1])
@@ -2332,6 +2374,132 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             args=(project_id, chat_id, thread_id),
             daemon=True,
         ).start()
+
+    # ---- LEGAL AGENT callbacks (MACRO-TASK 2) ----
+    elif data.startswith("legal_read:"):
+        # Mostra report legale
+        parts = data.split(":")
+        project_id = int(parts[1])
+        review_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token and review_id:
+            try:
+                rev = supabase.table("legal_reviews").select("report_md,green_points,yellow_points,red_points").eq("id", review_id).execute()
+                if rev.data:
+                    r = rev.data[0]
+                    report = r.get("report_md") or ""
+                    if not report:
+                        green = json.loads(r.get("green_points") or "[]")
+                        yellow = json.loads(r.get("yellow_points") or "[]")
+                        red = json.loads(r.get("red_points") or "[]")
+                        lines = ["Review legale:"]
+                        for g in green: lines.append(f"🟢 {g}")
+                        for y in yellow: lines.append(f"🟡 {y}")
+                        for rd in red: lines.append(f"🔴 {rd}")
+                        report = "\n".join(lines)
+                    payload = {"chat_id": chat_id, "text": report[:4000]}
+                    if thread_id:
+                        payload["message_thread_id"] = thread_id
+                    http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                                       json=payload, timeout=15)
+            except Exception as e:
+                logger.error(f"[LEGAL_READ] {e}")
+
+    elif data.startswith("legal_proceed:"):
+        # Procedi con build (post legal OK)
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio build...")
+        threading.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
+
+    elif data.startswith("legal_block:"):
+        # Blocca progetto
+        project_id = int(data.split(":")[1])
+        await query.answer("Progetto bloccato.")
+        try:
+            supabase.table("projects").update({"status": "legal_blocked"}).eq("id", project_id).execute()
+            token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token:
+                payload = {"chat_id": chat_id, "text": f"⛔ Progetto {project_id} bloccato per problemi legali."}
+                if thread_id:
+                    payload["message_thread_id"] = thread_id
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+        except Exception as e:
+            logger.error(f"[LEGAL_BLOCK] {e}")
+
+    # ---- SMOKE TEST callbacks (MACRO-TASK 3) ----
+    elif data.startswith("smoke_approve:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("Outreach avviato!")
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            try:
+                supabase.table("smoke_tests").update({"messages_sent": 1}).eq("id", smoke_id).execute()
+                payload = {"chat_id": chat_id, "text": "✅ Outreach approvato. Torna qui tra 7 giorni per analizzare i risultati."}
+                if thread_id:
+                    payload["message_thread_id"] = thread_id
+                http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
+            except Exception as e:
+                logger.error(f"[SMOKE_APPROVE] {e}")
+
+    elif data.startswith("smoke_cancel:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer("Smoke test annullato.")
+        try:
+            supabase.table("smoke_tests").update({"completed_at": "now()"}).eq("id", smoke_id).execute()
+            supabase.table("projects").update({"status": "spec_generated"}).eq("id", project_id).execute()
+        except Exception as e:
+            logger.error(f"[SMOKE_CANCEL] {e}")
+
+    elif data.startswith("smoke_proceed:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Avvio build...")
+        threading.Thread(target=trigger_build_start, args=(project_id, chat_id, thread_id), daemon=True).start()
+
+    elif data.startswith("smoke_spec_insights:"):
+        parts = data.split(":")
+        project_id = int(parts[1])
+        smoke_id = int(parts[2]) if len(parts) > 2 else 0
+        await query.answer()
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            try:
+                st = supabase.table("smoke_tests").select("spec_insights,conversion_rate,recommendation").eq("id", smoke_id).execute()
+                if st.data:
+                    insights = json.loads(st.data[0].get("spec_insights") or "{}")
+                    conv = st.data[0].get("conversion_rate", 0)
+                    rec = st.data[0].get("recommendation", "N/A")
+                    lines = [f"📊 Insights Smoke Test — progetto {project_id}",
+                             f"Conversione: {conv:.1f}% | Rec: {rec}"]
+                    for ins in insights.get("key_insights", [])[:5]:
+                        lines.append(f"• {ins}")
+                    if insights.get("spec_updates"):
+                        lines.append("\nModifiche SPEC suggerite:")
+                        for upd in insights["spec_updates"][:3]:
+                            lines.append(f"→ {upd}")
+                    payload = {"chat_id": chat_id, "text": "\n".join(lines)[:4000]}
+                    if thread_id:
+                        payload["message_thread_id"] = thread_id
+                    http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=15)
+            except Exception as e:
+                logger.error(f"[SMOKE_INSIGHTS] {e}")
+
+    elif data.startswith("smoke_modify_spec:"):
+        project_id = int(data.split(":")[1])
+        await query.answer()
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_spec_edit"] = project_id
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if token:
+            payload = {"chat_id": chat_id, "text": "Cosa vuoi modificare nella SPEC? (usa i suggerimenti o descrivi)"}
+            if thread_id:
+                payload["message_thread_id"] = thread_id
+            http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
     # Build continue/modify (Fix 2)
     elif data.startswith("build_continue:"):

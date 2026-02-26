@@ -4088,6 +4088,146 @@ def _slugify(text, max_len=20):
     return slug[:max_len].rstrip("-")
 
 
+# ---- SUPABASE MANAGEMENT API + GCP SECRET MANAGER ----
+
+def _create_supabase_project(slug):
+    """Crea un progetto Supabase via Management API. Best-effort, ritorna (db_url, db_key) o (None, None)."""
+    if not SUPABASE_ACCESS_TOKEN:
+        logger.warning("[SUPABASE_MGMT] SUPABASE_ACCESS_TOKEN mancante, skip creazione DB separato")
+        return None, None
+    try:
+        resp = http_requests.post(
+            "https://api.supabase.com/v1/projects",
+            headers={
+                "Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "name": f"brain-{slug}",
+                "organization_id": os.getenv("SUPABASE_ORG_ID", ""),
+                "plan": "free",
+                "region": "eu-central-1",
+                "db_pass": _generate_db_pass(),
+            },
+            timeout=60,
+        )
+        if resp.status_code not in (200, 201):
+            logger.warning(f"[SUPABASE_MGMT] Creazione fallita {resp.status_code}: {resp.text[:200]}")
+            return None, None
+        data = resp.json()
+        project_ref = data.get("id", "")
+        db_url = f"postgresql://postgres@db.{project_ref}.supabase.co:5432/postgres"
+        # Recupera API key (anon)
+        keys_resp = http_requests.get(
+            f"https://api.supabase.com/v1/projects/{project_ref}/api-keys",
+            headers={"Authorization": f"Bearer {SUPABASE_ACCESS_TOKEN}"},
+            timeout=30,
+        )
+        anon_key = ""
+        if keys_resp.status_code == 200:
+            for k in keys_resp.json():
+                if k.get("name") == "anon":
+                    anon_key = k.get("api_key", "")
+                    break
+        logger.info(f"[SUPABASE_MGMT] Creato brain-{slug} ref={project_ref}")
+        return db_url, anon_key
+    except Exception as e:
+        logger.warning(f"[SUPABASE_MGMT] {e}")
+        return None, None
+
+
+def _generate_db_pass():
+    import secrets, string
+    alphabet = string.ascii_letters + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(24))
+
+
+def _save_gcp_secret(secret_id, value):
+    """Salva valore in GCP Secret Manager via REST API. Best-effort."""
+    project_num = os.getenv("GCP_PROJECT_NUMBER", "402184600300")
+    project_id_gcp = "brain-core-487914"
+    # Usa metadata token su Cloud Run
+    try:
+        meta = http_requests.get(
+            "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+            headers={"Metadata-Flavor": "Google"},
+            timeout=5,
+        )
+        access_token = meta.json().get("access_token", "")
+    except Exception:
+        logger.warning(f"[GCP_SECRET] Impossibile ottenere metadata token (locale?)")
+        return False
+    if not access_token:
+        return False
+    base = f"https://secretmanager.googleapis.com/v1/projects/{project_id_gcp}"
+    headers = {"Authorization": f"Bearer {access_token}", "Content-Type": "application/json"}
+    import base64
+    encoded = base64.b64encode(value.encode()).decode()
+    # Crea secret se non esiste
+    try:
+        http_requests.post(
+            f"{base}/secrets",
+            headers=headers,
+            json={"replication": {"automatic": {}}},
+            params={"secretId": secret_id},
+            timeout=15,
+        )
+    except Exception:
+        pass
+    # Aggiungi versione
+    try:
+        resp = http_requests.post(
+            f"{base}/secrets/{secret_id}:addVersion",
+            headers=headers,
+            json={"payload": {"data": encoded}},
+            timeout=15,
+        )
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        logger.warning(f"[GCP_SECRET] {e}")
+        return False
+
+
+def get_project_db(project_id):
+    """Ritorna connessione psycopg2 al DB separato del progetto, o None."""
+    try:
+        import psycopg2
+        proj = supabase.table("projects").select("db_url,db_key_secret_name").eq("id", project_id).execute()
+        if not proj.data:
+            return None
+        project = proj.data[0]
+        db_url = project.get("db_url")
+        if not db_url:
+            return None
+        secret_name = project.get("db_key_secret_name", "")
+        # Recupera password da Secret Manager
+        db_pass = ""
+        if secret_name:
+            project_id_gcp = "brain-core-487914"
+            try:
+                meta = http_requests.get(
+                    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token",
+                    headers={"Metadata-Flavor": "Google"}, timeout=5,
+                )
+                access_token = meta.json().get("access_token", "")
+                if access_token:
+                    resp = http_requests.get(
+                        f"https://secretmanager.googleapis.com/v1/projects/{project_id_gcp}/secrets/{secret_name}/versions/latest:access",
+                        headers={"Authorization": f"Bearer {access_token}"}, timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        import base64
+                        db_pass = base64.b64decode(resp.json()["payload"]["data"]).decode()
+            except Exception as e:
+                logger.warning(f"[GET_PROJECT_DB] secret fetch: {e}")
+        conn = psycopg2.connect(db_url.replace("postgresql://postgres@", f"postgresql://postgres:{db_pass}@"),
+                                sslmode="require")
+        return conn
+    except Exception as e:
+        logger.warning(f"[GET_PROJECT_DB] {e}")
+        return None
+
+
 # ---- SPEC GENERATOR (inlined) ----
 
 SPEC_SYSTEM_PROMPT_AR = """Sei l'Architect di brAIn, un'organizzazione AI-native che costruisce prodotti con marginalita' alta.
@@ -4152,6 +4292,28 @@ DOPO LA SEZIONE 10, includi OBBLIGATORIAMENTE questo blocco (NON omettere, NON m
   "mvp_cost_eur": 0
 }
 :JSON_SPEC_END -->"""
+
+
+SPEC_HUMAN_SYSTEM_PROMPT = """Sei un consulente di business che spiega un progetto in modo chiaro a un imprenditore.
+Dato un SPEC tecnico, genera una versione leggibile per Mirco (CEO, non tecnico profondo).
+
+FORMATO OBBLIGATORIO (testo piano, NO markdown asterischi, max 900 caratteri totali):
+
+[NOME PROGETTO]
+━━━━━━━━━━━━━━━
+Problema: [1 riga, cosa risolve]
+Target: [chi sono i clienti, 1 riga]
+Soluzione: [cosa fa concretamente, 1-2 righe]
+━━━━━━━━━━━━━━━
+Revenue model: [come guadagna]
+Primo cliente: [come acquisire in 14gg, 1 riga]
+KPI principale: [metrica + target settimana 4]
+━━━━━━━━━━━━━━━
+Build: [N giorni] | Costo infra: EUR [N]/mese
+Rischio principale: [1 riga onesta]
+━━━━━━━━━━━━━━━
+
+Risposta SOLO con questo formato, niente altro, niente introduzioni."""
 
 
 def run_spec_generator(project_id):
@@ -4326,9 +4488,25 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
     except Exception as e:
         logger.warning(f"[SPEC] JSON extraction error: {e}")
 
+    # MACRO-TASK 4: genera SPEC_HUMAN via Haiku
+    spec_human_md = ""
+    try:
+        human_resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            system=SPEC_HUMAN_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": spec_md[:4000]}],
+        )
+        spec_human_md = human_resp.content[0].text.strip()
+        cost += (human_resp.usage.input_tokens * 0.8 + human_resp.usage.output_tokens * 4.0) / 1_000_000
+        logger.info(f"[SPEC] SPEC_HUMAN generata: {len(spec_human_md)} chars")
+    except Exception as e:
+        logger.warning(f"[SPEC] SPEC_HUMAN generation error: {e}")
+
     try:
         supabase.table("projects").update({
             "spec_md": spec_md,
+            "spec_human_md": spec_human_md or None,
             "stack": json.dumps(stack) if stack else None,
             "kpis": json.dumps(kpis) if kpis else None,
             "status": "spec_generated",
@@ -4338,12 +4516,19 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
 
     if github_repo:
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        # Commit come SPEC_CODE.md (versione tecnica per AI agents)
         ok = _commit_to_project_repo(
-            github_repo, "SPEC.md", spec_md,
-            f"feat: SPEC.md rigenerato da brAIn — {ts}",
+            github_repo, "SPEC_CODE.md", spec_md,
+            f"feat: SPEC_CODE.md rigenerato da brAIn — {ts}",
         )
         if ok:
-            logger.info(f"[SPEC] SPEC.md committato su {github_repo}")
+            logger.info(f"[SPEC] SPEC_CODE.md committato su {github_repo}")
+        # Mantieni anche SPEC.md per compatibilità backward
+        _commit_to_project_repo(github_repo, "SPEC.md", spec_md,
+                                f"feat: SPEC.md sync — {ts}")
+        if spec_human_md:
+            _commit_to_project_repo(github_repo, "SPEC_HUMAN.md", spec_human_md,
+                                    f"feat: SPEC_HUMAN.md generato — {ts}")
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("spec_generator", "spec_generate", 3,
@@ -4715,7 +4900,9 @@ def _extract_spec_bullets(spec_md):
 
 
 def enqueue_spec_review_action(project_id):
-    """Inserisce azione spec_review in action_queue e invia al topic con inline keyboard."""
+    """Inserisce azione spec_review in action_queue e invia al topic con inline keyboard.
+    MACRO-TASK 4: usa SPEC_HUMAN se disponibile, altrimenti bullets come fallback.
+    """
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
@@ -4731,6 +4918,7 @@ def enqueue_spec_review_action(project_id):
     github_repo = project.get("github_repo", "")
     topic_id = project.get("topic_id")
     spec_md = project.get("spec_md", "")
+    spec_human_md = project.get("spec_human_md", "")
 
     # Inserisci in action_queue
     chat_id = get_telegram_chat_id()
@@ -4757,25 +4945,33 @@ def enqueue_spec_review_action(project_id):
         except Exception as e:
             logger.error(f"[SPEC_REVIEW] action_queue insert: {e}")
 
-    # Estrai bullets dalla SPEC
-    bullets = _extract_spec_bullets(spec_md) if spec_md else ["Vedi SPEC per dettagli"] * 3
-
-    # Messaggio con inline keyboard
     sep = "\u2501" * 15
-    msg = (
-        f"\U0001f4cb SPEC pronta \u2014 {name}\n"
-        f"Punti chiave:\n"
-        f"\u2022 {bullets[0]}\n"
-        f"\u2022 {bullets[1]}\n"
-        f"\u2022 {bullets[2]}\n"
-        f"{sep}"
-    )
+
+    # MACRO-TASK 4: usa SPEC_HUMAN se disponibile, altrimenti bullets
+    if spec_human_md:
+        msg = f"{spec_human_md}\n{sep}"
+    else:
+        bullets = _extract_spec_bullets(spec_md) if spec_md else ["Vedi SPEC per dettagli"] * 3
+        msg = (
+            f"\U0001f4cb SPEC pronta \u2014 {name}\n"
+            f"Punti chiave:\n"
+            f"\u2022 {bullets[0]}\n"
+            f"\u2022 {bullets[1]}\n"
+            f"\u2022 {bullets[2]}\n"
+            f"{sep}"
+        )
+
+    # MACRO-TASK 4: nuovo layout pulsanti — riga 1: Valida + Modifica, riga 2: Versione completa
     reply_markup = {
-        "inline_keyboard": [[
-            {"text": "\U0001f4c4 Scarica SPEC", "callback_data": f"spec_download:{project_id}"},
-            {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
-            {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
-        ]]
+        "inline_keyboard": [
+            [
+                {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},
+                {"text": "\u270f\ufe0f Modifica", "callback_data": f"spec_edit:{project_id}"},
+            ],
+            [
+                {"text": "\U0001f4c4 Versione completa (SPEC_CODE)", "callback_data": f"spec_full:{project_id}"},
+            ],
+        ]
     }
 
     group_id = _get_telegram_group_id()
@@ -4837,6 +5033,22 @@ def init_project(solution_id):
 
     logger.info(f"[INIT] Progetto creato: id={project_id} slug={slug}")
 
+    # 3b. MACRO-TASK 1: Crea Supabase project separato (best-effort)
+    db_url, db_anon_key = _create_supabase_project(slug)
+    if db_url:
+        secret_id = f"brain-{slug}-supabase-key"
+        _save_gcp_secret(secret_id, db_anon_key or "")
+        try:
+            supabase.table("projects").update({
+                "db_url": db_url,
+                "db_key_secret_name": secret_id,
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning(f"[INIT] db_url update error: {e}")
+        logger.info(f"[INIT] Supabase separato: {db_url[:60]}")
+    else:
+        logger.info("[INIT] DB separato non creato (best-effort, procedo senza)")
+
     # 4. Crea GitHub repo
     github_repo = _create_github_repo(slug, name)
     if github_repo:
@@ -4894,6 +5106,582 @@ def init_project(solution_id):
         "slug": slug,
         "github_repo": github_repo,
         "topic_id": topic_id,
+    }
+
+
+# ---- LEGAL AGENT (MACRO-TASK 2) ----
+
+LEGAL_SYSTEM_PROMPT = """Sei il Legal Agent di brAIn, esperto di diritto digitale europeo (GDPR, AI Act, Direttiva E-Commerce, normativa italiana).
+Analizza un progetto e valuta i rischi legali per operare in Europa.
+
+RISPOSTA: JSON puro, nessun testo fuori.
+{
+  "green_points": ["punto OK 1", "punto OK 2"],
+  "yellow_points": ["attenzione 1: cosa fare"],
+  "red_points": ["blocco critico 1: perche' blocca il lancio"],
+  "report_md": "# Review Legale\\n## Punti OK\\n...\\n## Attenzione\\n...\\n## Blocchi\\n...",
+  "can_proceed": true
+}
+
+REGOLE:
+- green_points: aspetti legalmente OK (es: no dati sensibili, B2B chiaro)
+- yellow_points: aspetti da sistemare prima del lancio ma non bloccanti
+- red_points: problemi che bloccano il lancio (es: raccolta dati senza consenso, attivita' finanziaria non autorizzata)
+- can_proceed: false se ci sono red_points, true altrimenti
+- Sii concreto: cita norme specifiche (art. GDPR, AI Act art., ecc.)
+- Se settore = health/finance/legal: tratta come alta priorita'"""
+
+
+def run_legal_review(project_id):
+    """MACRO-TASK 2: Review legale del progetto. Triggered dopo validazione SPEC."""
+    start = time.time()
+    logger.info(f"[LEGAL] Avvio review per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", f"Progetto {project_id}")
+    spec_md = project.get("spec_md", "")
+    sector = project.get("sector", "")
+    topic_id = project.get("topic_id")
+    group_id = _get_telegram_group_id()
+
+    if not spec_md:
+        return {"status": "error", "error": "spec_md mancante"}
+
+    # Notifica avvio nel topic
+    if group_id and topic_id:
+        _send_to_topic(group_id, topic_id, f"\u2696\ufe0f Review legale in corso per {name}...")
+
+    user_prompt = f"""Progetto: {name}
+Settore: {sector or "non specificato"}
+
+SPEC (estratto rilevante per analisi legale):
+{spec_md[:5000]}
+
+Analizza i rischi legali per operare in Europa con questo progetto."""
+
+    tokens_in = tokens_out = 0
+    review_data = {}
+    try:
+        response = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=2000,
+            system=LEGAL_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        raw = response.content[0].text.strip()
+        tokens_in = response.usage.input_tokens
+        tokens_out = response.usage.output_tokens
+        # Estrai JSON
+        import re as _re2
+        m = _re2.search(r'\{[\s\S]*\}', raw)
+        if m:
+            review_data = json.loads(m.group(0))
+        else:
+            review_data = json.loads(raw)
+    except Exception as e:
+        logger.error(f"[LEGAL] Claude error: {e}")
+        return {"status": "error", "error": str(e)}
+
+    cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
+
+    green = review_data.get("green_points", [])
+    yellow = review_data.get("yellow_points", [])
+    red = review_data.get("red_points", [])
+    can_proceed = review_data.get("can_proceed", len(red) == 0)
+    report_md = review_data.get("report_md", "")
+
+    # Salva in legal_reviews
+    review_id = None
+    try:
+        res = supabase.table("legal_reviews").insert({
+            "project_id": project_id,
+            "review_type": "spec_review",
+            "status": "completed",
+            "green_points": json.dumps(green),
+            "yellow_points": json.dumps(yellow),
+            "red_points": json.dumps(red),
+            "report_md": report_md,
+        }).execute()
+        if res.data:
+            review_id = res.data[0]["id"]
+    except Exception as e:
+        logger.error(f"[LEGAL] DB insert: {e}")
+
+    # Aggiorna status progetto
+    new_status = "legal_ok" if can_proceed else "legal_blocked"
+    try:
+        supabase.table("projects").update({"status": new_status}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.error(f"[LEGAL] status update: {e}")
+
+    # Invia card nel topic
+    sep = "\u2501" * 15
+    msg = (
+        f"\u2696\ufe0f Review Legale \u2014 {name}\n"
+        f"{sep}\n"
+        f"\U0001f7e2 OK: {len(green)} punti | \U0001f7e1 Attenzione: {len(yellow)} | \U0001f534 Blocchi: {len(red)}\n"
+        f"{sep}"
+    )
+    if red:
+        msg += "\n\U0001f534 " + "\n\U0001f534 ".join(red[:3])
+        msg += f"\n{sep}"
+    elif yellow:
+        msg += "\n\U0001f7e1 " + "\n\U0001f7e1 ".join(yellow[:2])
+        msg += f"\n{sep}"
+
+    if can_proceed:
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "\U0001f4c4 Dettaglio review", "callback_data": f"legal_read:{project_id}:{review_id or 0}"},
+                    {"text": "\U0001f680 Procedi build", "callback_data": f"legal_proceed:{project_id}"},
+                ],
+            ]
+        }
+    else:
+        reply_markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "\U0001f4c4 Dettaglio review", "callback_data": f"legal_read:{project_id}:{review_id or 0}"},
+                    {"text": "\U0001f534 Blocca progetto", "callback_data": f"legal_block:{project_id}"},
+                ],
+            ]
+        }
+
+    if group_id and topic_id:
+        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("legal_agent", "legal_review", 2,
+                    f"project={project_id}", f"green={len(green)} yellow={len(yellow)} red={len(red)}",
+                    "claude-sonnet-4-5", tokens_in, tokens_out, cost, duration_ms)
+
+    logger.info(f"[LEGAL] Completato project={project_id} green={len(green)} yellow={len(yellow)} red={len(red)}")
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "review_id": review_id,
+        "can_proceed": can_proceed,
+        "green": len(green), "yellow": len(yellow), "red": len(red),
+    }
+
+
+def generate_project_docs(project_id):
+    """MACRO-TASK 2: Genera Privacy Policy, ToS, Client Contract per il progetto."""
+    start = time.time()
+    logger.info(f"[LEGAL_DOCS] Avvio per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("name,spec_md,slug").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", f"Progetto {project_id}")
+    spec_md = project.get("spec_md", "")
+    github_repo = project.get("github_repo") or project.get("slug", "")
+
+    docs = {}
+    total_cost = 0.0
+    for doc_type, doc_name in [
+        ("privacy_policy", "Privacy Policy"),
+        ("terms_of_service", "Termini di Servizio"),
+        ("client_contract", "Contratto Cliente"),
+    ]:
+        prompt = f"""Genera {doc_name} per il prodotto "{name}" (legge italiana/europea).
+Estrai le caratteristiche rilevanti dalla SPEC: {spec_md[:2000]}
+Formato: testo legale formale, sezioni numerate, italiano.
+Max 800 parole. Solo il documento, niente intro."""
+        try:
+            resp = claude.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1500,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            docs[doc_type] = resp.content[0].text.strip()
+            total_cost += (resp.usage.input_tokens * 0.8 + resp.usage.output_tokens * 4.0) / 1_000_000
+        except Exception as e:
+            logger.warning(f"[LEGAL_DOCS] {doc_type}: {e}")
+            docs[doc_type] = f"[Errore generazione {doc_name}]"
+
+    # Commit su GitHub
+    if github_repo:
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _commit_to_project_repo(github_repo, "docs/privacy_policy.md",
+                                docs.get("privacy_policy", ""), f"docs: Privacy Policy {ts}")
+        _commit_to_project_repo(github_repo, "docs/terms_of_service.md",
+                                docs.get("terms_of_service", ""), f"docs: Terms of Service {ts}")
+        _commit_to_project_repo(github_repo, "docs/client_contract.md",
+                                docs.get("client_contract", ""), f"docs: Client Contract {ts}")
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("legal_agent", "generate_docs", 2,
+                    f"project={project_id}", f"docs generati: {list(docs.keys())}",
+                    "claude-haiku-4-5-20251001", 0, 0, total_cost, duration_ms)
+
+    logger.info(f"[LEGAL_DOCS] Completato project={project_id} in {duration_ms}ms")
+    return {"status": "ok", "project_id": project_id, "docs": list(docs.keys())}
+
+
+def monitor_brain_compliance():
+    """MACRO-TASK 2: Weekly compliance check per brAIn stessa. Ogni lunedi 07:00."""
+    start = time.time()
+    logger.info("[COMPLIANCE] Avvio monitoraggio settimanale brAIn")
+
+    prompt = """Sei il Legal Monitor di brAIn. Analizza l'organismo brAIn e verifica la compliance.
+brAIn e' un'organizzazione AI-native che:
+- Scansiona problemi globali via Perplexity API (web scraping indiretto)
+- Genera soluzioni con Claude AI
+- Costruisce e lancia MVP
+- Raccoglie feedback da prospect via email/Telegram
+- Opera in Europa (Italia, Frankfurt)
+
+Verifica compliance con: GDPR, AI Act 2026, Direttiva E-Commerce, normativa italiana.
+Risposta in testo piano italiano, max 10 righe, formato:
+COMPLIANCE CHECK brAIn — [data]
+[status: OK/ATTENZIONE/CRITICO]
+[elenco punti numerati]"""
+
+    try:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=500,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        report = resp.content[0].text.strip()
+        cost = (resp.usage.input_tokens * 0.8 + resp.usage.output_tokens * 4.0) / 1_000_000
+    except Exception as e:
+        logger.error(f"[COMPLIANCE] {e}")
+        return {"status": "error", "error": str(e)}
+
+    # Invia a Mirco
+    chat_id = get_telegram_chat_id()
+    if chat_id:
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if token:
+            try:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": chat_id, "text": report},
+                    timeout=15,
+                )
+            except Exception as e:
+                logger.warning(f"[COMPLIANCE] Telegram: {e}")
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("legal_agent", "compliance_check", 1,
+                    "brain_compliance_weekly", report[:200],
+                    "claude-haiku-4-5-20251001", 0, 0, cost, duration_ms)
+
+    return {"status": "ok", "report": report}
+
+
+# ---- SMOKE TEST AGENT (MACRO-TASK 3) ----
+
+def run_smoke_test_setup(project_id):
+    """MACRO-TASK 3: Setup smoke test — crea record, trova 50 prospect via Perplexity, salva."""
+    start = time.time()
+    logger.info(f"[SMOKE] Avvio setup per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", f"Progetto {project_id}")
+    spec_md = project.get("spec_md", "")
+    landing_url = project.get("smoke_test_url") or project.get("landing_page_url", "")
+    topic_id = project.get("topic_id")
+    group_id = _get_telegram_group_id()
+
+    if not spec_md:
+        return {"status": "error", "error": "spec_md mancante"}
+
+    # Notifica avvio
+    if group_id and topic_id:
+        _send_to_topic(group_id, topic_id, f"\U0001f9ea Smoke test avviato per {name}\nRicerca prospect in corso...")
+
+    # Crea record smoke_test
+    smoke_id = None
+    try:
+        res = supabase.table("smoke_tests").insert({
+            "project_id": project_id,
+            "landing_page_url": landing_url or "",
+        }).execute()
+        if res.data:
+            smoke_id = res.data[0]["id"]
+    except Exception as e:
+        logger.error(f"[SMOKE] smoke_tests insert: {e}")
+        return {"status": "error", "error": str(e)}
+
+    # Estrai target dalla SPEC per trovare prospect
+    spec_lines = spec_md[:3000]
+    target_query = ""
+    try:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": (
+                f"Da questa SPEC, estrai il target customer in 1 riga concisa per una query di ricerca Perplexity "
+                f"(es: 'avvocati italiani 35-50 anni studio legale piccolo'). Solo la riga.\n\n{spec_lines}"
+            )}],
+        )
+        target_query = resp.content[0].text.strip()
+    except Exception as e:
+        logger.warning(f"[SMOKE] target extraction: {e}")
+        target_query = f"clienti di {name}"
+
+    # Trova prospect via Perplexity
+    prospects_raw = []
+    try:
+        query = (f"trova 20 {target_query} con contatto email o LinkedIn pubblico in Italia. "
+                 f"Elenca nome, ruolo, email/LinkedIn in formato: Nome | Ruolo | Contatto")
+        perplexity_result = search_perplexity(query)
+        if perplexity_result:
+            # Estrai righe con | come separatore
+            for line in perplexity_result.split("\n"):
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) >= 3 and parts[2] and ("@" in parts[2] or "linkedin" in parts[2].lower()):
+                    prospects_raw.append({
+                        "name": parts[0][:100],
+                        "contact": parts[2][:200],
+                        "channel": "email" if "@" in parts[2] else "linkedin",
+                    })
+    except Exception as e:
+        logger.warning(f"[SMOKE] Perplexity prospect search: {e}")
+
+    # Inserisci prospect in DB
+    inserted = 0
+    for p in prospects_raw[:50]:
+        try:
+            supabase.table("smoke_test_prospects").insert({
+                "smoke_test_id": smoke_id,
+                "project_id": project_id,
+                "name": p["name"],
+                "contact": p["contact"],
+                "channel": p["channel"],
+                "status": "pending",
+            }).execute()
+            inserted += 1
+        except Exception as e:
+            logger.warning(f"[SMOKE] prospect insert: {e}")
+
+    # Aggiorna conteggio
+    try:
+        supabase.table("smoke_tests").update({"prospects_count": inserted}).eq("id", smoke_id).execute()
+    except Exception:
+        pass
+
+    # Aggiorna status progetto
+    try:
+        supabase.table("projects").update({"status": "smoke_test_running"}).eq("id", project_id).execute()
+    except Exception:
+        pass
+
+    # Invia card con risultato
+    sep = "\u2501" * 15
+    msg = (
+        f"\U0001f9ea Smoke Test \u2014 {name}\n"
+        f"{sep}\n"
+        f"Prospect trovati: {inserted}\n"
+        f"Landing: {landing_url or 'non ancora deployata'}\n"
+        f"Analisi risultati disponibile dopo 7 giorni.\n"
+        f"{sep}"
+    )
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "\u2705 Avvia Outreach", "callback_data": f"smoke_approve:{project_id}:{smoke_id}"},
+                {"text": "\u274c Annulla", "callback_data": f"smoke_cancel:{project_id}:{smoke_id}"},
+            ],
+        ]
+    }
+    if group_id and topic_id:
+        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("smoke_test_agent", "smoke_setup", 2,
+                    f"project={project_id}", f"smoke_id={smoke_id} prospects={inserted}",
+                    "claude-haiku-4-5-20251001", 0, 0, 0, duration_ms)
+
+    logger.info(f"[SMOKE] Setup completato project={project_id} smoke_id={smoke_id} prospects={inserted}")
+    return {"status": "ok", "project_id": project_id, "smoke_id": smoke_id, "prospects_count": inserted}
+
+
+def analyze_feedback_for_spec(project_id):
+    """MACRO-TASK 3: Analizza feedback smoke test dopo 7 giorni. Genera SPEC_UPDATES.md e insights."""
+    start = time.time()
+    logger.info(f"[SMOKE_ANALYZE] Avvio analisi per project_id={project_id}")
+
+    try:
+        proj = supabase.table("projects").select("*").eq("id", project_id).execute()
+        if not proj.data:
+            return {"status": "error", "error": "project not found"}
+        project = proj.data[0]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    name = project.get("name", f"Progetto {project_id}")
+    spec_md = project.get("spec_md", "")
+    topic_id = project.get("topic_id")
+    group_id = _get_telegram_group_id()
+    github_repo = project.get("github_repo", "")
+
+    # Recupera smoke test più recente
+    try:
+        st = supabase.table("smoke_tests").select("*").eq("project_id", project_id).order("started_at", desc=True).limit(1).execute()
+        if not st.data:
+            return {"status": "error", "error": "smoke test not found"}
+        smoke = st.data[0]
+        smoke_id = smoke["id"]
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    # Recupera prospect con feedback
+    try:
+        prospects = supabase.table("smoke_test_prospects").select("*").eq("smoke_test_id", smoke_id).execute()
+        prospects_data = prospects.data or []
+    except Exception:
+        prospects_data = []
+
+    sent = sum(1 for p in prospects_data if p.get("sent_at"))
+    rejected = [p for p in prospects_data if p.get("status") == "rejected"]
+    forms = [p for p in prospects_data if p.get("status") == "form_compiled"]
+    rejection_reasons = [p.get("rejection_reason", "") for p in rejected if p.get("rejection_reason")]
+
+    conv_rate = (len(forms) / max(sent, 1)) * 100
+
+    # Genera insights con Claude
+    insights_prompt = f"""Analizza i risultati di questo smoke test per il prodotto "{name}".
+
+Dati:
+- Prospect contattati: {sent}
+- Form compilati: {len(forms)}
+- Rifiuti: {len(rejected)}
+- Tasso conversione: {conv_rate:.1f}%
+- Motivi rifiuto principali: {'; '.join(rejection_reasons[:5]) or 'non disponibili'}
+
+SPEC originale (estratto): {spec_md[:2000]}
+
+Rispondi in JSON:
+{{
+  "overall_signal": "green/yellow/red",
+  "key_insights": ["insight 1", "insight 2", "insight 3"],
+  "spec_updates": ["modifica 1 alla SPEC", "modifica 2"],
+  "recommendation": "PROCEDI/PIVOTA/FERMA",
+  "reasoning": "1 paragrafo max"
+}}"""
+
+    insights = {}
+    try:
+        resp = claude.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=1000,
+            messages=[{"role": "user", "content": insights_prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        import re as _re3
+        m = _re3.search(r'\{[\s\S]*\}', raw)
+        if m:
+            insights = json.loads(m.group(0))
+        cost = (resp.usage.input_tokens * 3.0 + resp.usage.output_tokens * 15.0) / 1_000_000
+    except Exception as e:
+        logger.error(f"[SMOKE_ANALYZE] Claude: {e}")
+        cost = 0.0
+        insights = {"overall_signal": "yellow", "key_insights": [], "spec_updates": [],
+                    "recommendation": "ANALISI MANUALE RICHIESTA"}
+
+    # Genera SPEC_UPDATES.md
+    spec_updates_content = f"# SPEC Updates — {name}\nData: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}\n\n"
+    spec_updates_content += f"## Segnale smoke test: {insights.get('overall_signal', 'N/A').upper()}\n\n"
+    spec_updates_content += f"## Raccomandazione: {insights.get('recommendation', 'N/A')}\n\n"
+    spec_updates_content += f"## Key Insights\n"
+    for i, ins in enumerate(insights.get("key_insights", []), 1):
+        spec_updates_content += f"{i}. {ins}\n"
+    spec_updates_content += f"\n## Modifiche SPEC suggerite\n"
+    for i, upd in enumerate(insights.get("spec_updates", []), 1):
+        spec_updates_content += f"{i}. {upd}\n"
+    spec_updates_content += f"\n## Reasoning\n{insights.get('reasoning', '')}\n"
+    spec_updates_content += f"\n## Metriche\n- Contattati: {sent}\n- Form: {len(forms)}\n- Rifiuti: {len(rejected)}\n- Conversione: {conv_rate:.1f}%\n"
+
+    if github_repo:
+        _commit_to_project_repo(github_repo, "SPEC_UPDATES.md", spec_updates_content,
+                                f"data: SPEC_UPDATES smoke test {datetime.now(timezone.utc).strftime('%Y-%m-%d')}")
+
+    # Salva insights in smoke_tests
+    try:
+        supabase.table("smoke_tests").update({
+            "spec_insights": json.dumps(insights),
+            "messages_sent": sent,
+            "forms_compiled": len(forms),
+            "rejections_with_reason": len(rejection_reasons),
+            "conversion_rate": conv_rate,
+            "recommendation": insights.get("recommendation", ""),
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", smoke_id).execute()
+    except Exception as e:
+        logger.error(f"[SMOKE_ANALYZE] smoke_tests update: {e}")
+
+    # Aggiorna spec_insights in projects
+    try:
+        supabase.table("projects").update({
+            "spec_insights": json.dumps(insights),
+            "status": "smoke_completed",
+        }).eq("id", project_id).execute()
+    except Exception:
+        pass
+
+    # Invia card risultato nel topic
+    sep = "\u2501" * 15
+    signal = insights.get("overall_signal", "yellow")
+    signal_emoji = "\U0001f7e2" if signal == "green" else ("\U0001f534" if signal == "red" else "\U0001f7e1")
+    msg = (
+        f"\U0001f9ea Smoke Test completato \u2014 {name}\n"
+        f"{sep}\n"
+        f"Segnale: {signal_emoji} {signal.upper()}\n"
+        f"Conversione: {conv_rate:.1f}% ({len(forms)}/{sent})\n"
+        f"Raccomandazione: {insights.get('recommendation', 'N/A')}\n"
+        f"{sep}"
+    )
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "\U0001f680 Avvia build", "callback_data": f"smoke_proceed:{project_id}"},
+                {"text": "\U0001f4ca Insight SPEC", "callback_data": f"smoke_spec_insights:{project_id}:{smoke_id}"},
+            ],
+            [
+                {"text": "\u270f\ufe0f Modifica SPEC", "callback_data": f"smoke_modify_spec:{project_id}"},
+            ],
+        ]
+    }
+    if group_id and topic_id:
+        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+
+    duration_ms = int((time.time() - start) * 1000)
+    log_to_supabase("smoke_test_agent", "smoke_analyze", 2,
+                    f"project={project_id}", f"conv={conv_rate:.1f}% rec={insights.get('recommendation','')}",
+                    "claude-sonnet-4-5", 0, 0, cost, duration_ms)
+
+    logger.info(f"[SMOKE_ANALYZE] Completato project={project_id} conv={conv_rate:.1f}%")
+    return {
+        "status": "ok",
+        "project_id": project_id,
+        "smoke_id": smoke_id,
+        "conversion_rate": conv_rate,
+        "recommendation": insights.get("recommendation", ""),
+        "signal": signal,
     }
 
 
@@ -5632,6 +6420,67 @@ async def run_migration_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_legal_review_endpoint(request):
+    """POST /legal/review — review legale progetto. Body: {project_id}"""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        result = run_legal_review(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_legal_docs_endpoint(request):
+    """POST /legal/docs — genera documenti legali. Body: {project_id}"""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        result = generate_project_docs(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_legal_compliance_endpoint(request):
+    """POST /legal/compliance — weekly brAIn compliance check."""
+    try:
+        result = monitor_brain_compliance()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_smoke_setup_endpoint(request):
+    """POST /smoke/setup — avvia smoke test. Body: {project_id}"""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        result = run_smoke_test_setup(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_smoke_analyze_endpoint(request):
+    """POST /smoke/analyze — analizza feedback. Body: {project_id}"""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        result = analyze_feedback_for_spec(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_all_endpoint(request):
     results = {}
     results["scanner"] = run_world_scanner()
@@ -5680,6 +6529,11 @@ async def main():
     app.router.add_post("/project/continue_build", run_continue_build_endpoint)
     app.router.add_post("/project/generate_invite", run_generate_invite_endpoint)
     app.router.add_post("/migration/apply", run_migration_endpoint)
+    app.router.add_post("/legal/review", run_legal_review_endpoint)
+    app.router.add_post("/legal/docs", run_legal_docs_endpoint)
+    app.router.add_post("/legal/compliance", run_legal_compliance_endpoint)
+    app.router.add_post("/smoke/setup", run_smoke_setup_endpoint)
+    app.router.add_post("/smoke/analyze", run_smoke_analyze_endpoint)
     app.router.add_post("/all", run_all_endpoint)
 
     runner = web.AppRunner(app)
