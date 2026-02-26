@@ -23,6 +23,16 @@ def run_spec_generator(project_id):
     start = time.time()
     logger.info(f"[SPEC] Avvio per project_id={project_id}")
 
+    # Pipeline lock
+    try:
+        lock_check = supabase.table("projects").select("pipeline_locked,status").eq("id", project_id).execute()
+        if lock_check.data and lock_check.data[0].get("pipeline_locked"):
+            logger.info(f"[SPEC] project {project_id} pipeline locked, skip")
+            return {"status": "skipped", "reason": "pipeline già in corso"}
+        supabase.table("projects").update({"pipeline_locked": True}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[SPEC] Lock check error: {e}")
+
     # 1. Carica progetto da DB
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
@@ -234,6 +244,12 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
                     f"SPEC {len(spec_md)} chars stack={stack}",
                     "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
 
+    # Sblocca pipeline
+    try:
+        supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[SPEC] Unlock error: {e}")
+
     logger.info(f"[SPEC] Completato project={project_id} in {duration_ms}ms spec_len={len(spec_md)}")
     return {"status": "ok", "project_id": project_id, "spec_length": len(spec_md),
             "solution_id": solution_id, "problem_id": problem_id,
@@ -442,13 +458,28 @@ FASE_DESCRIPTIONS = {
 
 def run_build_agent(project_id):
     """Build agent autonomo: genera Fase 1 (struttura base), committa su GitHub, notifica per review."""
+    # Pipeline lock
+    try:
+        lock_check = supabase.table("projects").select("pipeline_locked,status").eq("id", project_id).execute()
+        if lock_check.data and lock_check.data[0].get("pipeline_locked"):
+            logger.info(f"[BUILD_AGENT] project {project_id} pipeline locked, skip")
+            return
+        supabase.table("projects").update({"pipeline_locked": True}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[BUILD_AGENT] Lock check error: {e}")
+
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
             return
         project = proj.data[0]
     except Exception as e:
         logger.error(f"[BUILD_AGENT] DB load: {e}")
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
         return
 
     name = project.get("name", "MVP")
@@ -569,6 +600,12 @@ Genera SOLO i file della struttura base."""
         ]]
     }
     _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
+    # Sblocca pipeline
+    try:
+        supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[BUILD_AGENT] Unlock error: {e}")
+
     logger.info(f"[BUILD_AGENT] Fase 1 completata project={project_id}, {files_committed} file committati")
 
 
@@ -681,6 +718,17 @@ def init_project(solution_id):
     """Inizializza progetto da BOS approvato: DB, GitHub repo, Forum Topic, spec, landing, enqueue review."""
     logger.info(f"[INIT] Avvio per solution_id={solution_id}")
 
+    # Anti-duplicazione: se esiste già un progetto per questa soluzione, skip
+    try:
+        existing = supabase.table("projects").select("id,status,pipeline_locked").eq("bos_id", int(solution_id)).execute()
+        if existing.data:
+            proj = existing.data[0]
+            if proj.get("status") not in ("new", "init", "failed") or proj.get("pipeline_locked"):
+                logger.info(f"[INIT] solution {solution_id} già processata (status={proj.get('status')}), skip")
+                return {"status": "skipped", "reason": "progetto già in corso o completato"}
+    except Exception as e:
+        logger.warning(f"[INIT] Duplicate check error: {e}")
+
     # 1. Carica soluzione e problema
     try:
         sol = supabase.table("solutions").select("*").eq("id", solution_id).execute()
@@ -716,6 +764,7 @@ def init_project(solution_id):
             "bos_id": int(solution_id),
             "bos_score": bos_score,
             "status": "init",
+            "pipeline_locked": True,
         }).execute()
         if result.data:
             project_id = result.data[0]["id"]
@@ -793,6 +842,13 @@ def init_project(solution_id):
 
     # 8. Enqueue spec review action con inline keyboard
     enqueue_spec_review_action(project_id)
+
+    # Sblocca pipeline
+    try:
+        if project_id:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[INIT] Unlock error: {e}")
 
     logger.info(f"[INIT] Completato: project_id={project_id} slug={slug}")
     return {

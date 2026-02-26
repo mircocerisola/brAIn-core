@@ -16,12 +16,27 @@ def run_legal_review(project_id):
     start = time.time()
     logger.info(f"[LEGAL] Avvio review per project_id={project_id}")
 
+    # Pipeline lock
+    try:
+        lock_check = supabase.table("projects").select("pipeline_locked,status").eq("id", project_id).execute()
+        if lock_check.data and lock_check.data[0].get("pipeline_locked"):
+            logger.info(f"[LEGAL] project {project_id} pipeline locked, skip")
+            return {"status": "skipped", "reason": "pipeline già in corso"}
+        supabase.table("projects").update({"pipeline_locked": True}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[LEGAL] Lock check error: {e}")
+
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
             return {"status": "error", "error": "project not found"}
         project = proj.data[0]
     except Exception as e:
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
         return {"status": "error", "error": str(e)}
 
     name = project.get("name", f"Progetto {project_id}")
@@ -140,6 +155,12 @@ Analizza i rischi legali per operare in Europa con questo progetto."""
     log_to_supabase("legal_agent", "legal_review", 2,
                     f"project={project_id}", f"green={len(green)} yellow={len(yellow)} red={len(red)}",
                     "claude-sonnet-4-6", tokens_in, tokens_out, cost, duration_ms)
+
+    # Sblocca pipeline
+    try:
+        supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[LEGAL] Unlock error: {e}")
 
     logger.info(f"[LEGAL] Completato project={project_id} green={len(green)} yellow={len(yellow)} red={len(red)}")
     return {

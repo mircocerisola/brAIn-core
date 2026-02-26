@@ -16,12 +16,27 @@ def run_smoke_test_setup(project_id):
     start = time.time()
     logger.info(f"[SMOKE] Avvio setup per project_id={project_id}")
 
+    # Pipeline lock
+    try:
+        lock_check = supabase.table("projects").select("pipeline_locked,status").eq("id", project_id).execute()
+        if lock_check.data and lock_check.data[0].get("pipeline_locked"):
+            logger.info(f"[SMOKE] project {project_id} pipeline locked, skip")
+            return {"status": "skipped", "reason": "pipeline già in corso"}
+        supabase.table("projects").update({"pipeline_locked": True}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[SMOKE] Lock check error: {e}")
+
     try:
         proj = supabase.table("projects").select("*").eq("id", project_id).execute()
         if not proj.data:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
             return {"status": "error", "error": "project not found"}
         project = proj.data[0]
     except Exception as e:
+        try:
+            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+        except Exception:
+            pass
         return {"status": "error", "error": str(e)}
 
     name = project.get("name", f"Progetto {project_id}")
@@ -139,6 +154,12 @@ def run_smoke_test_setup(project_id):
     log_to_supabase("smoke_test_agent", "smoke_setup", 2,
                     f"project={project_id}", f"smoke_id={smoke_id} prospects={inserted}",
                     "claude-haiku-4-5-20251001", 0, 0, 0, duration_ms)
+
+    # Sblocca pipeline
+    try:
+        supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+    except Exception as e:
+        logger.warning(f"[SMOKE] Unlock error: {e}")
 
     logger.info(f"[SMOKE] Setup completato project={project_id} smoke_id={smoke_id} prospects={inserted}")
     return {"status": "ok", "project_id": project_id, "smoke_id": smoke_id, "prospects_count": inserted}

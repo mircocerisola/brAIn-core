@@ -1194,6 +1194,15 @@ def _execute_action(action_type, payload, approved):
             sid = payload.get("solution_id")
             pid = payload.get("problem_id")
             if approved and sid:
+                # Anti-duplicazione: rigetta silenziosamente se progetto già in corso
+                try:
+                    dup = supabase.table("projects").select("id,status").eq("bos_id", int(sid)).execute()
+                    if dup.data and dup.data[0].get("status") not in ("new", "init", "failed"):
+                        logger.info(f"[EXECUTE_ACTION] BOS {sid} già processato (status={dup.data[0].get('status')}), skip silenzioso")
+                        return None
+                except Exception as e:
+                    logger.warning(f"[EXECUTE_ACTION] Duplicate BOS check error: {e}")
+
                 # Seleziona la soluzione per esecuzione e aggiorna problema ad approved
                 result = select_solution(int(sid))
                 if pid:
