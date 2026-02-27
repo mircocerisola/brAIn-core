@@ -945,9 +945,9 @@ def agent_to_agent_call(from_chief_id: str, to_chief_id: str,
     logger.info(f"[INTER_AGENT] {from_chief_id} -> {to_chief_id}: {task[:60]}")
 
     try:
-        # Se la destinazione e' il CTO e il task e' codice → genera ed esegui
-        if to_chief_id == "cto" and hasattr(target, "generate_and_execute_prompt"):
-            result = target.generate_and_execute_prompt(task, context, requires_approval=True)
+        # Se la destinazione e' il CTO e il task e' codice → genera e consegna prompt
+        if to_chief_id == "cto" and hasattr(target, "generate_and_deliver_prompt"):
+            result = target.generate_and_deliver_prompt(task, context)
         else:
             # Chief destinazione risponde come domanda
             result_text = target.answer_question(
