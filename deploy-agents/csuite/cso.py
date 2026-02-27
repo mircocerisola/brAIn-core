@@ -134,73 +134,116 @@ class CSO(BaseChief):
     # ============================================================
 
     def find_real_prospects(self, target, n=50):
-        """Cerca ristoranti con email reali via Perplexity. Cerca in piu' citta' se necessario."""
+        """Cerca ristoranti con email reali via Perplexity. Cerca in piu' citta'."""
+        import re as _re
         prospects = []
         cities_tried = []
 
-        # Prima ricerca generica
-        query = (
-            "Trova " + str(n) + " ristoranti " + target +
-            " con email di contatto. Per ogni ristorante elenca: "
-            "Nome | Citta | Email | Sito web | Telefono. "
-            "Formato: una riga per ristorante, campi separati da |. "
-            "Includi SOLO ristoranti con email reale confermata."
-        )
-        prospects.extend(self._parse_prospect_results(search_perplexity(query)))
-
-        # Se non bastano, cerca per citta' specifiche
-        extra_cities = ["Milano", "Torino", "Bergamo", "Brescia", "Novara"]
-        for city in extra_cities:
-            if len([p for p in prospects if p.get("email")]) >= n:
+        cities = ["Milano", "Roma", "Torino", "Bergamo", "Brescia",
+                  "Bologna", "Firenze", "Napoli", "Verona", "Padova"]
+        for city in cities:
+            if len(prospects) >= n:
                 break
-            query_city = (
-                "Trova 15 ristoranti a " + city + " " + target +
-                " con email di contatto WhatsApp prenotazioni sito web 2025. "
-                "Per ogni ristorante: Nome | Citta | Email | Sito web | Telefono. "
-                "Formato: una riga, campi separati da |. Solo con email reale."
+            query = (
+                "Lista 10 ristoranti a " + city + " " + target +
+                " con indirizzo email di contatto reale. "
+                "Per OGNI ristorante scrivi esattamente: "
+                "NomeRistorante | " + city + " | email@esempio.it | www.sito.it | telefono "
+                "Una riga per ristorante, campi separati da |. "
+                "Solo ristoranti con email reale verificata dal loro sito web."
             )
             cities_tried.append(city)
-            prospects.extend(self._parse_prospect_results(search_perplexity(query_city)))
+            text = search_perplexity(query, max_tokens=2000)
+            if not text:
+                logger.warning("[CSO] Perplexity vuoto per %s", city)
+                continue
+            parsed = self._parse_prospect_results(text)
+            logger.info("[CSO] %s: %d righe parsate, testo=%d chars",
+                        city, len(parsed), len(text))
+            prospects.extend(parsed)
 
-        # Filtra: solo con email valida, dedup per email
-        seen_emails = set()
+        # Dedup per email
+        seen = set()
         valid = []
         for p in prospects:
-            email = p.get("email", "")
-            if "@" in email and email not in seen_emails:
-                seen_emails.add(email)
+            email = p.get("email", "").lower().strip()
+            if "@" in email and email not in seen:
+                seen.add(email)
                 valid.append(p)
 
-        logger.info("[CSO] find_real_prospects: %d trovati (%d con email), citta=%s",
+        logger.info("[CSO] find_real_prospects: %d parsati, %d con email, citta=%s",
                     len(prospects), len(valid), cities_tried)
         return valid[:n]
 
     def _parse_prospect_results(self, text):
-        """Parsa output Perplexity in lista prospect."""
+        """Parsa output Perplexity in lista prospect. Gestisce pipe, markdown, numeri."""
+        import re as _re
         results = []
         if not text:
             return results
         for line in text.split("\n"):
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) >= 3:
-                email = ""
-                website = ""
-                telefono = ""
-                for part in parts:
-                    if "@" in part:
-                        email = part[:200]
-                    elif part.startswith("http") or ".it" in part or ".com" in part:
-                        website = part[:200]
-                    elif any(c.isdigit() for c in part) and len(part) > 6 and not part[0].isalpha():
-                        telefono = part[:50]
-                results.append({
-                    "nome": parts[0][:100],
-                    "citta": parts[1][:50] if len(parts) > 1 else "",
-                    "email": email,
-                    "website": website,
-                    "telefono": telefono,
-                })
+            # Pulisci: rimuovi numerazione iniziale, asterischi, trattini
+            clean = _re.sub(r"^\s*[\d]+[\.\)]\s*", "", line)
+            clean = _re.sub(r"^\s*[-\*]\s*", "", clean)
+            clean = clean.replace("**", "").strip()
+            if not clean or len(clean) < 10:
+                continue
+
+            # Prova formato pipe
+            if "|" in clean:
+                parts = [p.strip() for p in clean.split("|")]
+                if len(parts) >= 2:
+                    entry = self._extract_fields(parts)
+                    if entry:
+                        results.append(entry)
+                    continue
+
+            # Prova formato con separatori vari (-, :, virgole)
+            # Cerca almeno una email nella riga
+            email_match = _re.search(r"[\w.+-]+@[\w.-]+\.\w{2,}", clean)
+            if email_match:
+                nome = clean[:email_match.start()].rstrip(" -:,").strip()
+                nome = _re.sub(r"\s*[,\-:]\s*$", "", nome).strip()
+                if nome:
+                    results.append({
+                        "nome": nome[:100],
+                        "citta": "",
+                        "email": email_match.group()[:200],
+                        "website": "",
+                        "telefono": "",
+                    })
         return results
+
+    def _extract_fields(self, parts):
+        """Estrai nome/citta/email/website/telefono da parti pipe-delimited."""
+        import re as _re
+        email = ""
+        website = ""
+        telefono = ""
+        nome = parts[0][:100].strip()
+        citta = parts[1][:50].strip() if len(parts) > 1 else ""
+
+        for part in parts:
+            part = part.strip()
+            email_m = _re.search(r"[\w.+-]+@[\w.-]+\.\w{2,}", part)
+            if email_m and not email:
+                email = email_m.group()[:200]
+            elif ("http" in part or ".it" in part or ".com" in part) and not website:
+                url_m = _re.search(r"https?://[\w./\-]+|www\.[\w./\-]+|[\w\-]+\.(it|com|net|org)", part)
+                if url_m:
+                    website = url_m.group()[:200]
+            elif _re.search(r"\+?\d[\d\s\-/]{7,}", part) and not telefono:
+                telefono = part[:50]
+
+        if not nome or nome.lower() in ("nome", "ristorante", "name"):
+            return None
+        return {
+            "nome": nome,
+            "citta": citta,
+            "email": email,
+            "website": website,
+            "telefono": telefono,
+        }
 
     # ============================================================
     # START SMOKE TEST

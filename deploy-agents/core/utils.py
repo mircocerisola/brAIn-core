@@ -134,7 +134,7 @@ def extract_json(text):
         return None
 
 
-def search_perplexity(query):
+def search_perplexity(query, max_tokens=600):
     try:
         response = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -145,15 +145,17 @@ def search_perplexity(query):
             json={
                 "model": "sonar",
                 "messages": [{"role": "user", "content": query}],
-                "max_tokens": 600,
+                "max_tokens": max_tokens,
             },
-            timeout=30,
+            timeout=60,
         )
         if response.status_code == 200:
             data = response.json()
             return data["choices"][0]["message"]["content"]
+        logger.warning("[PERPLEXITY] status=%d body=%s", response.status_code, response.text[:200])
         return None
-    except:
+    except Exception as e:
+        logger.warning("[PERPLEXITY] error: %s", e)
         return None
 
 
