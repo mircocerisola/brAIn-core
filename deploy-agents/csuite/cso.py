@@ -112,6 +112,67 @@ class CSO(BaseChief):
         )
         return base + "\n\n=== RESPONSABILITA' SMOKE TEST ===\n" + _SMOKE_TEST_INSTRUCTIONS
 
+
+    def _daily_report_emoji(self) -> str:
+        return "\U0001f30d"
+
+    def _get_daily_report_sections(self, since_24h: str) -> list:
+        """CSO: problemi scansionati, soluzioni generate, smoke test avviati — ultime 24h."""
+        sections = []
+
+        # 1. Nuovi problemi nelle ultime 24h
+        try:
+            r = supabase.table("problems").select("id,title,weighted_score,status") \
+                .gte("created_at", since_24h).order("weighted_score", desc=True).limit(5).execute()
+            if r.data:
+                pr_lines = "\n".join(
+                    f"  [{row.get('status','?')}] {(row.get('title') or '')[:50]} (score {row.get('weighted_score','?')})"
+                    for row in r.data
+                )
+                sections.append(f"\U0001f50d PROBLEMI SCANSIONATI ({len(r.data)})\n{pr_lines}")
+        except Exception as e:
+            logger.warning("[CSO] problems error: %s", e)
+
+        # 2. Soluzioni generate nelle ultime 24h
+        try:
+            r = supabase.table("solutions").select("id,title,status,bos_score") \
+                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+            if r.data:
+                sol_lines = "\n".join(
+                    f"  [{row.get('status','?')}] {(row.get('title') or '')[:50]}"
+                    for row in r.data
+                )
+                sections.append(f"\U0001f4a1 SOLUZIONI GENERATE ({len(r.data)})\n{sol_lines}")
+        except Exception as e:
+            logger.warning("[CSO] solutions error: %s", e)
+
+        # 3. Smoke test avviati nelle ultime 24h
+        try:
+            r = supabase.table("smoke_test_prospects").select("project_id,status") \
+                .gte("created_at", since_24h).execute()
+            if r.data:
+                by_proj = {}
+                for p in r.data:
+                    proj = p.get("project_id", "?")
+                    by_proj[proj] = by_proj.get(proj, 0) + 1
+                smoke_lines = "\n".join(f"  Progetto #{k}: {v} prospect" for k, v in by_proj.items())
+                sections.append(f"\U0001f52c SMOKE TEST ({len(r.data)} prospect)\n{smoke_lines}")
+        except Exception as e:
+            logger.warning("[CSO] smoke_test_prospects error: %s", e)
+
+        # 4. Anomalie pipeline (check_anomalies già filtra per settimana, qui usiamo 24h)
+        try:
+            r = supabase.table("problems").select("id").gte("created_at", since_24h).execute()
+            count_24h = len(r.data or [])
+            if count_24h < 3:
+                sections.append(
+                    f"\u26a0\ufe0f ANOMALIA PIPELINE\n  Solo {count_24h} problemi scansionati nelle ultime 24h (attesi \u22653)"
+                )
+        except Exception:
+            pass
+
+        return sections
+
     def check_anomalies(self):
         anomalies = []
         try:
