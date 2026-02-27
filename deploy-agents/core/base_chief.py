@@ -725,6 +725,111 @@ class BaseChief(BaseAgent):
             return {"ok": False, "chief": chief_id, "task_id": task_id,
                     "unauthorized_files": unauthorized_files, "unauthorized_tables": unauthorized_tables}
 
+
+    # ============================================================
+    # DAILY REPORT 08:00 — copre SOLO le ultime 24 ore
+    # ============================================================
+
+    # Nomi italiani giorno/mese
+    _GIORNI_IT = [
+        "Lunedì", "Martedì", "Mercoledì", "Giovedì",
+        "Venerdì", "Sabato", "Domenica"
+    ]
+    _MESI_IT = {
+        1: "gennaio", 2: "febbraio", 3: "marzo", 4: "aprile",
+        5: "maggio", 6: "giugno", 7: "luglio", 8: "agosto",
+        9: "settembre", 10: "ottobre", 11: "novembre", 12: "dicembre"
+    }
+
+    def _format_daily_header(self) -> str:
+        """Ritorna stringa 'Giovedì 27 febbraio 2026 — ore 08:00'."""
+        now = now_rome()
+        giorno = self._GIORNI_IT[now.weekday()]
+        mese = self._MESI_IT[now.month]
+        return f"{giorno} {now.day} {mese} {now.year} — ore {now.strftime('%H:%M')}"
+
+    def _daily_report_emoji(self) -> str:
+        """Override nelle sottoclassi per emoji personalizzata."""
+        return "📊"
+
+    def _get_daily_report_sections(self, since_24h: str) -> List[str]:
+        """
+        Override nelle sottoclassi per sezioni domain-specific.
+        Ritorna lista di stringhe (sezioni già formattate).
+        Omette sezioni vuote — ritorna [] se nessun dato nelle 24h.
+        """
+        return []
+
+    def generate_daily_report(self) -> Optional[str]:
+        """
+        Report giornaliero 08:00 — copre SOLO le ultime 24 ore.
+        Range: now_rome() - 24h → now_rome().
+        Tutte le query Supabase filtrano created_at >= since_24h.
+        Se nelle ultime 24h non c'è nulla, ritorna None senza inviare.
+        Si apre con 'Giovedì 27 febbraio 2026 — ore 08:00'.
+        Si chiude con totale speso 24h vs budget giornaliero.
+        """
+        now = now_rome()
+        since_24h = (now - timedelta(hours=24)).isoformat()
+        sep = "\u2500" * 15
+        budget_giornaliero_eur = 33.0  # €1000/mese ÷ 30
+
+        # Costi API ultime 24h (comuni a tutti i Chief)
+        cost_24h_eur = 0.0
+        try:
+            r = supabase.table("agent_logs").select("cost_usd") \
+                .gte("created_at", since_24h).execute()
+            total_usd = sum(float(row.get("cost_usd") or 0) for row in (r.data or []))
+            cost_24h_eur = round(total_usd * 0.92, 2)
+        except Exception as e:
+            logger.warning(f"[{self.name}] generate_daily_report costs error: {e}")
+
+        # Sezioni domain-specific (ultimi 24h)
+        sections = []
+        try:
+            sections = self._get_daily_report_sections(since_24h)
+        except Exception as e:
+            logger.warning(f"[{self.name}] generate_daily_report sections error: {e}")
+
+        # Se nessun dato nelle 24h → ometti il report
+        if not sections and cost_24h_eur == 0.0:
+            logger.info(f"[{self.name}] generate_daily_report: nessun dato nelle ultime 24h, skip")
+            return None
+
+        header = self._format_daily_header()
+        budget_pct = round(cost_24h_eur / budget_giornaliero_eur * 100) if budget_giornaliero_eur > 0 else 0
+
+        lines = [
+            f"{self._daily_report_emoji()} {self.name} \u2014 {header}",
+            sep,
+        ]
+        for section in sections:
+            lines.append(section)
+        lines.extend([
+            sep,
+            f"\U0001f4b6 TOTALE 24H: \u20ac{cost_24h_eur:.2f} / \u20ac{budget_giornaliero_eur:.0f} budget ({budget_pct}%)",
+        ])
+
+        text = "\n".join(lines)
+
+        # Salva in chief_decisions
+        try:
+            supabase.table("chief_decisions").insert({
+                "chief_domain": self.domain,
+                "decision_type": "daily_report",
+                "summary": text[:500],
+                "full_text": text,
+                "created_at": now.isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning(f"[{self.name}] generate_daily_report save error: {e}")
+
+        # Invia al topic del Chief
+        self._send_to_chief_topic(text)
+        logger.info(f"[{self.name}] generate_daily_report: inviato ({len(text)} chars)")
+        return text
+
+
     # ============================================================
     # BRIEFING, ANOMALY, CAPABILITY (invariati)
     # ============================================================
@@ -1081,3 +1186,4 @@ def send_system_health_check() -> Dict[str, Any]:
         logger.warning(f"[HEALTH_CHECK] Invio Telegram error: {e}")
 
     return {"status": "ok", "checks": checks}
+
