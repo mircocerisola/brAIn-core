@@ -536,6 +536,24 @@ async def run_csuite_morning_report_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_cso_relaunch_smoke_endpoint(request):
+    """POST /cso/relaunch-smoke — {project_id, project_name?} — rilancia smoke test."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        project_name = data.get("project_name", "RestaAI")
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite import get_chief
+        cso = get_chief("strategy")
+        if not cso:
+            return web.json_response({"error": "CSO non trovato"}, status=500)
+        result = cso.send_smoke_relaunch(project_id, project_name)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

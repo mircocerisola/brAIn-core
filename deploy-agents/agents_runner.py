@@ -47,6 +47,7 @@ from core.endpoints import (
     run_smoke_design_endpoint, run_restaurant_reposition_endpoint,
     run_smoke_daily_update_endpoint,
     run_flush_bos_endpoint,
+    run_cso_relaunch_smoke_endpoint,
 )
 
 
@@ -126,6 +127,7 @@ async def main():
     app.router.add_post("/csuite/anomalies", run_csuite_anomalies_endpoint)
     app.router.add_post("/csuite/report", run_csuite_report_endpoint)
     app.router.add_post("/csuite/morning-report", run_csuite_morning_report_endpoint)
+    app.router.add_post("/cso/relaunch-smoke", run_cso_relaunch_smoke_endpoint)
 
     # Ethics
     app.router.add_post("/ethics/check", run_ethics_check_endpoint)

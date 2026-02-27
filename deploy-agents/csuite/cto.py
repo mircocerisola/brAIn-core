@@ -1,7 +1,7 @@
 """CTO — Chief Technology Officer. Dominio: infrastruttura, codice, deploy, sicurezza tecnica.
-v5.13: CODEACTION card singola con [Approva][Dettaglio]. Zero duplicati.
-       Prompt mai nel messaggio principale — solo nella vista dettaglio.
-       Dedup: se code_task esiste gia' per stesso titolo, aggiorna senza re-inviare card.
+v5.14: trigger "Esegui con --dangerously-skip-permissions" -> CODEACTION card automatica.
+       Titolo = prime 8 parole dopo il flag. Zero prompt nel messaggio, solo card con bottoni.
+       Dedup: se code_task esiste per stesso titolo, aggiorna senza re-inviare card.
 """
 import json
 import re
@@ -16,14 +16,12 @@ from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 
-# Pattern per "manda questo prompt:", "esegui questo:", "incolla in code:", "lancia questo:"
-# NOTA: "prompt:" da solo e' troppo generico — rimosso per evitare falsi positivi
+# Pattern: qualsiasi messaggio che contiene "Esegui con --dangerously-skip-permissions"
+# Cattura tutto da quel punto in poi — e' il prompt completo per Claude Code
 _PROMPT_PATTERN = re.compile(
-    r'(?:manda questo prompt|esegui questo|incolla in code|lancia questo)\s*[:]\s*(.+)',
+    r'(Esegui con --dangerously-skip-permissions.+)',
     re.IGNORECASE | re.DOTALL,
 )
-
-_MIN_PROMPT_LENGTH = 200  # Caratteri minimi dopo i due punti per attivare il pattern
 
 
 class CTO(BaseChief):
@@ -59,7 +57,6 @@ class CTO(BaseChief):
             ctx["recent_capabilities"] = r.data or []
         except Exception as e:
             ctx["recent_capabilities"] = f"errore lettura DB: {e}"
-        # Code tasks recenti
         try:
             r = supabase.table("code_tasks").select(
                 "id,title,status,requested_by,created_at"
@@ -87,26 +84,21 @@ class CTO(BaseChief):
         return anomalies
 
     # ============================================================
-    # PATTERN DETECTION + CODEACTION CARD (v5.13)
+    # PATTERN DETECTION: "Esegui con --dangerously-skip-permissions"
+    # -> CODEACTION card automatica, mai prompt nel messaggio
     # ============================================================
 
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
                         project_scope_id=None, recent_messages=None):
-        """Override: intercetta pattern 'manda questo prompt:' PRIMA di qualsiasi logica.
-        Requisito: almeno 200 caratteri dopo i due punti. Se meno -> risponde prompt troppo corto.
-        Se OK -> salva in code_tasks + invia CODEACTION card con bottoni. Zero prompt nel messaggio.
+        """Override: intercetta 'Esegui con --dangerously-skip-permissions' PRIMA di qualsiasi logica.
+        Se trovato -> salva in code_tasks + invia CODEACTION card con bottoni. Mai prompt nel messaggio.
+        Mai chiedere conferme — card generata sempre e subito.
         """
         match = _PROMPT_PATTERN.search(question)
         if match:
             raw_prompt = match.group(1).strip()
-            if len(raw_prompt) < _MIN_PROMPT_LENGTH:
-                logger.info("[CTO] Pattern rilevato ma troppo corto (%d chars)", len(raw_prompt))
-                return (
-                    "Prompt troppo corto (" + str(len(raw_prompt)) + " caratteri). "
-                    "Mandami il contenuto completo del prompt (minimo 200 caratteri dopo i due punti)."
-                )
-            logger.info("[CTO] Pattern 'manda prompt' rilevato (%d chars)", len(raw_prompt))
+            logger.info("[CTO] Pattern 'dangerously-skip-permissions' rilevato (%d chars)", len(raw_prompt))
             return self._save_and_send_card(raw_prompt)
 
         # Nessun pattern -> risposta Chief normale
@@ -118,7 +110,7 @@ class CTO(BaseChief):
             recent_messages=recent_messages,
         )
 
-    # ---- SAVE + CARD ----
+    # ---- SAVE + CODEACTION CARD ----
 
     def _save_and_send_card(self, prompt_text: str) -> str:
         """Salva in code_tasks (con dedup) e invia CODEACTION card. Return marker per skip."""
@@ -128,7 +120,6 @@ class CTO(BaseChief):
         existing_id = self._find_existing_task(title_short)
 
         if existing_id:
-            # Aggiorna prompt nel task esistente, NON re-inviare card
             try:
                 supabase.table("code_tasks").update({
                     "prompt": prompt_text,
@@ -178,34 +169,37 @@ class CTO(BaseChief):
         """Cerca code_task esistente per dedup (stesso titolo, ultimo 1h, pending/ready)."""
         try:
             hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-            r = supabase.table("code_tasks").select("id") \
+            r = supabase.table("code_tasks").select("id,status") \
                 .eq("title", title_short) \
                 .gte("created_at", hour_ago) \
                 .limit(1).execute()
-            if r.data:
-                status_check = supabase.table("code_tasks").select("id,status") \
-                    .eq("id", r.data[0]["id"]).execute()
-                if status_check.data and status_check.data[0].get("status") in ("pending_approval", "ready"):
-                    return r.data[0]["id"]
+            if r.data and r.data[0].get("status") in ("pending_approval", "ready"):
+                return r.data[0]["id"]
         except Exception as e:
             logger.warning("[CTO] dedup check error: %s", e)
         return None
 
     def _extract_prompt_meta(self, prompt_text: str) -> Dict:
-        """Estrai titolo, file e stima dal prompt con regex (veloce, zero API call)."""
-        # Title: prima riga significativa (>10 chars, non "Esegui con --")
-        title = "Azione codice"
-        for line in prompt_text.strip().split('\n'):
-            clean = line.strip().rstrip('.').strip()
-            if clean and len(clean) > 10 and not clean.lower().startswith("esegui con"):
-                title = clean[:60]
-                break
+        """Estrai titolo (prime 8 parole dopo il flag), file e stima dal prompt."""
+        # Strip il prefisso "Esegui con --dangerously-skip-permissions."
+        after_flag = re.sub(
+            r'(?i)esegui con --dangerously-skip-permissions\.?\s*', '', prompt_text, count=1
+        )
+        # Strip eventuale "Non chiedere autorizzazione..."
+        after_flag = re.sub(
+            r'(?i)non chiedere autorizzazione[^.]*\.\s*', '', after_flag, count=1
+        )
+        # Titolo: prime 8 parole significative
+        words = after_flag.strip().split()[:8]
+        title = ' '.join(words).rstrip('.:,;').strip() if words else "Azione codice"
+        if len(title) > 60:
+            title = title[:57] + "..."
 
         # File: cerca path .py nel prompt
         file_matches = re.findall(r'[\w\-/]+\.py', prompt_text)
         main_file = file_matches[0] if file_matches else "da determinare"
 
-        # Time: stima basata su lunghezza prompt
+        # Stima basata su lunghezza prompt
         chars = len(prompt_text)
         if chars < 500:
             time_est = 2
@@ -296,8 +290,6 @@ class CTO(BaseChief):
         technical_prompt = self.build_technical_prompt(task_description, context)
 
         title_short = task_description[:100]
-
-        # Dedup
         existing_id = self._find_existing_task(title_short)
         task_id = existing_id
 

@@ -1,6 +1,22 @@
-"""CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunita'."""
+"""CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunita'.
+v5.14: responsabilita' diretta smoke test (step 4-7 pipeline). Mai delegare.
+"""
+import os
+import requests as _requests
+from typing import Dict, List, Optional
+
 from core.base_chief import BaseChief
-from core.config import supabase, logger
+from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
+
+_SMOKE_TEST_INSTRUCTIONS = (
+    "Sei responsabile diretto degli step 4-7 della pipeline: "
+    "smoke_test_designing, smoke_test_running, smoke_test_results_ready, "
+    "smoke_go/pivot/nogo. Quando ricevi una richiesta smoke test: "
+    "aggiorna pipeline_step in Supabase, usa Perplexity per trovare prospect reali, "
+    "chiama CMO via agent_to_agent_call per landing page, genera email template, "
+    "manda card compatta nel topic cantiere. Non dire mai 'non e' di mia competenza' "
+    "su questo tema. Non delegare mai lo smoke test ad altri Chief."
+)
 
 
 def select_smoke_test_method(solution):
@@ -80,6 +96,17 @@ class CSO(BaseChief):
             ctx["top_problems"] = []
         return ctx
 
+    def build_system_prompt(self, project_context=None,
+                            topic_scope_id=None, project_scope_id=None,
+                            recent_messages=None):
+        base = super().build_system_prompt(
+            project_context=project_context,
+            topic_scope_id=topic_scope_id,
+            project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )
+        return base + "\n\n=== RESPONSABILITA' SMOKE TEST ===\n" + _SMOKE_TEST_INSTRUCTIONS
+
     def check_anomalies(self):
         anomalies = []
         try:
@@ -96,3 +123,51 @@ class CSO(BaseChief):
         except Exception:
             pass
         return anomalies
+
+    # ============================================================
+    # RELAUNCH SMOKE TEST
+    # ============================================================
+
+    def send_smoke_relaunch(self, project_id: int, project_name: str = "RestaAI") -> Dict:
+        """Aggiorna pipeline_step a smoke_test_designing e manda messaggio in #strategy."""
+        # 1. Aggiorna pipeline_step
+        try:
+            supabase.table("projects").update({
+                "pipeline_step": "smoke_test_designing",
+                "pipeline_locked": False,
+            }).eq("id", project_id).execute()
+            logger.info("[CSO] Pipeline reset a smoke_test_designing per project #%d", project_id)
+        except Exception as e:
+            logger.warning("[CSO] pipeline update error: %s", e)
+            return {"error": str(e)}
+
+        # 2. Manda messaggio in #strategy
+        if not TELEGRAM_BOT_TOKEN:
+            return {"status": "ok", "message_sent": False}
+        try:
+            topic_r = supabase.table("org_config").select("value").eq("key", "chief_topic_cso").execute()
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not topic_r.data or not group_r.data:
+                return {"status": "ok", "message_sent": False}
+            topic_id = int(topic_r.data[0]["value"])
+            group_id = int(group_r.data[0]["value"])
+
+            sep = "\u2500" * 15
+            text = (
+                "\U0001f680 RILANCIO SMOKE TEST\n"
+                + sep + "\n"
+                + "Progetto: " + project_name + "\n"
+                + "Pipeline: smoke_test_designing\n"
+                + "Azione: avvio processo completo di validazione mercato\n"
+                + sep
+            )
+            _requests.post(
+                "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+                timeout=10,
+            )
+            logger.info("[CSO] Messaggio relaunch smoke inviato in #strategy")
+            return {"status": "ok", "message_sent": True}
+        except Exception as e:
+            logger.warning("[CSO] send_smoke_relaunch message error: %s", e)
+            return {"status": "ok", "message_sent": False}
