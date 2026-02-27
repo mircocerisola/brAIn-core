@@ -63,6 +63,75 @@ class COO(BaseChief):
             ctx["recent_logs"] = f"errore lettura DB: {e}"
         return ctx
 
+
+    def _daily_report_emoji(self) -> str:
+        return "\u2699\ufe0f"
+
+    def _get_daily_report_sections(self, since_24h: str) -> list:
+        """COO: azioni queue, log agenti, task completati — ultime 24h."""
+        sections = []
+
+        # 1. Azioni queue create nelle ultime 24h
+        try:
+            r = supabase.table("action_queue").select("id,action_type,title,status") \
+                .gte("created_at", since_24h).order("created_at", desc=True).execute()
+            if r.data:
+                by_status = {}
+                for a in r.data:
+                    s = a.get("status", "?")
+                    by_status[s] = by_status.get(s, 0) + 1
+                status_lines = "\n".join(f"  {s}: {cnt}" for s, cnt in by_status.items())
+                sections.append(f"\U0001f4cb ACTION QUEUE ({len(r.data)} azioni)\n{status_lines}")
+        except Exception as e:
+            logger.warning("[COO] action_queue error: %s", e)
+
+        # 2. Log agenti nelle ultime 24h
+        try:
+            r = supabase.table("agent_logs").select("agent_id,action,status,cost_usd") \
+                .gte("created_at", since_24h).execute()
+            if r.data:
+                by_agent = {}
+                errors = 0
+                for log in r.data:
+                    a = log.get("agent_id", "?")
+                    by_agent[a] = by_agent.get(a, 0) + 1
+                    if log.get("status") == "error":
+                        errors += 1
+                top5 = sorted(by_agent.items(), key=lambda x: x[1], reverse=True)[:5]
+                agent_lines = "\n".join(f"  {a}: {n} azioni" for a, n in top5)
+                err_note = f" | {errors} errori" if errors > 0 else ""
+                sections.append(f"\U0001f4dd LOG AGENTI ({len(r.data)} totale{err_note})\n{agent_lines}")
+        except Exception as e:
+            logger.warning("[COO] agent_logs error: %s", e)
+
+        # 3. Progetti aggiornati nelle ultime 24h
+        try:
+            r = supabase.table("projects").select("id,name,pipeline_step,status") \
+                .gte("updated_at", since_24h).neq("status", "archived").execute()
+            if r.data:
+                proj_lines = "\n".join(
+                    f"  {row.get('name','?')[:40]} → {row.get('pipeline_step') or row.get('status','?')}"
+                    for row in r.data[:5]
+                )
+                sections.append(f"\U0001f3d7 CANTIERI AGGIORNATI ({len(r.data)})\n{proj_lines}")
+        except Exception as e:
+            logger.warning("[COO] projects error: %s", e)
+
+        # 4. KPI registrati nelle ultime 24h
+        try:
+            r = supabase.table("kpi_daily").select("project_id,metric_name,value") \
+                .gte("recorded_at", since_24h).limit(10).execute()
+            if r.data:
+                kpi_lines = "\n".join(
+                    f"  #{row.get('project_id','?')} {row.get('metric_name','?')}: {row.get('value','?')}"
+                    for row in r.data[:5]
+                )
+                sections.append(f"\U0001f4ca KPI REGISTRATI ({len(r.data)})\n{kpi_lines}")
+        except Exception as e:
+            logger.warning("[COO] kpi_daily error: %s", e)
+
+        return sections
+
     def check_anomalies(self):
         anomalies = []
         # Azioni stale
