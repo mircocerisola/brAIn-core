@@ -1,15 +1,14 @@
 """
-brAIn Runner — CLI per monitorare task C-Suite e pipeline.
-Legge da Supabase e stampa log in formato strutturato.
-
-Formato riga: [TIMESTAMP] [TASK_ID] [CHIEF_ID] [TITLE] [STATUS] [DURATION_SEC]
+brAIn Runner — CLI locale per eseguire code_tasks approvati.
+Polling: controlla code_tasks ogni 30s, esegue quelli approvati via Claude Code subprocess.
 
 Usage:
-    python brain_runner.py [--limit N] [--chief cso|cfo|...] [--status pending|completed|blocked]
-    python brain_runner.py --watch   # refresh ogni 10s
+    python brain_runner.py                # esegue un task approvato
+    python brain_runner.py --watch        # polling continuo
+    python brain_runner.py --list         # mostra task recenti
 """
 from __future__ import annotations
-import os, sys, time, argparse
+import os, sys, time, argparse, subprocess, threading, json
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
@@ -23,14 +22,105 @@ except Exception as e:
     sys.exit(1)
 
 
-def format_row(row: dict) -> str:
-    """Formatta una riga da code_tasks in formato log standard."""
+# ============================================================
+# EXECUTOR PURO — subprocess.Popen per Claude Code
+# ============================================================
+
+_processes = {}
+_lock = threading.Lock()
+
+
+def run(prompt):
+    """Lancia Claude Code come subprocess. Ritorna {pid, status}."""
+    cmd = ["claude", "--dangerously-skip-permissions", "-p", prompt]
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=os.getenv("BRAIN_REPO_PATH", os.getcwd()),
+        )
+    except FileNotFoundError:
+        return {"pid": None, "status": "error", "error": "claude CLI non trovato nel PATH"}
+    except Exception as e:
+        return {"pid": None, "status": "error", "error": str(e)}
+
+    entry = {
+        "proc": proc,
+        "stdout_lines": [],
+        "stderr_lines": [],
+        "returncode": None,
+    }
+
+    def _read_stream(stream, target_list):
+        try:
+            for line in stream:
+                with _lock:
+                    target_list.append(line.rstrip("\n"))
+        except Exception:
+            pass
+
+    threading.Thread(target=_read_stream, args=(proc.stdout, entry["stdout_lines"]), daemon=True).start()
+    threading.Thread(target=_read_stream, args=(proc.stderr, entry["stderr_lines"]), daemon=True).start()
+
+    with _lock:
+        _processes[proc.pid] = entry
+
+    print(f"[RUNNER] Processo avviato PID={proc.pid}")
+    return {"pid": proc.pid, "status": "running"}
+
+
+def get_output(pid):
+    """Ritorna output corrente del processo."""
+    with _lock:
+        entry = _processes.get(pid)
+        if not entry:
+            return {"error": "PID non trovato", "pid": pid}
+        rc = entry["proc"].poll()
+        entry["returncode"] = rc
+        return {
+            "pid": pid,
+            "running": rc is None,
+            "returncode": rc,
+            "stdout": list(entry["stdout_lines"]),
+            "stderr": list(entry["stderr_lines"]),
+        }
+
+
+def interrupt(pid):
+    """Manda SIGTERM al processo."""
+    with _lock:
+        entry = _processes.get(pid)
+        if not entry:
+            return {"error": "PID non trovato", "pid": pid}
+    try:
+        entry["proc"].terminate()
+        print(f"[RUNNER] SIGTERM inviato a PID={pid}")
+        return {"pid": pid, "status": "terminated"}
+    except Exception as e:
+        return {"pid": pid, "error": str(e)}
+
+
+def is_running(pid):
+    """Controlla se il processo e' ancora attivo."""
+    with _lock:
+        entry = _processes.get(pid)
+        if not entry:
+            return False
+        return entry["proc"].poll() is None
+
+
+# ============================================================
+# CLI — polling code_tasks + esecuzione locale
+# ============================================================
+
+def format_row(row):
     ts = row.get("created_at", "")[:19].replace("T", " ")
     task_id = str(row.get("id", "?")).rjust(5)
     chief = (row.get("requested_by") or "?").upper().ljust(5)
     title = (row.get("title") or "").replace("\n", " ")[:50].ljust(50)
     status = (row.get("status") or "?").ljust(16)
-    # duration non sempre disponibile — usa updated_at - created_at se possibile
     dur = "-"
     try:
         created = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00"))
@@ -39,90 +129,131 @@ def format_row(row: dict) -> str:
         dur = f"{secs}s"
     except Exception:
         pass
-    sandboxed = " [SANDBOX_FAIL]" if row.get("sandbox_passed") is False else ""
-    return f"[{ts}] [{task_id}] [{chief}] {title} [{status}] [{dur}]{sandboxed}"
+    return f"[{ts}] [{task_id}] [{chief}] {title} [{status}] [{dur}]"
 
 
-def format_decision_row(row: dict) -> str:
-    """Formatta una riga da chief_decisions."""
-    ts = row.get("created_at", "")[:19].replace("T", " ")
-    chief = (row.get("chief_domain") or "?").upper().ljust(8)
-    dtype = (row.get("decision_type") or "?").ljust(20)
-    summary = (row.get("summary") or "").replace("\n", " ")[:60]
-    return f"[{ts}] [{chief}] [{dtype}] {summary}"
-
-
-def run_once(args) -> None:
-    limit = args.limit
-
-    # code_tasks
-    print("\n" + "━" * 90)
+def list_tasks(limit=20):
+    print("\n" + "\u2501" * 90)
     print(f"  CODE TASKS  [{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC]")
-    print("━" * 90)
+    print("\u2501" * 90)
     try:
-        q = supabase.table("code_tasks").select("*").order("created_at", desc=True).limit(limit)
-        if args.chief:
-            q = q.eq("requested_by", args.chief.lower())
-        if args.status:
-            q = q.eq("status", args.status)
-        rows = q.execute().data or []
-        if rows:
-            for row in rows:
-                print(format_row(row))
-        else:
+        rows = supabase.table("code_tasks").select("*").order("created_at", desc=True).limit(limit).execute().data or []
+        for row in rows:
+            print(format_row(row))
+        if not rows:
             print("  (nessun task trovato)")
     except Exception as e:
-        print(f"  [ERROR] code_tasks: {e}")
+        print(f"  [ERROR] {e}")
+    print("\u2501" * 90)
 
-    # chief_decisions (ultime N)
-    print("\n" + "━" * 90)
-    print("  CHIEF DECISIONS (ultime)")
-    print("━" * 90)
+
+def execute_one():
+    """Cerca un task approvato e lo esegue."""
     try:
-        q2 = supabase.table("chief_decisions").select("*").order("created_at", desc=True).limit(limit)
-        if args.chief:
-            q2 = q2.eq("chief_domain", args.chief.lower())
-        rows2 = q2.execute().data or []
-        if rows2:
-            for row in rows2:
-                print(format_decision_row(row))
-        else:
-            print("  (nessuna decisione trovata)")
+        rows = supabase.table("code_tasks").select("id,prompt,title") \
+            .eq("status", "approved").order("created_at", desc=False).limit(1).execute().data or []
     except Exception as e:
-        print(f"  [ERROR] chief_decisions: {e}")
+        print(f"[ERROR] query: {e}")
+        return False
 
-    # projects pipeline_locked
-    print("\n" + "━" * 90)
-    print("  PROJECTS — pipeline attive")
-    print("━" * 90)
+    if not rows:
+        return False
+
+    task = rows[0]
+    task_id = task["id"]
+    prompt = task.get("prompt", "")
+    title = (task.get("title") or "")[:60]
+    print(f"\n[EXEC] Task #{task_id}: {title}")
+
+    # Aggiorna status a running
     try:
-        locked = supabase.table("projects").select("id,name,status,pipeline_locked").eq("pipeline_locked", True).execute().data or []
-        if locked:
-            for p in locked:
-                print(f"  project_id={p['id']} name={p.get('name','?')[:30]} status={p.get('status','?')} LOCKED=True")
-        else:
-            print("  (nessun progetto con pipeline attiva)")
-    except Exception as e:
-        print(f"  [ERROR] projects: {e}")
+        supabase.table("code_tasks").update({
+            "status": "running",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", task_id).execute()
+    except Exception:
+        pass
 
-    print("━" * 90)
+    # Esegui
+    result = run(prompt)
+    if result.get("status") == "error":
+        print(f"[ERROR] {result.get('error')}")
+        try:
+            supabase.table("code_tasks").update({
+                "status": "error", "output": result.get("error"),
+            }).eq("id", task_id).execute()
+        except Exception:
+            pass
+        return True
+
+    pid = result["pid"]
+    try:
+        supabase.table("code_tasks").update({"pid": pid}).eq("id", task_id).execute()
+    except Exception:
+        pass
+
+    # Attendi completamento
+    print(f"[WAIT] PID={pid} in esecuzione...")
+    while is_running(pid):
+        time.sleep(10)
+        out = get_output(pid)
+        stdout_count = len(out.get("stdout", []))
+        stderr_count = len(out.get("stderr", []))
+        print(f"  ... stdout={stdout_count} lines, stderr={stderr_count} lines")
+
+    # Completato
+    out = get_output(pid)
+    rc = out.get("returncode", -1)
+    stdout_lines = out.get("stdout", [])
+    stderr_lines = out.get("stderr", [])
+
+    if rc == 0:
+        print(f"[DONE] Task #{task_id} completato (exit 0)")
+        status = "done"
+    else:
+        print(f"[FAIL] Task #{task_id} fallito (exit {rc})")
+        status = "error"
+
+    # Ultime righe output
+    for line in stdout_lines[-10:]:
+        print(f"  > {line}")
+    if stderr_lines:
+        print("  [STDERR]:")
+        for line in stderr_lines[-5:]:
+            print(f"  ! {line}")
+
+    try:
+        supabase.table("code_tasks").update({
+            "status": status,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "output": "\n".join(stdout_lines[-50:]),
+        }).eq("id", task_id).execute()
+    except Exception:
+        pass
+
+    return True
 
 
 def main():
-    parser = argparse.ArgumentParser(description="brAIn Runner — monitor C-Suite tasks")
-    parser.add_argument("--limit", type=int, default=20, help="Numero di righe da mostrare")
-    parser.add_argument("--chief", type=str, default="", help="Filtra per chief (cso, cfo, cmo, cto, ...)")
-    parser.add_argument("--status", type=str, default="", help="Filtra per status (pending_approval, completed, blocked)")
-    parser.add_argument("--watch", action="store_true", help="Refresh ogni 10 secondi")
+    parser = argparse.ArgumentParser(description="brAIn Runner — executor locale Claude Code")
+    parser.add_argument("--list", action="store_true", help="Mostra task recenti")
+    parser.add_argument("--watch", action="store_true", help="Polling continuo (30s)")
+    parser.add_argument("--limit", type=int, default=20, help="Numero task da mostrare")
     args = parser.parse_args()
+
+    if args.list:
+        list_tasks(args.limit)
+        return
 
     if args.watch:
         print("brAIn Runner — watch mode (Ctrl+C per uscire)")
         while True:
-            run_once(args)
-            time.sleep(10)
+            if not execute_one():
+                time.sleep(30)
     else:
-        run_once(args)
+        if not execute_one():
+            print("Nessun task approvato da eseguire.")
+            list_tasks(5)
 
 
 if __name__ == "__main__":

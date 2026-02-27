@@ -4070,7 +4070,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    # ---- CODE ACTION APPROVAL callbacks (FIX 3 v5.11) ----
+    # ---- CODE ACTION APPROVAL callbacks (v5.17: CTO gestisce tutto) ----
     elif data.startswith("code_approve:"):
         _ca_task_id = int(data.split(":")[1])
         await query.answer("Approvato!")
@@ -4081,132 +4081,28 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             }).eq("id", _ca_task_id).execute()
         except Exception as e:
             logger.error(f"[CODE_APPROVE] {e}")
-        _token_ca = os.getenv("TELEGRAM_BOT_TOKEN")
-        if _token_ca:
-            _payload_ca = {
-                "chat_id": chat_id,
-                "text": f"\u2705 Azione codice #{_ca_task_id} approvata. brain_runner.py la eseguira' entro 30s.",
-            }
-            if thread_id:
-                _payload_ca["message_thread_id"] = thread_id
-            http_requests.post(
-                f"https://api.telegram.org/bot{_token_ca}/sendMessage",
-                json=_payload_ca, timeout=10,
-            )
-        # v5.14: avvia monitor progressi in background (ogni 5 min)
-        _mon_tid = _ca_task_id
-        _mon_chat = chat_id
-        _mon_thread = thread_id
-        def _code_progress_monitor():
-            import time as _time
-            _tok = os.getenv("TELEGRAM_BOT_TOKEN")
-            if not _tok:
-                return
-            # Recupera titolo task
-            _titolo = "Azione codice"
-            try:
-                _tr = supabase.table("code_tasks").select("title").eq("id", _mon_tid).execute()
-                if _tr.data:
-                    _titolo = (_tr.data[0].get("title") or "Azione codice")[:60]
-            except Exception:
-                pass
-            _start_ts = _now_rome()
-            _ora_avvio = _start_ts.strftime("%H:%M")
-            _elapsed = 0
-            _max_checks = 3  # max 15 min di monitoraggio
-            _completed = False
-            for _i in range(_max_checks):
-                _time.sleep(300)  # 5 minuti
-                _elapsed += 5
-                # Controlla stato
-                try:
-                    _sr = supabase.table("code_tasks").select("status,output").eq("id", _mon_tid).execute()
-                    if not _sr.data:
-                        break
-                    _st = _sr.data[0].get("status", "")
-                    _out = _sr.data[0].get("output", "")
-                    if _st == "done":
-                        _dur = _elapsed
-                        _out_section = ""
-                        if _out:
-                            _out_section = "\U0001f4ac Output:\n" + str(_out)[:500] + "\n"
-                        _done_text = (
-                            "\u2705 Prompt completato\n"
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                            "\U0001f4cb Task: " + _titolo + "\n"
-                            "\u23f1\ufe0f Durata: " + str(_dur) + " min\n"
-                            + _out_section +
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-                        )
-                        _p = {"chat_id": _mon_chat, "text": _done_text}
-                        if _mon_thread:
-                            _p["message_thread_id"] = _mon_thread
-                        http_requests.post(
-                            f"https://api.telegram.org/bot{_tok}/sendMessage",
-                            json=_p, timeout=10,
-                        )
-                        _completed = True
-                        break
-                    elif _st == "error":
-                        _err_text = (
-                            "\u274c Prompt fallito\n"
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                            "\U0001f4cb Task: " + _titolo + "\n"
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
-                            "\u26a0\ufe0f Errore: " + str(_out or "sconosciuto")[:300] + "\n"
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-                        )
-                        _p = {"chat_id": _mon_chat, "text": _err_text}
-                        if _mon_thread:
-                            _p["message_thread_id"] = _mon_thread
-                        http_requests.post(
-                            f"https://api.telegram.org/bot{_tok}/sendMessage",
-                            json=_p, timeout=10,
-                        )
-                        _completed = True
-                        break
-                    else:
-                        # Ancora in esecuzione — aggiornamento
-                        _prog_text = (
-                            "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                            "\U0001f504 Prompt ancora in esecuzione\n"
-                            "\U0001f4cb Task: " + _titolo + "\n"
-                            "\U0001f550 Avviato alle " + _ora_avvio + "\n"
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-                        )
-                        _p = {"chat_id": _mon_chat, "text": _prog_text}
-                        if _mon_thread:
-                            _p["message_thread_id"] = _mon_thread
-                        http_requests.post(
-                            f"https://api.telegram.org/bot{_tok}/sendMessage",
-                            json=_p, timeout=10,
-                        )
-                except Exception as _me:
-                    logger.warning(f"[CODE_MONITOR] {_me}")
-                    break
-            # Timeout raggiunto senza completamento
-            if not _completed:
-                _timeout_text = (
-                    "\u26a0\ufe0f Timeout \u2014 15 min superati\n"
-                    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                    "\U0001f4cb Task: " + _titolo + "\n"
-                    "\U0001f550 Avviato alle " + _ora_avvio + "\n"
-                    "Il prompt e' ancora in esecuzione su Claude Code.\n"
-                    "Controlla il PC per vedere lo stato manuale.\n"
-                    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-                )
-                _p = {"chat_id": _mon_chat, "text": _timeout_text}
-                if _mon_thread:
-                    _p["message_thread_id"] = _mon_thread
-                try:
-                    http_requests.post(
-                        f"https://api.telegram.org/bot{_tok}/sendMessage",
-                        json=_p, timeout=10,
-                    )
-                except Exception:
-                    pass
-        threading.Thread(target=_code_progress_monitor, daemon=True).start()
+        # v5.17: CTO gestisce esecuzione + monitor + output reale
+        if _CSUITE_DIRECT:
+            _cto = _csuite_get_chief("tech")
+            if _cto:
+                threading.Thread(
+                    target=_cto.execute_approved_task,
+                    args=(_ca_task_id, chat_id, thread_id),
+                    daemon=True,
+                ).start()
+
+    elif data.startswith("code_interrupt:"):
+        _ci_task_id = int(data.split(":")[1])
+        await query.answer("Interruzione in corso...")
+        # v5.17: CTO interrompe via brain_runner
+        if _CSUITE_DIRECT:
+            _cto = _csuite_get_chief("tech")
+            if _cto:
+                threading.Thread(
+                    target=_cto.interrupt_task,
+                    args=(_ci_task_id, chat_id, thread_id),
+                    daemon=True,
+                ).start()
 
     elif data.startswith("code_detail:"):
         _cd_task_id = int(data.split(":")[1])
