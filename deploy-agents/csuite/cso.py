@@ -103,12 +103,13 @@ class CSO(BaseChief):
 
     def build_system_prompt(self, project_context=None,
                             topic_scope_id=None, project_scope_id=None,
-                            recent_messages=None):
+                            recent_messages=None, query=None):
         base = super().build_system_prompt(
             project_context=project_context,
             topic_scope_id=topic_scope_id,
             project_scope_id=project_scope_id,
             recent_messages=recent_messages,
+            query=query,
         )
         return base + "\n\n=== RESPONSABILITA' SMOKE TEST ===\n" + _SMOKE_TEST_INSTRUCTIONS
 

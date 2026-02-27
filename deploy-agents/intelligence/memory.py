@@ -1,8 +1,10 @@
 """
-brAIn Memory v1.0 — Tre livelli di memoria per i Chief Agent.
+brAIn Memory v2.0 — Tre livelli di memoria per i Chief Agent.
 L1 Working: topic_conversation_history (scritto da command-center)
 L2 Episodic: episodic_memory (riassunti sessioni via Haiku)
 L3 Semantic: chief_knowledge + org_shared_knowledge (fatti estratti via Haiku)
+
+v2.0: search_relevant_memories (Haiku re-ranking), save_task_learning, embedding-ready.
 """
 from __future__ import annotations
 import json
@@ -229,6 +231,145 @@ def extract_semantic_facts(message: str, chief_id: str) -> Dict[str, Any]:
     if saved > 0:
         logger.info(f"[MEMORY] Extracted {saved} semantic facts chief={chief_id}")
     return {"facts_saved": saved}
+
+
+# ============================================================
+# RELEVANCE SEARCH — Haiku re-ranking
+# ============================================================
+
+def search_relevant_memories(chief_id: str, query: str, limit: int = 5) -> List[str]:
+    """
+    Cerca le memorie piu' rilevanti per la query corrente.
+    1. Carica ultime 30 chief_knowledge per il Chief
+    2. Carica ultimi 10 episodi topic/project per il Chief
+    3. Haiku seleziona le piu' rilevanti in UNA sola chiamata
+    Ritorna lista di stringhe (memorie selezionate), max `limit`.
+    """
+    candidates = []
+
+    # Chief knowledge (individuale)
+    try:
+        r = supabase.table("chief_knowledge") \
+            .select("id,title,content,knowledge_type") \
+            .eq("chief_id", chief_id) \
+            .neq("knowledge_type", "profile") \
+            .order("importance", desc=True).limit(30).execute()
+        for row in (r.data or []):
+            candidates.append({
+                "id": "ck_" + str(row["id"]),
+                "text": row["title"] + ": " + (row["content"] or "")[:200],
+                "source": "knowledge",
+            })
+    except Exception as e:
+        logger.debug("[MEMORY] search_relevant ck error: %s", e)
+
+    # Episodic memory (topic del Chief)
+    try:
+        r = supabase.table("episodic_memory") \
+            .select("id,summary,scope_type,scope_id") \
+            .order("created_at", desc=True).limit(15).execute()
+        for row in (r.data or []):
+            candidates.append({
+                "id": "ep_" + str(row["id"]),
+                "text": (row["summary"] or "")[:200],
+                "source": "episode",
+            })
+    except Exception as e:
+        logger.debug("[MEMORY] search_relevant ep error: %s", e)
+
+    if not candidates:
+        return []
+
+    # Se poche candidate, ritorna tutte senza Haiku
+    if len(candidates) <= limit:
+        return [c["text"] for c in candidates]
+
+    # Haiku re-ranking: UNA sola chiamata
+    numbered = "\n".join(
+        str(i) + ". " + c["text"][:150]
+        for i, c in enumerate(candidates)
+    )
+    ranking_prompt = (
+        "Data questa domanda del CEO:\n"
+        "\"" + query[:300] + "\"\n\n"
+        "Seleziona i " + str(limit) + " piu' rilevanti tra queste memorie "
+        "(rispondi SOLO con i numeri separati da virgola, es: 2,5,0,8,3):\n\n"
+        + numbered
+    )
+    try:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=50,
+            messages=[{"role": "user", "content": ranking_prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        # Estrai numeri dalla risposta
+        indices = []
+        for part in re.findall(r'\d+', raw):
+            idx = int(part)
+            if 0 <= idx < len(candidates):
+                indices.append(idx)
+        if not indices:
+            # Fallback: primi N per importanza
+            return [c["text"] for c in candidates[:limit]]
+        # Deduplica preservando ordine
+        seen = set()
+        unique = []
+        for i in indices:
+            if i not in seen:
+                seen.add(i)
+                unique.append(i)
+        return [candidates[i]["text"] for i in unique[:limit]]
+    except Exception as e:
+        logger.debug("[MEMORY] search_relevant Haiku ranking error: %s", e)
+        return [c["text"] for c in candidates[:limit]]
+
+
+def save_task_learning(chief_id: str, task_summary: str, learning: str,
+                       importance: int = 3) -> Dict[str, Any]:
+    """
+    Salva una lezione appresa dopo il completamento di un task.
+    Il Chief chiama questa funzione dopo ogni task significativo.
+    Dedup: se esiste gia' un fatto con titolo simile, aggiorna.
+    """
+    if not learning or len(learning.strip()) < 10:
+        return {"status": "skipped"}
+
+    title = task_summary[:200] if task_summary else "Lezione appresa"
+
+    try:
+        # Dedup per titolo simile
+        dup = supabase.table("chief_knowledge") \
+            .select("id") \
+            .eq("chief_id", chief_id) \
+            .eq("knowledge_type", "learning") \
+            .ilike("title", "%" + title[:50] + "%") \
+            .limit(1).execute()
+
+        if dup.data:
+            supabase.table("chief_knowledge").update({
+                "content": learning[:500],
+                "importance": importance,
+                "updated_at": now_rome().isoformat(),
+            }).eq("id", dup.data[0]["id"]).execute()
+            logger.info("[MEMORY] Updated learning chief=%s title=%s", chief_id, title[:40])
+            return {"status": "updated", "id": dup.data[0]["id"]}
+        else:
+            result = supabase.table("chief_knowledge").insert({
+                "chief_id": chief_id,
+                "knowledge_type": "learning",
+                "title": title,
+                "content": learning[:500],
+                "importance": importance,
+                "source": "extracted",
+                "created_at": now_rome().isoformat(),
+            }).execute()
+            new_id = result.data[0]["id"] if result.data else None
+            logger.info("[MEMORY] Saved new learning chief=%s id=%s", chief_id, new_id)
+            return {"status": "created", "id": new_id}
+    except Exception as e:
+        logger.warning("[MEMORY] save_task_learning error: %s", e)
+        return {"status": "error", "error": str(e)}
 
 
 # ============================================================

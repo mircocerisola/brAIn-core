@@ -5,6 +5,7 @@ anomaly detection, receive_capability_update, sandbox sicurezza, routing automat
 """
 from __future__ import annotations
 import json
+import time as _time
 import requests as _requests
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -135,6 +136,10 @@ class BaseChief(BaseAgent):
     _ALWAYS_SONNET = {"cso", "cmo", "cpeo", "cto"}
     _ADAPTIVE_MODEL = {"cfo", "clo", "coo"}
 
+    # System prompt cache — TTL 5 minuti, evita 6+ query DB per messaggio
+    _base_prompt_cache: Dict[str, Tuple[str, float]] = {}  # chief_id -> (prompt, timestamp)
+    _BASE_PROMPT_TTL = 300  # secondi
+
     def _select_model(self, question: str) -> str:
         """FIX 5: Seleziona modello ottimale.
         CSO/CMO/CPeO/CTO → sempre Sonnet (dominio creativo/strategico).
@@ -213,22 +218,16 @@ class BaseChief(BaseAgent):
             context["memory"] = f"errore lettura DB: {e}"
         return context
 
-    def build_system_prompt(self, project_context: Optional[str] = None,
-                            topic_scope_id: Optional[str] = None,
-                            project_scope_id: Optional[str] = None,
-                            recent_messages: Optional[List[Dict]] = None) -> str:
+    def _build_base_prompt(self) -> str:
+        """Costruisce la parte STATICA del system prompt (profilo + org + chief knowledge).
+        Cachata per _BASE_PROMPT_TTL secondi per ridurre query DB da ~6 a ~0 per messaggio.
         """
-        Assembla il system prompt dinamico per il Chief:
-        1. Profilo Chief (da chief_knowledge knowledge_type='profile')
-        2. Top 10 org_shared_knowledge (importanza DESC)
-        3. Top 20 chief_knowledge specialistica (escluso 'profile')
-        4. Episodic memory topic (sessioni precedenti)
-        5. Episodic memory progetto (storia cantiere)
-        6. Messaggi recenti verbatim (L1)
-        7. Contesto progetto (se presente)
-        8. Regola fondamentale
-        """
-        sep = "\u2501" * 20
+        cached = BaseChief._base_prompt_cache.get(self.chief_id)
+        if cached:
+            prompt_text, ts = cached
+            if _time.time() - ts < self._BASE_PROMPT_TTL:
+                return prompt_text
+
         parts: List[str] = []
 
         # 1. Profilo Chief
@@ -242,13 +241,14 @@ class BaseChief(BaseAgent):
             if r.data:
                 profile_text = r.data[0]["content"]
         except Exception as e:
-            logger.warning(f"[{self.name}] build_system_prompt profile: {e}")
+            logger.warning("[%s] build base prompt profile: %s", self.name, e)
 
         if profile_text:
-            parts.append(f"=== PROFILO E RUOLO ===\n{profile_text}")
+            parts.append("=== PROFILO E RUOLO ===\n" + profile_text)
         else:
             parts.append(
-                f"Sei il {self.name} di brAIn, responsabile del dominio '{self.domain}'."
+                "Sei il " + self.name + " di brAIn, responsabile del dominio '"
+                + self.domain + "'."
             )
 
         # 2. Conoscenza condivisa brAIn (top 10 per importanza)
@@ -259,10 +259,13 @@ class BaseChief(BaseAgent):
             if r.data:
                 osk_lines = []
                 for row in r.data:
-                    osk_lines.append(f"[{row['category'].upper()}] {row['title']}: {row['content'][:300]}")
+                    osk_lines.append(
+                        "[" + row["category"].upper() + "] "
+                        + row["title"] + ": " + (row["content"] or "")[:300]
+                    )
                 parts.append("=== CONOSCENZA brAIn ===\n" + "\n\n".join(osk_lines))
         except Exception as e:
-            logger.warning(f"[{self.name}] build_system_prompt org_knowledge: {e}")
+            logger.warning("[%s] build base prompt org_knowledge: %s", self.name, e)
 
         # 3. Conoscenza specialistica Chief (top 20, escluso profile)
         try:
@@ -274,44 +277,23 @@ class BaseChief(BaseAgent):
             if r.data:
                 ck_lines = []
                 for row in r.data:
-                    ck_lines.append(f"[{row['knowledge_type'].upper()}] {row['title']}: {row['content'][:400]}")
-                parts.append(f"=== CONOSCENZA SPECIALISTICA {self.name} ===\n" + "\n\n".join(ck_lines))
+                    ck_lines.append(
+                        "[" + row["knowledge_type"].upper() + "] "
+                        + row["title"] + ": " + (row["content"] or "")[:400]
+                    )
+                parts.append(
+                    "=== CONOSCENZA SPECIALISTICA " + self.name + " ===\n"
+                    + "\n\n".join(ck_lines)
+                )
         except Exception as e:
-            logger.warning(f"[{self.name}] build_system_prompt chief_knowledge: {e}")
+            logger.warning("[%s] build base prompt chief_knowledge: %s", self.name, e)
 
-        # 4. Episodic memory — topic (sessioni precedenti)
-        if topic_scope_id:
-            try:
-                from intelligence.memory import get_episodes
-                episodes = get_episodes("topic", topic_scope_id, limit=5)
-                if episodes:
-                    parts.append("=== SESSIONI PRECEDENTI ===\n" + "\n---\n".join(episodes))
-            except Exception as e:
-                logger.warning(f"[{self.name}] episodic topic memory error: {e}")
-
-        # 5. Episodic memory — project (storia cantiere)
-        if project_scope_id:
-            try:
-                from intelligence.memory import get_episodes
-                proj_ep = get_episodes("project", str(project_scope_id), limit=5)
-                if proj_ep:
-                    parts.append("=== STORIA CANTIERE ===\n" + "\n---\n".join(proj_ep))
-            except Exception as e:
-                logger.warning(f"[{self.name}] episodic project memory error: {e}")
-
-        # 6. Messaggi recenti: passati come turns reali ad Anthropic (NON nel system prompt)
-        #    — build_system_prompt non li include più qui, answer_question li passa via prior_messages
-
-        # 7. Contesto progetto (se presente)
-        if project_context:
-            parts.append(f"=== CONTESTO CANTIERE ===\n{project_context}")
-
-        # 8. Regola fondamentale
+        # 4. Regola fondamentale
         parts.append(
             "=== REGOLA FONDAMENTALE ===\n"
             "Rispondi SOLO su argomenti del tuo dominio come descritto nel PROFILO E RUOLO. "
-            "Se la richiesta non \u00e8 di tua competenza, attiva check_domain_routing(). "
-            "Rispondi sempre in italiano, conciso, formato card con separatori \u2501\u2501\u2501. "
+            "Se la richiesta non e' di tua competenza, attiva check_domain_routing(). "
+            "Rispondi sempre in italiano, conciso, formato card con separatori. "
             "Zero fuffa, vai al punto. UNA sola domanda alla volta se devi chiedere.\n\n"
             "INFRASTRUTTURA INVISIBILE: Non menzionare mai Command Center, bot, /comandi, "
             "endpoint, API interne, o altri agenti interni nelle tue risposte. "
@@ -334,6 +316,60 @@ class BaseChief(BaseAgent):
             "Il sistema inviera' automaticamente una card di approvazione a Mirco."
         )
 
+        result = "\n\n".join(parts)
+        BaseChief._base_prompt_cache[self.chief_id] = (result, _time.time())
+        logger.debug("[%s] Base prompt cached (%d chars)", self.name, len(result))
+        return result
+
+    def build_system_prompt(self, project_context: Optional[str] = None,
+                            topic_scope_id: Optional[str] = None,
+                            project_scope_id: Optional[str] = None,
+                            recent_messages: Optional[List[Dict]] = None,
+                            query: Optional[str] = None) -> str:
+        """
+        Assembla il system prompt dinamico per il Chief:
+        CACHED (5 min): profilo + org knowledge + chief knowledge + regola
+        LIVE: episodic memory + relevant memories + contesto progetto
+        """
+        # Parte statica (cachata)
+        parts: List[str] = [self._build_base_prompt()]
+
+        # Parte dinamica: episodic memory topic
+        if topic_scope_id:
+            try:
+                from intelligence.memory import get_episodes
+                episodes = get_episodes("topic", topic_scope_id, limit=5)
+                if episodes:
+                    parts.append("=== SESSIONI PRECEDENTI ===\n" + "\n---\n".join(episodes))
+            except Exception as e:
+                logger.warning("[%s] episodic topic memory error: %s", self.name, e)
+
+        # Parte dinamica: episodic memory progetto
+        if project_scope_id:
+            try:
+                from intelligence.memory import get_episodes
+                proj_ep = get_episodes("project", str(project_scope_id), limit=5)
+                if proj_ep:
+                    parts.append("=== STORIA CANTIERE ===\n" + "\n---\n".join(proj_ep))
+            except Exception as e:
+                logger.warning("[%s] episodic project memory error: %s", self.name, e)
+
+        # Parte dinamica: memorie rilevanti per la query corrente
+        if query:
+            try:
+                from intelligence.memory import search_relevant_memories
+                relevant = search_relevant_memories(self.chief_id, query, limit=5)
+                if relevant:
+                    parts.append(
+                        "=== MEMORIE RILEVANTI ===\n" + "\n---\n".join(relevant)
+                    )
+            except Exception as e:
+                logger.warning("[%s] relevant memory search error: %s", self.name, e)
+
+        # Contesto progetto
+        if project_context:
+            parts.append("=== CONTESTO CANTIERE ===\n" + project_context)
+
         return "\n\n".join(parts)
 
     def answer_question(self, question: str, user_context: Optional[str] = None,
@@ -353,6 +389,7 @@ class BaseChief(BaseAgent):
             topic_scope_id=topic_scope_id,
             project_scope_id=project_scope_id,
             recent_messages=recent_messages,
+            query=question,
         )
 
         # FIX 4: inietta dati live dal dominio (FIX 2 v5.11: limit 2000 chars, include errors)
