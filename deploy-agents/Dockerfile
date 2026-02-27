@@ -26,4 +26,8 @@ COPY finance/ ./finance/
 COPY csuite/ ./csuite/
 COPY ethics/ ./ethics/
 
+# Utente non-root — Claude Code rifiuta --dangerously-skip-permissions come root
+RUN useradd -m -u 1001 brainuser && chown -R brainuser:brainuser /app
+USER brainuser
+
 CMD ["python", "agents_runner.py"]
