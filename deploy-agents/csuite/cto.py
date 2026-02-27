@@ -122,14 +122,16 @@ class CTO(BaseChief):
 
     def _save_and_send_card(self, prompt_text):
         """Salva in code_tasks (con dedup) e invia CODEACTION card. Return marker per skip."""
-        title_short = prompt_text[:100]
+        meta = self._extract_prompt_meta(prompt_text)
+        title_clean = meta["title"]
 
-        existing_id = self._find_existing_task(title_short)
+        existing_id = self._find_existing_task(prompt_text)
 
         if existing_id:
             try:
                 supabase.table("code_tasks").update({
                     "prompt": prompt_text,
+                    "title": title_clean,
                     "sandbox_check": json.dumps({
                         "source": "cto_direct_update",
                         "checked_at": now_rome().isoformat(),
@@ -143,7 +145,7 @@ class CTO(BaseChief):
         task_id = None
         try:
             result = supabase.table("code_tasks").insert({
-                "title": title_short,
+                "title": title_clean,
                 "prompt": prompt_text,
                 "requested_by": "cto",
                 "status": "pending_approval",
@@ -163,21 +165,24 @@ class CTO(BaseChief):
         if not task_id:
             return "Errore: code_task non creato."
 
-        meta = self._extract_prompt_meta(prompt_text)
         self._send_codeaction_card(task_id, meta)
 
         return "<<CODEACTION_SENT>>"
 
-    def _find_existing_task(self, title_short):
-        """Cerca code_task esistente per dedup (stesso titolo, ultimo 1h, pending/ready)."""
+    def _find_existing_task(self, prompt_text):
+        """Cerca code_task esistente per dedup (stesso prompt prefix, ultimo 1h, pending/ready)."""
         try:
             hour_ago = (now_rome() - timedelta(hours=1)).isoformat()
-            r = supabase.table("code_tasks").select("id,status") \
-                .eq("title", title_short) \
+            r = supabase.table("code_tasks").select("id,status,prompt") \
+                .eq("requested_by", "cto") \
                 .gte("created_at", hour_ago) \
-                .limit(1).execute()
-            if r.data and r.data[0].get("status") in ("pending_approval", "ready"):
-                return r.data[0]["id"]
+                .limit(5).execute()
+            prefix = prompt_text[:200]
+            for row in (r.data or []):
+                if row.get("status") not in ("pending_approval", "ready"):
+                    continue
+                if (row.get("prompt") or "")[:200] == prefix:
+                    return row["id"]
         except Exception as e:
             logger.warning("[CTO] dedup check error: %s", e)
         return None
@@ -305,6 +310,7 @@ class CTO(BaseChief):
         def _monitor():
             _elapsed = 0
             _last_log_len = 0
+            sep = "\u2500" * 15
 
             while True:
                 time.sleep(300)  # 5 minuti
@@ -328,8 +334,9 @@ class CTO(BaseChief):
                 # Task terminato
                 if status in ("done", "error", "interrupted"):
                     text_out = output_final or output_log
-                    last_lines = "\n".join(text_out.split("\n")[-10:])[:1000]
-                    sep = "\u2500" * 15
+                    out_lines = [l for l in text_out.split("\n")
+                                 if "--dangerously-skip-permissions" not in l]
+                    last_lines = "\n".join(out_lines[-10:])[:1000]
 
                     if status == "done":
                         self._send_telegram(_cid, _thid,
@@ -360,10 +367,12 @@ class CTO(BaseChief):
 
                 # Ancora in esecuzione — aggiornamento con output reale
                 log_lines = output_log.split("\n") if output_log else []
+                clean = [l for l in log_lines
+                         if "--dangerously-skip-permissions" not in l]
                 new_content = len(output_log) > _last_log_len
                 _last_log_len = len(output_log)
 
-                last_3 = "\n".join(log_lines[-3:])[:500] if log_lines else "In attesa output..."
+                last_3 = "\n".join(clean[-3:])[:500] if clean else "In attesa output..."
 
                 markup = {"inline_keyboard": [[
                     {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
@@ -372,9 +381,9 @@ class CTO(BaseChief):
 
                 self._send_telegram(_cid, _thid,
                     "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
-                    "\u2500" * 15 + "\n"
+                    + sep + "\n"
                     + last_3 + "\n"
-                    "\u2500" * 15,
+                    + sep,
                     reply_markup=markup)
 
         threading.Thread(target=_monitor, daemon=True).start()
@@ -507,14 +516,14 @@ class CTO(BaseChief):
         """Genera prompt tecnico + CODEACTION card. Per chiamate inter-agente."""
         technical_prompt = self.build_technical_prompt(task_description, context)
 
-        title_short = task_description[:100]
-        existing_id = self._find_existing_task(title_short)
+        meta = self._extract_prompt_meta(technical_prompt)
+        existing_id = self._find_existing_task(technical_prompt)
         task_id = existing_id
 
         if not task_id:
             try:
                 result = supabase.table("code_tasks").insert({
-                    "title": title_short,
+                    "title": meta["title"],
                     "prompt": technical_prompt,
                     "requested_by": "cto",
                     "status": "pending_approval",
@@ -532,7 +541,6 @@ class CTO(BaseChief):
                 logger.warning("[CTO] code_tasks insert error: %s", e)
 
         if task_id and not existing_id:
-            meta = self._extract_prompt_meta(technical_prompt)
             self._send_codeaction_card(task_id, meta)
 
         return {
