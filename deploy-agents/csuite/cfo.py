@@ -86,6 +86,69 @@ class CFO(BaseChief):
 
         return ctx
 
+
+    def _daily_report_emoji(self) -> str:
+        return "\U0001f4b6"
+
+    def _get_daily_report_sections(self, since_24h: str) -> list:
+        """CFO: costi API, breakdown per agente/modello, anomalie — ultime 24h."""
+        from datetime import timedelta
+        sections = []
+
+        # 1. Costi per agente e per modello (ultime 24h)
+        costs_agent = {}
+        costs_model = {}
+        total_usd = 0.0
+        try:
+            r = supabase.table("agent_logs").select("agent_id,model_used,cost_usd") \
+                .gte("created_at", since_24h).execute()
+            for row in (r.data or []):
+                agent = row.get("agent_id", "unknown")
+                model = row.get("model_used", "unknown") or "unknown"
+                cost = float(row.get("cost_usd") or 0)
+                total_usd += cost
+                costs_agent[agent] = costs_agent.get(agent, 0) + cost
+                costs_model[model] = costs_model.get(model, 0) + cost
+        except Exception as e:
+            logger.warning("[CFO] _get_daily_report_sections costs error: %s", e)
+
+        if costs_agent:
+            top_agents = sorted(costs_agent.items(), key=lambda x: x[1], reverse=True)[:5]
+            agent_lines = "\n".join(
+                f"  {a}: \u20ac{round(c*0.92,4)}" for a, c in top_agents
+            )
+            sections.append(f"\U0001f4ca COSTI PER AGENTE\n{agent_lines}")
+
+        if costs_model:
+            top_models = sorted(costs_model.items(), key=lambda x: x[1], reverse=True)[:3]
+            model_lines = "\n".join(
+                f"  {m}: \u20ac{round(c*0.92,4)}" for m, c in top_models
+            )
+            sections.append(f"\U0001f916 COSTI PER MODELLO\n{model_lines}")
+
+        # 2. Anomalie costo (ultime 24h)
+        anomalies = self.check_anomalies()
+        if anomalies:
+            anom_lines = "\n".join(
+                f"  \u26a0\ufe0f {a.get('description','')[:80]}" for a in anomalies[:3]
+            )
+            sections.append(f"\U0001f6a8 ANOMALIE\n{anom_lines}")
+
+        # 3. Finance metrics recenti (create nelle ultime 24h)
+        try:
+            r = supabase.table("finance_metrics").select("metric_name,value,created_at") \
+                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+            if r.data:
+                fm_lines = "\n".join(
+                    f"  {row.get('metric_name','?')}: {row.get('value','')}"
+                    for row in r.data
+                )
+                sections.append(f"\U0001f4c8 METRICHE FINANZIARIE\n{fm_lines}")
+        except Exception:
+            pass
+
+        return sections
+
     def check_anomalies(self):
         anomalies = []
         try:
