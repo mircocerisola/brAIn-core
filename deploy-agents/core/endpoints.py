@@ -350,6 +350,19 @@ async def run_smoke_setup_endpoint(request):
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
+async def run_smoke_check_start_endpoint(request):
+    """POST /smoke/check-start — controlla blockers e auto-avvia smoke test."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from execution.pipeline import check_and_autostart_smoke
+        result = check_and_autostart_smoke(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
 async def run_smoke_analyze_endpoint(request):
     try:
         data = await request.json()

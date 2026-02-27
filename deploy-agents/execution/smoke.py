@@ -1000,26 +1000,127 @@ def analyze_smoke_results(project_id):
 # ============================================================
 
 def run_smoke_daily_update():
-    """Aggiornamento giornaliero per tutti gli smoke test attivi."""
+    """Aggiornamento giornaliero per smoke test attivi + reminder per blocker pendenti."""
+    updated = 0
+    reminded = 0
+
+    # 1. Aggiorna progetti con smoke test in corso
     try:
         active = supabase.table("projects").select(
             "id,name,brand_name,topic_id,smoke_test_method,smoke_test_plan"
         ).eq("pipeline_step", "smoke_test_running").execute()
 
-        if not active.data:
-            return {"status": "ok", "updated": 0}
-
-        updated = 0
-        for project in active.data:
+        for project in (active.data or []):
             try:
                 _send_daily_update_for_project(project)
                 updated += 1
             except Exception as e:
                 logger.warning("[SMOKE_DAILY] project %s: %s", project.get("id"), e)
-
-        return {"status": "ok", "updated": updated}
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        logger.warning("[SMOKE_DAILY] active projects: %s", e)
+
+    # 2. Reminder per progetti in designing con blocker pendenti
+    try:
+        designing = supabase.table("projects").select(
+            "id,name,brand_name,topic_id,smoke_test_plan"
+        ).eq("pipeline_step", "smoke_test_designing").execute()
+
+        for project in (designing.data or []):
+            try:
+                r = _send_blocker_reminder(project)
+                if r:
+                    reminded += 1
+            except Exception as e:
+                logger.warning("[SMOKE_REMINDER] project %s: %s", project.get("id"), e)
+    except Exception as e:
+        logger.warning("[SMOKE_DAILY] designing projects: %s", e)
+
+    return {"status": "ok", "updated": updated, "reminded": reminded}
+
+
+def _send_blocker_reminder(project):
+    """Invia reminder ogni 24h per blocker pendenti. Dopo 7 giorni → alert in #strategy."""
+    from execution.pipeline import get_pending_blockers
+
+    project_id = project["id"]
+    brand_name = project.get("brand_name", project.get("name", ""))
+    topic_id = project.get("topic_id")
+    group_id = _get_group_id()
+
+    if not group_id or not topic_id:
+        return False
+
+    # Controlla blockers pendenti
+    pending = get_pending_blockers(project_id)
+    if not pending:
+        return False
+
+    # Controlla ultimo reminder dal piano
+    plan = json.loads(project.get("smoke_test_plan") or "{}")
+    last_reminder = plan.get("last_reminder_at", "")
+    reminder_count = plan.get("reminder_count", 0)
+    doc_sent = plan.get("doc_sent_at", "")
+
+    now = datetime.now(timezone.utc)
+
+    # Se non c'e' un doc_sent_at o last_reminder, usa created_at del primo blocker
+    if not last_reminder and not doc_sent:
+        oldest_blocker = min(pending, key=lambda x: x.get("created_at", ""))
+        last_reminder = oldest_blocker.get("created_at", now.isoformat())
+
+    # Controlla se sono passate 24h dall'ultimo reminder
+    try:
+        last_dt = datetime.fromisoformat(last_reminder.replace("Z", "+00:00"))
+        hours_since = (now - last_dt).total_seconds() / 3600
+    except Exception:
+        hours_since = 25  # Forza invio se errore parsing
+
+    if hours_since < 23:
+        return False  # Non ancora tempo per il reminder
+
+    # Costruisci reminder
+    pending_titles = [p.get("payload", {}).get("problem", "azione pendente") for p in pending]
+    pending_list = ""
+    for t in pending_titles:
+        pending_list += "- " + t + "\n"
+
+    if reminder_count >= 7:
+        # Dopo 7 giorni → alert in #strategy
+        alert_msg = (
+            "ALERT — Smoke test " + brand_name + " bloccato da " + str(reminder_count) + " giorni\n"
+            + SEP + "\n"
+            "Mirco non ha completato le azioni richieste:\n"
+            + pending_list
+            + SEP + "\n"
+            "Valutare se archiviare il progetto o ripianificare."
+        )
+        from execution.pipeline import _send_to_chief_topic
+        _send_to_chief_topic("cso", alert_msg)
+        logger.warning("[SMOKE_REMINDER] project %s bloccato da %d giorni, alert in #strategy",
+                       project_id, reminder_count)
+    else:
+        # Reminder nel topic cantiere
+        msg = (
+            "PROMEMORIA — Smoke test " + brand_name + " in attesa\n"
+            + SEP + "\n"
+            "Azioni ancora da completare:\n"
+            + pending_list + "\n"
+            "Quando hai completato un'azione, premi il pulsante 'Completato' nel messaggio sopra.\n"
+            "Quando tutte le azioni sono completate → lo smoke test parte in automatico."
+        )
+        _send_topic_raw(group_id, topic_id, msg)
+
+    # Aggiorna contatore reminder nel piano
+    try:
+        plan["last_reminder_at"] = now.isoformat()
+        plan["reminder_count"] = reminder_count + 1
+        supabase.table("projects").update({
+            "smoke_test_plan": json.dumps(plan),
+        }).eq("id", project_id).execute()
+    except Exception:
+        pass
+
+    return True
 
 
 def _send_daily_update_for_project(project):

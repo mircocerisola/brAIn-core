@@ -29,7 +29,7 @@ from core.endpoints import (
     run_continue_build_endpoint, run_generate_invite_endpoint,
     run_migration_endpoint,
     run_legal_review_endpoint, run_legal_docs_endpoint, run_legal_compliance_endpoint,
-    run_smoke_setup_endpoint, run_smoke_analyze_endpoint,
+    run_smoke_setup_endpoint, run_smoke_analyze_endpoint, run_smoke_check_start_endpoint,
     run_marketing_run_endpoint, run_marketing_brand_endpoint, run_marketing_report_endpoint,
     run_all_endpoint,
     # C-Suite + Ethics
@@ -113,6 +113,7 @@ async def main():
     app.router.add_post("/smoke/setup", run_smoke_setup_endpoint)
     app.router.add_post("/smoke/analyze", run_smoke_analyze_endpoint)
     app.router.add_post("/smoke/daily-update", run_smoke_daily_update_endpoint)
+    app.router.add_post("/smoke/check-start", run_smoke_check_start_endpoint)
 
     # Marketing
     app.router.add_post("/marketing/run", run_marketing_run_endpoint)

@@ -341,12 +341,74 @@ def create_build_blocker(project_id: int, problem: str, action: str,
     return action_id or 0
 
 
-# ── CSO Smoke Test Design ─────────────────────────────────────────────────────
+def get_pending_blockers(project_id: int) -> list:
+    """Ritorna lista di blockers pendenti per un progetto."""
+    try:
+        r = supabase.table("action_queue").select("id,payload,status,created_at").eq(
+            "project_id", project_id
+        ).eq("action_type", "build_blocker").eq("status", "pending").execute()
+        return r.data or []
+    except Exception:
+        return []
+
+
+def check_and_autostart_smoke(project_id: int) -> dict:
+    """Controlla se tutti i blockers sono completati e avvia smoke test automaticamente."""
+    pending = get_pending_blockers(project_id)
+    if pending:
+        titles = [p.get("payload", {}).get("problem", "azione") for p in pending]
+        return {"status": "waiting", "pending_count": len(pending), "pending": titles}
+
+    # Tutti completati — verifica pipeline step
+    try:
+        r = supabase.table("projects").select("pipeline_step,name,topic_id").eq("id", project_id).execute()
+        if not r.data:
+            return {"status": "error", "error": "project not found"}
+        step = r.data[0].get("pipeline_step")
+        topic_id = r.data[0].get("topic_id")
+        pname = r.data[0].get("name", "")
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if step != "smoke_test_designing":
+        return {"status": "skip", "reason": "pipeline_step=" + (step or "null")}
+
+    # Auto-start smoke test
+    group_id = _get_group_id()
+    if group_id and topic_id:
+        _send_topic_raw(group_id, topic_id,
+                        "Tutte le azioni completate! Avvio smoke test automaticamente...")
+
+    from execution.smoke import start_smoke_test
+    result = start_smoke_test(project_id)
+    logger.info("[AUTO_START] Smoke test avviato per project %s: %s", project_id, result.get("status"))
+    return {"status": "autostarted", "smoke_result": result}
+
+
+# ── Metodi disponibili label ──────────────────────────────────────────────────
+METHOD_NAMES = {
+    "cold_outreach": "Cold Outreach B2B (email/LinkedIn)",
+    "landing_page_ads": "Landing Page + Ads (Google/Meta)",
+    "concierge": "Concierge MVP (servizio manuale)",
+    "pre_order": "Pre-Order / Deposito (landing con prezzo)",
+    "paid_ads": "Paid Ads puri (Google Ads intent)",
+    "cold_outreach_landing": "Cold Outreach + Landing Page",
+}
+
+
+# ── CSO Smoke Test Design — COMPLETO ─────────────────────────────────────────
 def design_smoke_test(project_id: int) -> dict:
-    """CSO progetta il piano smoke test e lo presenta a Mirco nel topic cantiere.
-    Include brand identity, metodo selezionato, blocker per Mirco.
-    Avanza pipeline a smoke_test_designing.
+    """CSO progetta il piano smoke test COMPLETO e lo presenta a Mirco.
+    Raccoglie TUTTI i dati (prospect reali, email, landing, KPI) PRIMA di mandare il piano.
+    Zero N/A ammessi — ogni campo e' popolato con dati reali.
     """
+    # Lazy imports per evitare circular
+    from execution.smoke import (
+        _find_prospects_perplexity, _generate_cold_email_sequence,
+        _generate_landing_html, _generate_ads_plan,
+    )
+    import re
+
     try:
         r = supabase.table("projects").select(
             "name,spec_md,spec_human_md,topic_id,bos_id,"
@@ -363,151 +425,250 @@ def design_smoke_test(project_id: int) -> dict:
     brand_email = project.get("brand_email") or ""
     brand_domain = project.get("brand_domain") or ""
     method = project.get("smoke_test_method") or "cold_outreach"
-    spec_md = (project.get("spec_md") or "")[:3000]
     topic_id = project.get("topic_id")
     group_id = _get_group_id()
+    method_label = METHOD_NAMES.get(method, method)
 
-    # Carica soluzione per contesto
-    solution_ctx = ""
+    # ── 1. Carica soluzione COMPLETA ──
+    solution = {}
     bos_id = project.get("bos_id")
     if bos_id:
         try:
-            sol = supabase.table("solutions").select(
-                "title,description,sector,customer_segment"
-            ).eq("id", bos_id).execute()
+            sol = supabase.table("solutions").select("*").eq("id", bos_id).execute()
             if sol.data:
-                s = sol.data[0]
-                sol_title = s.get("title", "")
-                sol_desc = (s.get("description") or "")[:500]
-                sol_sector = s.get("sector", "")
-                sol_target = s.get("customer_segment") or ""
-                solution_ctx = (
-                    "Soluzione: " + sol_title + "\n"
-                    "Descrizione: " + sol_desc + "\n"
-                    "Settore: " + sol_sector + "\n"
-                    "Target: " + sol_target
-                )
+                solution = sol.data[0]
         except Exception:
             pass
 
-    # Metodi disponibili
-    method_names = {
-        "cold_outreach": "Cold Outreach B2B (email/LinkedIn)",
-        "landing_page_ads": "Landing Page + Ads (Google/Meta)",
-        "concierge": "Concierge MVP (servizio manuale)",
-        "pre_order": "Pre-Order / Deposito (landing con prezzo)",
-        "paid_ads": "Paid Ads puri (Google Ads intent)",
-        "cold_outreach_landing": "Cold Outreach + Landing Page",
-    }
-    method_label = method_names.get(method, method)
+    sol_title = solution.get("title") or name
+    sol_desc = (solution.get("description") or "")[:1000]
+    sol_sector = solution.get("sector") or ""
+    sol_target = solution.get("customer_segment") or ""
 
-    # CSO genera piano smoke test con Sonnet, informato dal metodo scelto
-    prompt = (
-        "Sei il CSO (Chief Strategy Officer) di brAIn. Devi progettare uno smoke test "
-        "per validare la domanda reale PRIMA di costruire il prodotto.\n\n"
-        "Brand: " + brand_name + "\n"
-        "Email brand: " + brand_email + "\n"
-        + solution_ctx + "\n"
-        + ("SPEC progetto:\n" + spec_md + "\n\n" if spec_md else "\n")
-        + "METODO SCELTO: " + method_label + "\n\n"
-        "Progetta il piano basandoti su questo metodo specifico.\n"
-        "Rispondi SOLO con JSON valido:\n"
-        '{"method": "descrizione specifica del metodo per questo progetto",'
-        '"kpi_success": "criterio successo concreto con % o numero",'
-        '"kpi_failure": "criterio fallimento concreto con % o numero",'
+    # ── 2. Trova 50 prospect REALI via Perplexity ──
+    target_desc = sol_target or sol_title
+    if sol_sector:
+        target_desc = target_desc + " nel settore " + sol_sector
+
+    logger.info("[SMOKE_DESIGN] Cerco prospect per: %s", target_desc)
+    prospects = _find_prospects_perplexity(target_desc, 50)
+    prospects_count = len(prospects)
+    logger.info("[SMOKE_DESIGN] Trovati %d prospect reali", prospects_count)
+
+    # ── 3. Genera materiali in base al metodo ──
+    email_sequence = []
+    landing_html = ""
+    ads_plan = {}
+
+    if method in ("cold_outreach", "cold_outreach_landing"):
+        email_sequence = _generate_cold_email_sequence(brand_name, sol_title, brand_email)
+        logger.info("[SMOKE_DESIGN] Email sequence: %d touchpoint", len(email_sequence))
+
+    if method in ("landing_page_ads", "cold_outreach_landing", "pre_order", "paid_ads"):
+        landing_html = _generate_landing_html(brand_name, solution)
+        logger.info("[SMOKE_DESIGN] Landing HTML: %d chars", len(landing_html))
+
+    if method in ("landing_page_ads", "paid_ads"):
+        ads_plan = _generate_ads_plan(brand_name, solution)
+        logger.info("[SMOKE_DESIGN] Piano ads generato")
+
+    # ── 4. Genera KPI specifici con Sonnet (basati su dati reali) ──
+    kpi_prompt = (
+        "Sei il CSO di brAIn. Genera KPI specifici per questo smoke test.\n\n"
+        "Progetto: " + brand_name + "\n"
+        "Soluzione: " + sol_title + "\n"
+        "Settore: " + sol_sector + "\n"
+        "Target: " + target_desc + "\n"
+        "Metodo: " + method_label + "\n"
+        "Prospect trovati: " + str(prospects_count) + "\n"
+        "Durata test: 7 giorni\n\n"
+        "Rispondi SOLO con JSON:\n"
+        '{"kpi_success": "criterio successo con numero esatto basato su '
+        + str(prospects_count) + ' prospect",'
+        '"kpi_failure": "criterio fallimento con numero esatto",'
         '"duration_days": 7,'
-        '"materials_needed": "lista materiali specifici per questo metodo",'
-        '"prospect_count": 50,'
-        '"target_description": "chi contatteremo (specifico)",'
+        '"target_description": "descrizione specifica del target basata sui prospect trovati",'
         '"budget_eur": 0,'
-        '"blockers_for_mirco": ["azione 1 per Mirco", "azione 2"]}'
+        '"reasoning": "perche questi KPI sono realistici per questo settore"}'
     )
-
     try:
         resp = claude.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=800,
-            messages=[{"role": "user", "content": prompt}],
+            max_tokens=400,
+            messages=[{"role": "user", "content": kpi_prompt}],
         )
         raw = resp.content[0].text.strip()
-        import re
         m = re.search(r'\{[\s\S]*\}', raw)
-        plan = json.loads(m.group(0)) if m else {}
+        kpi_data = json.loads(m.group(0)) if m else {}
     except Exception as e:
-        logger.warning("[SMOKE_DESIGN] Sonnet error: %s", e)
-        plan = {
-            "method": method_label + " per " + brand_name,
-            "kpi_success": "15% risposta positiva",
-            "kpi_failure": "<5% risposta",
-            "duration_days": 7,
-            "materials_needed": "Email template, landing page",
-            "prospect_count": 50,
-            "target_description": "target da definire",
-            "budget_eur": 0,
-            "blockers_for_mirco": [],
-        }
+        logger.warning("[SMOKE_DESIGN] KPI generation: %s", e)
+        kpi_data = {}
 
-    # Salva piano in DB
+    kpi_success = kpi_data.get("kpi_success",
+                               ">15% risposte positive (" + str(max(prospects_count * 15 // 100, 1)) +
+                               " su " + str(prospects_count) + ")")
+    kpi_failure = kpi_data.get("kpi_failure",
+                               "<5% risposte positive (<" + str(max(prospects_count * 5 // 100, 1)) +
+                               " su " + str(prospects_count) + ")")
+    duration_days = kpi_data.get("duration_days", 7)
+    budget_eur = kpi_data.get("budget_eur", 0)
+    if method in ("landing_page_ads", "paid_ads"):
+        budget_eur = ads_plan.get("budget_eur", 75) if ads_plan else 75
+
+    # ── 5. Costruisci piano completo ──
+    prospect_sample = prospects[:5]
+    prospect_sample_lines = ""
+    for p in prospect_sample:
+        company = p.get("company", "")
+        pname = p.get("name", "")
+        contact = p.get("contact", "")
+        line = "- " + company
+        if pname:
+            line += " | " + pname
+        if contact:
+            line += " | " + contact
+        prospect_sample_lines += line + "\n"
+    if prospects_count > 5:
+        prospect_sample_lines += "  [+ " + str(prospects_count - 5) + " altri]\n"
+
+    email_preview = ""
+    if email_sequence:
+        for em in email_sequence[:3]:
+            day_n = str(em.get("day", "?"))
+            subj = em.get("subject", "")
+            email_preview += "- Giorno " + day_n + ": \"" + subj + "\"\n"
+
+    landing_status = ""
+    if landing_html and len(landing_html) > 100:
+        landing_status = "Landing page HTML generata (" + str(len(landing_html)) + " chars, pronta per pubblicazione)"
+    elif method in ("landing_page_ads", "cold_outreach_landing", "pre_order", "paid_ads"):
+        landing_status = "Landing page da generare"
+
+    ads_summary = ""
+    if ads_plan:
+        channels = ", ".join(ads_plan.get("channels", ["Google Ads"]))
+        ads_budget = str(ads_plan.get("budget_eur", 50))
+        ads_dur = str(ads_plan.get("duration_days", 5))
+        ads_summary = channels + " — EUR" + ads_budget + " per " + ads_dur + " giorni"
+
+    # Costruisci blockers specifici
+    blockers = []
+    blocker_details = []
+    if method in ("cold_outreach", "cold_outreach_landing") and brand_domain:
+        blockers.append("Registra dominio " + brand_domain + " e crea " + brand_email)
+        blocker_details.append({
+            "title": "Registra dominio " + brand_domain + " e crea " + brand_email,
+            "steps": (
+                "1. Vai su cloudflare.com/domains\n"
+                "2. Cerca '" + brand_domain + "' — costo circa EUR10/anno\n"
+                "3. Acquista il dominio\n"
+                "4. Vai su Email Routing e crea " + brand_email + "\n"
+                "5. Torna qui e premi 'Completato'"
+            ),
+            "time": "10 minuti",
+        })
+    if method in ("landing_page_ads", "cold_outreach_landing", "pre_order", "paid_ads"):
+        blockers.append("Pubblica landing page e condividi URL")
+        blocker_details.append({
+            "title": "Pubblica landing page e condividi URL",
+            "steps": (
+                "1. L'HTML e' gia' pronto (generato dal sistema)\n"
+                "2. Opzione A: vai su carrd.co → 'New site' → incolla HTML\n"
+                "3. Opzione B: crea repo GitHub Pages → carica index.html\n"
+                "4. Copia l'URL della pagina pubblicata\n"
+                "5. Torna qui e mandami l'URL"
+            ),
+            "time": "15 minuti",
+        })
+    if ads_plan:
+        kw_list = ads_plan.get("keywords_intent", ads_plan.get("keywords", []))[:5]
+        kw_str = ", ".join(kw_list) if kw_list else "keyword del settore"
+        blockers.append("Configura campagna ads")
+        blocker_details.append({
+            "title": "Configura campagna " + ", ".join(ads_plan.get("channels", ["Google Ads"])),
+            "steps": (
+                "1. Vai su ads.google.com (o Meta Ads)\n"
+                "2. Crea campagna con keyword: " + kw_str + "\n"
+                "3. Budget: EUR" + str(ads_plan.get("daily_budget_eur", ads_plan.get("budget_eur", 50) // 5)) + "/giorno\n"
+                "4. Durata: " + str(ads_plan.get("duration_days", 5)) + " giorni\n"
+                "5. Torna qui e conferma"
+            ),
+            "time": "30 minuti",
+        })
+
+    plan = {
+        "method": method_label,
+        "target_description": kpi_data.get("target_description", target_desc),
+        "prospects_count": prospects_count,
+        "prospects_sample": prospect_sample,
+        "email_sequence": email_sequence,
+        "landing_html_generated": bool(landing_html and len(landing_html) > 100),
+        "ads_plan": ads_plan,
+        "kpi_success": kpi_success,
+        "kpi_failure": kpi_failure,
+        "duration_days": duration_days,
+        "budget_eur": budget_eur,
+        "blockers": blockers,
+        "blocker_details": blocker_details,
+    }
+
+    # ── 6. Salva tutto in DB ──
     try:
-        supabase.table("projects").update({
+        update_data = {
             "smoke_test_plan": json.dumps(plan),
             "smoke_test_kpi": json.dumps({
-                "success": plan.get("kpi_success", ""),
-                "failure": plan.get("kpi_failure", ""),
+                "success": kpi_success,
+                "failure": kpi_failure,
             }),
             "smoke_test_kpi_target": json.dumps({
-                "success": plan.get("kpi_success", ""),
-                "failure": plan.get("kpi_failure", ""),
+                "success": kpi_success,
+                "failure": kpi_failure,
             }),
-        }).eq("id", project_id).execute()
+        }
+        if landing_html:
+            update_data["landing_page_html"] = landing_html
+        supabase.table("projects").update(update_data).eq("id", project_id).execute()
     except Exception as e:
         logger.warning("[SMOKE_DESIGN] DB update: %s", e)
 
     # Avanza pipeline
     advance_pipeline_step(project_id, "smoke_test_designing")
 
-    # Costruisci card con blockers
-    blockers = plan.get("blockers_for_mirco", [])
-    # Aggiungi blocker email se metodo richiede outreach
-    if method in ("cold_outreach", "cold_outreach_landing") and brand_domain:
-        email_blocker = "Registra " + brand_domain + " e crea " + brand_email + " — stima 10min"
-        if email_blocker not in blockers:
-            blockers.insert(0, email_blocker)
-
+    # ── 7. Costruisci card COMPLETA ──
     blockers_text = ""
     if blockers:
-        blockers_text = "\nAzioni richieste da Mirco prima di partire:\n"
-        for b in blockers:
-            blockers_text += "- " + b + "\n"
+        blockers_text = "\nAZIONI RICHIESTE DA MIRCO:\n"
+        for i, b in enumerate(blockers, 1):
+            blockers_text += str(i) + ". " + b + "\n"
 
     budget_line = ""
-    budget = plan.get("budget_eur", 0)
-    if budget and budget > 0:
-        budget_line = "Budget stimato: EUR" + str(budget) + "\n"
-
-    plan_method = plan.get("method", "N/A")
-    plan_target = plan.get("target_description", "N/A")
-    plan_prospect = str(plan.get("prospect_count", 50))
-    plan_dur = str(plan.get("duration_days", 7))
-    plan_kpi_ok = plan.get("kpi_success", "N/A")
-    plan_kpi_ko = plan.get("kpi_failure", "N/A")
-    plan_materials = plan.get("materials_needed", "N/A")
+    if budget_eur and budget_eur > 0:
+        budget_line = "Budget stimato: EUR" + str(budget_eur) + "\n"
 
     card = (
         "PIANO SMOKE TEST — " + brand_name + "\n"
         + SEP + "\n"
-        "Metodo scelto: " + method_label + "\n"
-        "Perche': il CSO lo ritiene il piu' adatto per questo settore/audience\n"
-        "Audience target: " + plan_target + "\n"
-        "Prospect: " + plan_prospect + " contatti\n"
-        "Durata: " + plan_dur + " giorni\n"
+        "Metodo: " + method_label + "\n"
+        "Target: " + (kpi_data.get("target_description") or target_desc) + "\n"
+        "Settore: " + (sol_sector or "non specificato") + "\n\n"
+        "PROSPECT TROVATI: " + str(prospects_count) + "/50\n"
+        + prospect_sample_lines + "\n"
+    )
+    if email_preview:
+        card += "SEQUENZA EMAIL (" + str(len(email_sequence)) + " touchpoint):\n" + email_preview + "\n"
+    if landing_status:
+        card += "LANDING PAGE: " + landing_status + "\n"
+    if ads_summary:
+        card += "ADS: " + ads_summary + "\n"
+    card += (
+        "\nDurata: " + str(duration_days) + " giorni\n"
         + budget_line
-        + "KPI successo: " + plan_kpi_ok + "\n"
-        "KPI fallimento: " + plan_kpi_ko + "\n"
-        "Materiali: " + plan_materials + "\n"
+        + "KPI successo: " + kpi_success + "\n"
+        "KPI fallimento: " + kpi_failure + "\n"
         + blockers_text
         + SEP
     )
+
     reply_markup = {
         "inline_keyboard": [
             [
@@ -524,14 +685,102 @@ def design_smoke_test(project_id: int) -> dict:
             ],
         ]
     }
+
     if group_id and topic_id:
         _send_topic_raw(group_id, topic_id, card, reply_markup)
     else:
         _send_to_chief_topic("cso", card, reply_markup)
 
-    logger.info("[SMOKE_DESIGN] Piano generato per %s method=%s (project_id=%s)",
-                brand_name, method, project_id)
-    return {"status": "ok", "project_id": project_id, "plan": plan, "method": method}
+    # ── 8. Crea blockers nel sistema + manda documento operativo ──
+    if group_id and topic_id and blocker_details:
+        for bd in blocker_details:
+            create_build_blocker(
+                project_id, bd["title"], bd["steps"], bd["time"],
+                group_id, topic_id,
+            )
+        # Documento operativo come secondo messaggio
+        _send_operational_document(
+            project_id, brand_name, method, method_label,
+            blockers, blocker_details, prospects_count,
+            duration_days, email_sequence, landing_html,
+            group_id, topic_id,
+        )
+
+    logger.info("[SMOKE_DESIGN] Piano COMPLETO generato per %s method=%s prospect=%d (project_id=%s)",
+                brand_name, method, prospects_count, project_id)
+    return {"status": "ok", "project_id": project_id, "plan": plan, "method": method,
+            "prospects_count": prospects_count}
+
+
+def _send_operational_document(project_id, brand_name, method, method_label,
+                               blockers, blocker_details, prospects_count,
+                               duration_days, email_sequence, landing_html,
+                               group_id, topic_id):
+    """Invia documento operativo dettagliato con istruzioni passo-passo per Mirco."""
+
+    # Sezione azioni richieste
+    actions_text = ""
+    for i, bd in enumerate(blocker_details, 1):
+        actions_text += (
+            str(i) + ". " + bd["title"] + " — stima " + bd["time"] + "\n"
+            "   Come fare:\n"
+        )
+        for step_line in bd["steps"].split("\n"):
+            if step_line.strip():
+                actions_text += "   " + step_line + "\n"
+        actions_text += "\n"
+
+    # Cosa fara' il sistema
+    auto_actions = "- Quando completi tutte le azioni → lo smoke test parte in automatico\n"
+    if method in ("cold_outreach", "cold_outreach_landing"):
+        auto_actions += (
+            "- Il sistema inviera' " + str(prospects_count) + " email ai prospect trovati\n"
+            "- Sequenza: " + str(len(email_sequence)) + " touchpoint automatici\n"
+        )
+    if method in ("landing_page_ads", "cold_outreach_landing", "pre_order", "paid_ads"):
+        auto_actions += "- Il sistema monitorera' la landing page e raccogliera' i lead\n"
+    auto_actions += (
+        "- Ogni giorno riceverai un aggiornamento qui nel cantiere\n"
+        "- Dopo " + str(duration_days) + " giorni → analisi automatica + raccomandazione CSO\n"
+    )
+
+    # Checklist azioni
+    checklist = ""
+    for b in blockers:
+        checklist += "[ ] " + b + "\n"
+
+    doc = (
+        "DOCUMENTO OPERATIVO — SMOKE TEST " + brand_name + "\n"
+        + SEP + "\n\n"
+        "COSA MI SERVE DA TE (Mirco):\n\n"
+        + actions_text
+        + "COSA FARA' IL SISTEMA AUTOMATICAMENTE:\n"
+        + auto_actions + "\n"
+        "TIMELINE:\n"
+        "- Giorno 0: completa le azioni qui sopra\n"
+        "- Giorno 1-" + str(duration_days) + ": outreach automatico + raccolta dati\n"
+        "- Giorno " + str(duration_days + 1) + ": analisi automatica risultati + raccomandazione GO/NO-GO\n\n"
+        "STATUS AZIONI:\n"
+        + checklist + "\n"
+        "REMINDER: se non completi le azioni, riceverai un promemoria ogni 24 ore.\n"
+        "Dopo 7 giorni senza azione → alert nel canale #strategy.\n"
+        + SEP
+    )
+    _send_topic_raw(group_id, topic_id, doc)
+
+    # Salva timestamp invio documento nel piano per reminder
+    try:
+        r = supabase.table("projects").select("smoke_test_plan").eq("id", project_id).execute()
+        if r.data:
+            plan_stored = json.loads(r.data[0].get("smoke_test_plan") or "{}")
+            plan_stored["doc_sent_at"] = datetime.now(timezone.utc).isoformat()
+            plan_stored["last_reminder_at"] = datetime.now(timezone.utc).isoformat()
+            plan_stored["reminder_count"] = 0
+            supabase.table("projects").update({
+                "smoke_test_plan": json.dumps(plan_stored),
+            }).eq("id", project_id).execute()
+    except Exception:
+        pass
 
 
 def send_smoke_daily_update(project_id: int, day: int, total_days: int,

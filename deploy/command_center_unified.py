@@ -2588,6 +2588,99 @@ async def handle_project_message(update, project):
             )
             return
 
+    # 4.2 Auto-detect URL/email in cantiere durante smoke_test_designing
+    if _is_mirco and project.get("pipeline_step") == "smoke_test_designing":
+        import re as _re_url
+
+        # Detect email SMTP/dominio registrato → marca blocker email come completato
+        email_match = _re_url.search(r'[\w.+-]+@[\w-]+\.[\w.]+', msg)
+        if email_match and ("registrato" in msg.lower() or "creato" in msg.lower()
+                           or "email" in msg.lower() or "dominio" in msg.lower()
+                           or "smtp" in msg.lower() or "fatto" in msg.lower()):
+            detected_email = email_match.group(0)
+            try:
+                supabase.table("projects").update({"brand_email": detected_email}).eq("id", project_id).execute()
+            except Exception:
+                pass
+            try:
+                email_blockers = supabase.table("action_queue").select("id,payload").eq(
+                    "project_id", project_id
+                ).eq("action_type", "build_blocker").eq("status", "pending").execute()
+                for eb in (email_blockers.data or []):
+                    payload_text = str(eb.get("payload", {}))
+                    if "email" in payload_text.lower() or "dominio" in payload_text.lower():
+                        supabase.table("action_queue").update({"status": "completed"}).eq("id", eb["id"]).execute()
+            except Exception:
+                pass
+            token_em = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token_em:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{token_em}/sendMessage",
+                    json={"chat_id": chat_id, "message_thread_id": thread_id,
+                          "text": f"\u2705 Email salvata: {detected_email}\nAzione email/dominio completata."},
+                    timeout=10,
+                )
+
+        url_match = _re_url.search(r'https?://[^\s]+', msg)
+        if url_match:
+            detected_url = url_match.group(0).rstrip(".,;)")
+            # Salva URL nella projects table
+            try:
+                supabase.table("projects").update({
+                    "brand_landing_url": detected_url,
+                }).eq("id", project_id).execute()
+            except Exception as _ue:
+                logger.warning(f"[URL_DETECT] save: {_ue}")
+            # Marca blocker landing come completato
+            try:
+                landing_blockers = supabase.table("action_queue").select("id,payload").eq(
+                    "project_id", project_id
+                ).eq("action_type", "build_blocker").eq("status", "pending").execute()
+                for lb in (landing_blockers.data or []):
+                    payload_text = str(lb.get("payload", {}))
+                    if "landing" in payload_text.lower() or "pubblica" in payload_text.lower():
+                        supabase.table("action_queue").update({"status": "completed"}).eq("id", lb["id"]).execute()
+            except Exception as _be:
+                logger.warning(f"[URL_DETECT] blocker: {_be}")
+            token_url = os.getenv("TELEGRAM_BOT_TOKEN")
+            if token_url:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{token_url}/sendMessage",
+                    json={"chat_id": chat_id, "message_thread_id": thread_id,
+                          "text": f"\u2705 URL salvato: {detected_url}\nAzione landing completata automaticamente."},
+                    timeout=10,
+                )
+            # Controlla se tutti i blockers sono completati → auto-start
+            try:
+                remaining_q = supabase.table("action_queue").select("id").eq(
+                    "project_id", project_id
+                ).eq("action_type", "build_blocker").eq("status", "pending").execute()
+                if not remaining_q.data:
+                    if token_url:
+                        http_requests.post(
+                            f"https://api.telegram.org/bot{token_url}/sendMessage",
+                            json={"chat_id": chat_id, "message_thread_id": thread_id,
+                                  "text": "\u2705 Tutte le azioni completate! Avvio smoke test automaticamente..."},
+                            timeout=10,
+                        )
+                    supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+                    def _autostart_from_url():
+                        try:
+                            oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                            headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                            http_requests.post(
+                                f"{AGENTS_RUNNER_URL}/smoke/check-start",
+                                json={"project_id": project_id},
+                                headers=headers, timeout=60,
+                            )
+                        except Exception as _ae:
+                            logger.warning(f"[URL_AUTOSTART] {_ae}")
+                    if AGENTS_RUNNER_URL:
+                        threading.Thread(target=_autostart_from_url, daemon=True).start()
+            except Exception:
+                pass
+            return
+
     # 4.5 Risposta breve nel topic: risolvi con contesto conversazione
     if thread_id and _is_mirco and _is_short_affirmative(msg):
         recent = _topic_buffer_get_recent(chat_id, thread_id)
@@ -3446,36 +3539,60 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         parts = data.split(":")
         project_id = int(parts[1])
         action_id = int(parts[2]) if len(parts) > 2 else 0
-        await query.answer("Pipeline sbloccata! Riprendo...")
+        await query.answer("Azione completata!")
         try:
             if action_id:
                 supabase.table("action_queue").update({"status": "completed"}).eq("id", action_id).execute()
-            supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
         except Exception as e:
             logger.warning(f"[BLOCKER_DONE] {e}")
-        # Notifica nel topic
+
+        # Controlla blockers rimanenti per questo progetto
+        remaining = 0
+        try:
+            pending_q = supabase.table("action_queue").select("id,payload").eq(
+                "project_id", project_id
+            ).eq("action_type", "build_blocker").eq("status", "pending").execute()
+            remaining = len(pending_q.data or [])
+        except Exception:
+            pass
+
         _token_bd = os.getenv("TELEGRAM_BOT_TOKEN")
-        if _token_bd and thread_id:
-            http_requests.post(
-                f"https://api.telegram.org/bot{_token_bd}/sendMessage",
-                json={"chat_id": chat_id, "message_thread_id": thread_id,
-                      "text": "\u2705 Azione completata. Riprendo la pipeline..."},
-                timeout=10,
-            )
-        # Riprende pipeline dal punto di blocco
-        def _resume_pipeline():
-            try:
-                oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
-                headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+        if remaining > 0:
+            # Ancora blockers pendenti
+            if _token_bd and thread_id:
                 http_requests.post(
-                    f"{AGENTS_RUNNER_URL}/pipeline",
-                    json={"project_id": str(project_id)},
-                    headers=headers, timeout=30,
+                    f"https://api.telegram.org/bot{_token_bd}/sendMessage",
+                    json={"chat_id": chat_id, "message_thread_id": thread_id,
+                          "text": f"\u2705 Azione completata. Rimangono {remaining} azioni da completare.\nQuando tutte sono completate, lo smoke test partira' in automatico."},
+                    timeout=10,
                 )
-            except Exception as e:
-                logger.warning(f"[BLOCKER_RESUME] {e}")
-        if AGENTS_RUNNER_URL:
-            threading.Thread(target=_resume_pipeline, daemon=True).start()
+        else:
+            # Tutti i blockers completati → auto-start smoke test
+            try:
+                supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
+            except Exception:
+                pass
+            if _token_bd and thread_id:
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_token_bd}/sendMessage",
+                    json={"chat_id": chat_id, "message_thread_id": thread_id,
+                          "text": "\u2705 Tutte le azioni completate! Avvio smoke test automaticamente..."},
+                    timeout=10,
+                )
+            # Chiama /smoke/check-start per auto-avvio
+            def _autostart_smoke():
+                try:
+                    oidc_token = get_oidc_token(AGENTS_RUNNER_URL) if AGENTS_RUNNER_URL else None
+                    headers = {"Authorization": f"Bearer {oidc_token}"} if oidc_token else {}
+                    http_requests.post(
+                        f"{AGENTS_RUNNER_URL}/smoke/check-start",
+                        json={"project_id": project_id},
+                        headers=headers, timeout=60,
+                    )
+                except Exception as e:
+                    logger.warning(f"[BLOCKER_AUTOSTART] {e}")
+            if AGENTS_RUNNER_URL:
+                threading.Thread(target=_autostart_smoke, daemon=True).start()
 
     # Blocker: Mirco chiede aiuto
     elif data.startswith("blocker_help:"):
