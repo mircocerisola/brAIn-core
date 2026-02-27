@@ -144,6 +144,70 @@ class CMO(BaseChief):
 
         return text
 
+
+    def _daily_report_emoji(self) -> str:
+        return "\U0001f4e2"
+
+    def _get_daily_report_sections(self, since_24h: str) -> list:
+        """CMO: prospect nuovi, smoke test events, brand activity — ultime 24h."""
+        sections = []
+
+        # 1. Nuovi prospect nelle ultime 24h
+        try:
+            r = supabase.table("smoke_test_prospects").select("id,name,channel,status") \
+                .gte("created_at", since_24h).execute()
+            if r.data:
+                n = len(r.data)
+                by_channel = {}
+                for p in r.data:
+                    ch = p.get("channel", "?")
+                    by_channel[ch] = by_channel.get(ch, 0) + 1
+                ch_lines = "\n".join(f"  {ch}: {cnt}" for ch, cnt in by_channel.items())
+                sections.append(f"\U0001f465 NUOVI PROSPECT ({n})\n{ch_lines}")
+        except Exception as e:
+            logger.warning("[CMO] prospects error: %s", e)
+
+        # 2. Smoke test events nelle ultime 24h
+        try:
+            r = supabase.table("smoke_test_events").select("event_type,project_id,created_at") \
+                .gte("created_at", since_24h).order("created_at", desc=True).limit(10).execute()
+            if r.data:
+                ev_lines = "\n".join(
+                    f"  {ev.get('event_type','?')} (proj #{ev.get('project_id','?')})"
+                    for ev in r.data[:5]
+                )
+                sections.append(f"\U0001f52c SMOKE TEST EVENTS ({len(r.data)})\n{ev_lines}")
+        except Exception as e:
+            logger.warning("[CMO] smoke_test_events error: %s", e)
+
+        # 3. Marketing reports nelle ultime 24h
+        try:
+            r = supabase.table("marketing_reports").select("project_id,channel,recorded_at") \
+                .gte("recorded_at", since_24h).order("recorded_at", desc=True).limit(5).execute()
+            if r.data:
+                rep_lines = "\n".join(
+                    f"  proj #{row.get('project_id','?')} | {row.get('channel','?')}"
+                    for row in r.data
+                )
+                sections.append(f"\U0001f4c8 REPORT MARKETING ({len(r.data)})\n{rep_lines}")
+        except Exception as e:
+            logger.warning("[CMO] marketing_reports error: %s", e)
+
+        # 4. Brand assets creati nelle ultime 24h
+        try:
+            r = supabase.table("brand_assets").select("brand_name,project_id,status") \
+                .gte("created_at", since_24h).execute()
+            if r.data:
+                ba_lines = "\n".join(
+                    f"  {row.get('brand_name','?')} (proj #{row.get('project_id','?')})"
+                    for row in r.data[:5]
+                )
+                sections.append(f"\U0001f3a8 BRAND CREATI ({len(r.data)})\n{ba_lines}")
+        except Exception as e:
+            logger.warning("[CMO] brand_assets error: %s", e)
+
+        return sections
+
     def _send_report_to_topic(self, text):
         """Invia report al Forum Topic #marketing."""
         if not TELEGRAM_BOT_TOKEN or not text:
