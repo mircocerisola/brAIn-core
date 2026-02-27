@@ -251,6 +251,27 @@ class CTO(BaseChief):
             logger.warning("[CTO] send_codeaction_card error: %s", e)
 
     # ============================================================
+    # MESSAGGIO AGGIORNAMENTO — formato fisso 4 righe
+    # ============================================================
+
+    @staticmethod
+    def build_update_message(elapsed, output_log):
+        """Costruisce messaggio aggiornamento: esattamente 4 righe."""
+        sep = "\u2500" * 15
+        lines = output_log.split("\n") if output_log else []
+        clean = [l.strip() for l in lines
+                 if l.strip() and "--dangerously-skip-permissions" not in l]
+        last_line = clean[-1] if clean else "In esecuzione \u2014 nessun output ancora"
+        if len(last_line) > 200:
+            last_line = last_line[:197] + "..."
+        return (
+            "\u23f3 Aggiornamento \u2014 " + str(elapsed) + " min\n"
+            + sep + "\n"
+            + last_line + "\n"
+            + sep
+        )
+
+    # ============================================================
     # ESECUZIONE VIA CLOUD RUN JOB — trigger + monitor da DB
     # ============================================================
 
@@ -309,7 +330,6 @@ class CTO(BaseChief):
 
         def _monitor():
             _elapsed = 0
-            _last_log_len = 0
             sep = "\u2500" * 15
 
             while True:
@@ -365,26 +385,14 @@ class CTO(BaseChief):
                             + sep)
                     break
 
-                # Ancora in esecuzione — aggiornamento con output reale
-                log_lines = output_log.split("\n") if output_log else []
-                clean = [l for l in log_lines
-                         if "--dangerously-skip-permissions" not in l]
-                new_content = len(output_log) > _last_log_len
-                _last_log_len = len(output_log)
-
-                last_3 = "\n".join(clean[-3:])[:500] if clean else "In attesa output..."
-
+                # Ancora in esecuzione — aggiornamento 4 righe
                 markup = {"inline_keyboard": [[
                     {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
                     {"text": "\U0001f6d1 Interrompi", "callback_data": "code_interrupt:" + str(_tid)},
                 ]]}
 
-                self._send_telegram(_cid, _thid,
-                    "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
-                    + sep + "\n"
-                    + last_3 + "\n"
-                    + sep,
-                    reply_markup=markup)
+                msg = CTO.build_update_message(_elapsed, output_log)
+                self._send_telegram(_cid, _thid, msg, reply_markup=markup)
 
         threading.Thread(target=_monitor, daemon=True).start()
         logger.info("[CTO] Monitor avviato per task #%d", task_id)

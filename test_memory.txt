@@ -1,0 +1,12 @@
+TEST 2 -- MEMORY.md struttura e limite
+==================================================
+Sotto 500 righe: PASS (167 righe)
+Sezione Regole presente: PASS
+Limite 500 documentato: PASS
+Regola condensazione: PASS
+Indice presente: PASS
+Almeno 3 versioni dettagliate: PASS (12 trovate)
+Nessun riferimento vecchio limite 200: PASS
+
+==================================================
+RISULTATO FINALE: TUTTI PASS

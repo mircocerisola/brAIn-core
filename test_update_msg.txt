@@ -1,0 +1,10 @@
+TEST 1 -- build_update_message() max 5 righe
+==================================================
+Output vuoto -> max 5 righe: PASS (count=4)
+Output con dati -> max 5 righe: PASS (count=4)
+Prompt filtrato + max 5 righe: PASS (count=4)
+Riga lunga troncata + max 5 righe: PASS (count=4)
+Nessun min ripetuto: PASS (count=1)
+
+==================================================
+RISULTATO FINALE: TUTTI PASS
