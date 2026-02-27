@@ -316,6 +316,8 @@ def create_build_blocker(project_id: int, problem: str, action: str,
         r = supabase.table("action_queue").insert({
             "user_id": mirco_uid,
             "action_type": "build_blocker",
+            "title": problem[:200],
+            "description": action[:500],
             "project_id": project_id,
             "payload": {"problem": problem, "action": action, "time_estimate": time_estimate},
             "status": "pending",
