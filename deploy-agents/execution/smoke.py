@@ -59,20 +59,6 @@ def run_smoke_design(solution_id):
 
     logger.info("[SMOKE_DESIGN] Avvio per solution_id=%s", solution_id)
 
-    # Anti-duplicazione
-    try:
-        existing = supabase.table("projects").select("id,status,pipeline_step").eq("bos_id", int(solution_id)).execute()
-        if existing.data:
-            proj = existing.data[0]
-            if proj.get("status") not in ("new", "init", "failed"):
-                logger.info("[SMOKE_DESIGN] solution %s gia' processata, skip", solution_id)
-                return {"status": "skipped", "reason": "progetto gia' in corso"}
-            project_id = proj["id"]
-            design_smoke_test(project_id)
-            return {"status": "ok", "project_id": project_id, "reused": True}
-    except Exception as e:
-        logger.warning("[SMOKE_DESIGN] Duplicate check: %s", e)
-
     # Carica soluzione
     try:
         sol = supabase.table("solutions").select("*").eq("id", int(solution_id)).execute()
@@ -85,6 +71,34 @@ def run_smoke_design(solution_id):
     name = solution.get("title", "Project " + str(solution_id))[:80]
     slug = _slugify(name)
     bos_score = float(solution.get("bos_score") or 0)
+
+    # Anti-duplicazione: riusa progetto esistente
+    try:
+        existing = supabase.table("projects").select("id,status,pipeline_step").eq("bos_id", int(solution_id)).execute()
+        if existing.data:
+            proj = existing.data[0]
+            if proj.get("status") not in ("new", "init", "failed"):
+                logger.info("[SMOKE_DESIGN] solution %s gia' processata, skip", solution_id)
+                return {"status": "skipped", "reason": "progetto gia' in corso"}
+            project_id = proj["id"]
+            # Genera brand+method se mancanti e aggiorna progetto
+            brand = _generate_brand_identity(solution, slug)
+            method = select_smoke_test_method(solution)
+            supabase.table("projects").update({
+                "brand_name": brand["brand_name"],
+                "brand_email": brand["brand_email"],
+                "brand_domain": brand["brand_domain"],
+                "brand_linkedin": brand["brand_linkedin"],
+                "brand_landing_url": brand["brand_landing_url"],
+                "smoke_test_method": method,
+                "status": "smoke_test_pending",
+                "pipeline_locked": False,
+            }).eq("id", project_id).execute()
+            logger.info("[SMOKE_DESIGN] Riuso progetto id=%s, brand=%s method=%s", project_id, brand["brand_name"], method)
+            result = design_smoke_test(project_id)
+            return {"status": "ok", "project_id": project_id, "reused": True, "design": result}
+    except Exception as e:
+        logger.warning("[SMOKE_DESIGN] Duplicate check: %s", e)
 
     # Genera brand identity anonima
     brand = _generate_brand_identity(solution, slug)
@@ -265,7 +279,7 @@ def _run_cold_outreach(project_id, project, solution, smoke_id):
     plan = json.loads(project.get("smoke_test_plan") or "{}")
     target_desc = plan.get("target_description", "")
     if not target_desc:
-        target_desc = solution.get("target_audience", solution.get("title", name))
+        target_desc = solution.get("customer_segment") or solution.get("title") or name
 
     # Trova prospect via Perplexity
     prospects = _find_prospects_perplexity(target_desc, 50)

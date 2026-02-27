@@ -358,11 +358,11 @@ def design_smoke_test(project_id: int) -> dict:
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
-    name = project.get("name", "Progetto " + str(project_id))
-    brand_name = project.get("brand_name", name)
-    brand_email = project.get("brand_email", "")
-    brand_domain = project.get("brand_domain", "")
-    method = project.get("smoke_test_method", "cold_outreach")
+    name = project.get("name") or ("Progetto " + str(project_id))
+    brand_name = project.get("brand_name") or name
+    brand_email = project.get("brand_email") or ""
+    brand_domain = project.get("brand_domain") or ""
+    method = project.get("smoke_test_method") or "cold_outreach"
     spec_md = (project.get("spec_md") or "")[:3000]
     topic_id = project.get("topic_id")
     group_id = _get_group_id()
@@ -373,14 +373,14 @@ def design_smoke_test(project_id: int) -> dict:
     if bos_id:
         try:
             sol = supabase.table("solutions").select(
-                "title,description,sector,target_audience"
+                "title,description,sector,customer_segment"
             ).eq("id", bos_id).execute()
             if sol.data:
                 s = sol.data[0]
                 sol_title = s.get("title", "")
                 sol_desc = (s.get("description") or "")[:500]
                 sol_sector = s.get("sector", "")
-                sol_target = s.get("target_audience", "")
+                sol_target = s.get("customer_segment") or ""
                 solution_ctx = (
                     "Soluzione: " + sol_title + "\n"
                     "Descrizione: " + sol_desc + "\n"

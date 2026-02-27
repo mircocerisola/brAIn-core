@@ -6,7 +6,7 @@ from core.config import supabase, logger
 def select_smoke_test_method(solution):
     """Seleziona il metodo smoke test ottimale in base a settore/audience."""
     sector = (solution.get("sector") or "").lower()
-    audience = (solution.get("target_audience") or "").lower()
+    audience = (solution.get("customer_segment") or "").lower()
     solution_type = (solution.get("solution_type") or solution.get("sub_sector") or "").lower()
     market_size = solution.get("market_size") or solution.get("affected_population") or 0
     if isinstance(market_size, str):

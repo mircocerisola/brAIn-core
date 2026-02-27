@@ -212,12 +212,12 @@ SCANNER_WEIGHTS = {
 #   feasibility_score (FE): sum(val * weight), sum(weights)=1.0 → 0-1
 #   bos_score: pq*0.30 + sq*0.30 + fe*0.40 → 0-1
 PIPELINE_THRESHOLDS = {
-    "problema": 0.65,       # weighted_score minimo per auto-approvare il problema
-    "soluzione": 0.70,      # overall_score minimo della migliore soluzione per proseguire
-    "feasibility": 0.70,    # feasibility_score FE minimo per proseguire
-    "bos": 0.80,            # BOS minimo per notificare Mirco (approve_bos action)
+    "problema": 0.55,       # weighted_score minimo per auto-approvare il problema
+    "soluzione": 0.50,      # overall_score minimo della migliore soluzione per proseguire
+    "feasibility": 0.45,    # feasibility_score FE minimo per proseguire
+    "bos": 0.55,            # BOS minimo per notificare Mirco (approve_bos action)
 }
-# Target: solo il 10% dei BOS generati deve superare soglia_bos.
+# Le soglie DB (pipeline_thresholds) sovrascrivono questi default.
 # Le soglie si aggiornano automaticamente ogni lunedi via /thresholds/weekly.
 
 MIN_SCORE_THRESHOLD = PIPELINE_THRESHOLDS["problema"]
