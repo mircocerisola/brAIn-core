@@ -19,6 +19,14 @@ class BaseAgent:
     default_model: str = "claude-haiku-4-5-20251001"
     max_retries: int = 3
     retry_delay: float = 2.0
+    _current_project_id: Optional[int] = None
+
+    # Pricing per million tokens (input_rate, output_rate)
+    _PRICING = {
+        "claude-sonnet-4-6": (3.0, 15.0),
+        "claude-haiku-4-5-20251001": (0.80, 4.0),
+        "claude-opus-4-6": (15.0, 75.0),
+    }
 
     # Circuit breaker
     _failure_count: int = 0
@@ -78,13 +86,45 @@ class BaseAgent:
         for attempt in range(self.max_retries):
             try:
                 resp = claude.messages.create(**kwargs)
-                return resp.content[0].text if resp.content else ""
+                text = resp.content[0].text if resp.content else ""
+                self._log_api_call(mdl, resp.usage)
+                return text
             except Exception as e:
                 if attempt < self.max_retries - 1:
                     time.sleep(self.retry_delay * (attempt + 1))
                 else:
                     raise
         return ""
+
+    def _log_api_call(self, model, usage):
+        """Log automatico chiamata API con tokens e costo calcolato."""
+        if not usage:
+            return
+        tokens_in = getattr(usage, "input_tokens", 0)
+        tokens_out = getattr(usage, "output_tokens", 0)
+        cost = self._calculate_cost(model, tokens_in, tokens_out)
+        try:
+            row = {
+                "agent_id": self.name,
+                "action": "api_call",
+                "model_used": model,
+                "tokens_input": tokens_in,
+                "tokens_output": tokens_out,
+                "cost_usd": round(cost, 8),
+                "status": "success",
+                "created_at": now_rome().isoformat(),
+            }
+            if self._current_project_id:
+                row["project_id"] = self._current_project_id
+            supabase.table("agent_logs").insert(row).execute()
+        except Exception as e:
+            logger.warning("[%s] API log failed: %s", self.name, e)
+
+    @staticmethod
+    def _calculate_cost(model, tokens_in, tokens_out):
+        """Calcola costo USD da tokens. Default: pricing Sonnet."""
+        rates = BaseAgent._PRICING.get(model, (3.0, 15.0))
+        return (tokens_in * rates[0] + tokens_out * rates[1]) / 1_000_000
 
     def notify_mirco(self, message: str, level: str = "info") -> None:
         """Invia notifica Telegram a Mirco."""
@@ -135,8 +175,8 @@ class BaseAgent:
                 "input_summary": input_summary[:500],
                 "output_summary": output_summary[:500],
                 "model_used": model_used,
-                "tokens_in": tokens_in,
-                "tokens_out": tokens_out,
+                "tokens_input": tokens_in,
+                "tokens_output": tokens_out,
                 "cost_usd": cost,
                 "duration_ms": duration_ms,
                 "status": status,
@@ -144,6 +184,8 @@ class BaseAgent:
             }
             if error:
                 row["error"] = error[:500]
+            if self._current_project_id:
+                row["project_id"] = self._current_project_id
             supabase.table("agent_logs").insert(row).execute()
         except Exception as e:
-            logger.warning(f"[{self.name}] Log failed: {e}")
+            logger.warning("[%s] Log failed: %s", self.name, e)
