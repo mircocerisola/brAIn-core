@@ -645,53 +645,34 @@ def design_smoke_test(project_id: int) -> dict:
     # Avanza pipeline
     advance_pipeline_step(project_id, "smoke_test_designing")
 
-    # ── 7. Costruisci card COMPLETA ──
-    blockers_text = ""
-    if blockers:
-        blockers_text = "\nAZIONI RICHIESTE DA MIRCO:\n"
-        for i, b in enumerate(blockers, 1):
-            blockers_text += str(i) + ". " + b + "\n"
-
-    budget_line = ""
-    if budget_eur and budget_eur > 0:
-        budget_line = "Budget stimato: EUR" + str(budget_eur) + "\n"
+    # ── 7. Costruisci card COMPATTA (max 5 righe) ──
+    budget_str = "EUR" + str(budget_eur) if budget_eur and budget_eur > 0 else "gratuito"
+    blockers_count = len(blockers)
+    short_target = (kpi_data.get("target_description") or target_desc)[:60]
 
     card = (
-        "PIANO SMOKE TEST — " + brand_name + "\n"
-        + SEP + "\n"
-        "Metodo: " + method_label + "\n"
-        "Target: " + (kpi_data.get("target_description") or target_desc) + "\n"
-        "Settore: " + (sol_sector or "non specificato") + "\n\n"
-        "PROSPECT TROVATI: " + str(prospects_count) + "/50\n"
-        + prospect_sample_lines + "\n"
+        "\U0001f52c SMOKE TEST \u2014 " + brand_name + "\n"
+        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        "\U0001f4cb " + sol_title[:60] + "\n"
+        "\U0001f465 " + str(prospects_count) + " prospect | \u23f1\ufe0f " + str(duration_days) + " giorni | \U0001f4b6 " + budget_str + "\n"
+        "\U0001f3af KPI: " + kpi_success[:80] + "\n"
     )
-    if email_preview:
-        card += "SEQUENZA EMAIL (" + str(len(email_sequence)) + " touchpoint):\n" + email_preview + "\n"
-    if landing_status:
-        card += "LANDING PAGE: " + landing_status + "\n"
-    if ads_summary:
-        card += "ADS: " + ads_summary + "\n"
-    card += (
-        "\nDurata: " + str(duration_days) + " giorni\n"
-        + budget_line
-        + "KPI successo: " + kpi_success + "\n"
-        "KPI fallimento: " + kpi_failure + "\n"
-        + blockers_text
-        + SEP
-    )
+    if blockers_count > 0:
+        card += "\u26a0\ufe0f Serve da te: " + str(blockers_count) + " azione/i prima di partire\n"
+    card += "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
 
     reply_markup = {
         "inline_keyboard": [
             [
-                {"text": "Avvia smoke test",
+                {"text": "\u2705 Avvia",
                  "callback_data": "smoke_design_approve:" + str(project_id)},
-                {"text": "Modifica piano",
-                 "callback_data": "smoke_design_modify:" + str(project_id)},
+                {"text": "\U0001f4c4 Dettaglio",
+                 "callback_data": "smoke_detail:" + str(project_id)},
             ],
             [
-                {"text": "Cambia metodo",
-                 "callback_data": "smoke_design_method:" + str(project_id)},
-                {"text": "Archivia idea",
+                {"text": "\u270f\ufe0f Modifica",
+                 "callback_data": "smoke_design_modify:" + str(project_id)},
+                {"text": "\u274c Archivia",
                  "callback_data": "smoke_design_archive:" + str(project_id)},
             ],
         ]

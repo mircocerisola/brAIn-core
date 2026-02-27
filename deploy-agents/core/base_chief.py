@@ -914,6 +914,68 @@ class BaseChief(BaseAgent):
 
 
 # ============================================================
+# FIX 5 v5.11 — COLLABORAZIONE INTER-AGENTE AUTONOMA
+# ============================================================
+
+def agent_to_agent_call(from_chief_id: str, to_chief_id: str,
+                        task: str, context: str = "") -> Dict[str, Any]:
+    """
+    Chiamata diretta tra Chief. Mirco non vede questi scambi.
+    from_chief_id: es. "cso"
+    to_chief_id: es. "cto", "cmo"
+    task: descrizione del task
+    context: contesto aggiuntivo
+    Ritorna: {status, result, from, to}
+    """
+    try:
+        from csuite import _chiefs
+        chief_map = {
+            "cso": "strategy", "cfo": "finance", "cmo": "marketing",
+            "cto": "tech", "coo": "ops", "clo": "legal", "cpeo": "people",
+        }
+        dest_domain = chief_map.get(to_chief_id)
+        target = _chiefs.get(dest_domain) if dest_domain else None
+    except Exception:
+        target = None
+
+    if not target:
+        logger.warning(f"[INTER_AGENT] Chief '{to_chief_id}' non trovato")
+        return {"status": "error", "error": f"Chief {to_chief_id} non trovato"}
+
+    logger.info(f"[INTER_AGENT] {from_chief_id} -> {to_chief_id}: {task[:60]}")
+
+    try:
+        # Se la destinazione e' il CTO e il task e' codice → genera ed esegui
+        if to_chief_id == "cto" and hasattr(target, "generate_and_execute_prompt"):
+            result = target.generate_and_execute_prompt(task, context, requires_approval=True)
+        else:
+            # Chief destinazione risponde come domanda
+            result_text = target.answer_question(
+                task, user_context=context,
+            )
+            result = {"status": "ok", "response": result_text}
+    except Exception as e:
+        logger.error(f"[INTER_AGENT] {from_chief_id} -> {to_chief_id} error: {e}")
+        result = {"status": "error", "error": str(e)}
+
+    # Log inter-agent call
+    try:
+        supabase.table("chief_decisions").insert({
+            "chief_domain": chief_map.get(from_chief_id, "general"),
+            "decision_type": f"inter_agent_{from_chief_id}_to_{to_chief_id}",
+            "summary": f"{from_chief_id} -> {to_chief_id}: {task[:200]}",
+            "full_text": json.dumps(result, ensure_ascii=False, default=str)[:2000],
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+    except Exception:
+        pass
+
+    result["from"] = from_chief_id
+    result["to"] = to_chief_id
+    return result
+
+
+# ============================================================
 # HEALTH CHECK — funzione standalone, invia a #technology
 # ============================================================
 

@@ -3269,6 +3269,101 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if AGENTS_RUNNER_URL:
             threading.Thread(target=_run_smoke_design_approved, daemon=True).start()
 
+    elif data.startswith("smoke_detail:"):
+        project_id = int(data.split(":")[1])
+        await query.answer("Invio dettaglio...")
+        def _send_smoke_detail():
+            try:
+                _sd_r = supabase.table("projects").select(
+                    "name,brand_name,smoke_test_plan,smoke_test_kpi,smoke_test_method"
+                ).eq("id", project_id).execute()
+                if not _sd_r.data:
+                    return
+                _sd_p = _sd_r.data[0]
+                _sd_plan = json.loads(_sd_p.get("smoke_test_plan") or "{}")
+                _sd_kpi = json.loads(_sd_p.get("smoke_test_kpi") or "{}")
+                _sd_brand = _sd_p.get("brand_name") or _sd_p.get("name", "?")
+                _sd_method = _sd_plan.get("method", _sd_p.get("smoke_test_method", "?"))
+                _sd_sep = "\u2501" * 15
+                # Sezione prospect
+                _sd_prospects = _sd_plan.get("prospects_sample", [])
+                _sd_plines = ""
+                for _sdp in _sd_prospects[:10]:
+                    _sdp_company = _sdp.get("company", "")
+                    _sdp_name = _sdp.get("name", "")
+                    _sdp_contact = _sdp.get("contact", "")
+                    _sd_plines += "- " + _sdp_company
+                    if _sdp_name:
+                        _sd_plines += " | " + _sdp_name
+                    if _sdp_contact:
+                        _sd_plines += " | " + _sdp_contact
+                    _sd_plines += "\n"
+                _sd_pc = _sd_plan.get("prospects_count", 0)
+                if _sd_pc > 10:
+                    _sd_plines += "  [+ " + str(_sd_pc - 10) + " altri]\n"
+                # Email
+                _sd_emails = _sd_plan.get("email_sequence", [])
+                _sd_email_txt = ""
+                for _sde in _sd_emails[:3]:
+                    _sd_email_txt += "- Giorno " + str(_sde.get("day", "?")) + ": " + _sde.get("subject", "") + "\n"
+                # Blockers
+                _sd_blockers = _sd_plan.get("blockers", [])
+                _sd_blk_txt = ""
+                if _sd_blockers:
+                    _sd_blk_txt = "\nAZIONI RICHIESTE:\n"
+                    for _sdi, _sdb in enumerate(_sd_blockers, 1):
+                        _sd_blk_txt += str(_sdi) + ". " + _sdb + "\n"
+                    _sd_blk_details = _sd_plan.get("blocker_details", [])
+                    for _sdbd in _sd_blk_details:
+                        _sd_blk_txt += "\n" + _sdbd.get("title", "") + " (stima: " + _sdbd.get("time", "?") + ")\n"
+                        _sd_blk_txt += _sdbd.get("steps", "") + "\n"
+                # Landing
+                _sd_landing = ""
+                if _sd_plan.get("landing_html_generated"):
+                    _sd_landing = "LANDING PAGE: HTML generata, pronta per pubblicazione\n"
+                # Ads
+                _sd_ads = ""
+                _sd_ads_plan = _sd_plan.get("ads_plan")
+                if _sd_ads_plan:
+                    _sd_ads = "ADS: " + ", ".join(_sd_ads_plan.get("channels", [])) + " EUR" + str(_sd_ads_plan.get("budget_eur", 0)) + "\n"
+                # Doc completo
+                _sd_doc = (
+                    "DETTAGLIO SMOKE TEST \u2014 " + _sd_brand + "\n"
+                    + _sd_sep + "\n"
+                    "Metodo: " + _sd_method + "\n"
+                    "Durata: " + str(_sd_plan.get("duration_days", "?")) + " giorni\n"
+                    "Budget: " + ("EUR" + str(_sd_plan.get("budget_eur", 0)) if _sd_plan.get("budget_eur") else "gratuito") + "\n\n"
+                    "KPI successo: " + _sd_kpi.get("success", "N/A") + "\n"
+                    "KPI fallimento: " + _sd_kpi.get("failure", "N/A") + "\n\n"
+                    "PROSPECT (" + str(_sd_pc) + "):\n"
+                    + _sd_plines + "\n"
+                )
+                if _sd_email_txt:
+                    _sd_doc += "EMAIL SEQUENCE:\n" + _sd_email_txt + "\n"
+                if _sd_landing:
+                    _sd_doc += _sd_landing + "\n"
+                if _sd_ads:
+                    _sd_doc += _sd_ads + "\n"
+                _sd_doc += _sd_blk_txt + "\n"
+                _sd_doc += "TIMELINE:\n"
+                _sd_doc += "- Giorno 0: completa azioni richieste\n"
+                _dur = _sd_plan.get("duration_days", 7)
+                _sd_doc += "- Giorno 1-" + str(_dur) + ": outreach automatico\n"
+                _sd_doc += "- Giorno " + str(_dur + 1) + ": analisi risultati + raccomandazione GO/NO-GO\n"
+                _sd_doc += _sd_sep
+                _sd_token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if _sd_token:
+                    _sd_payload = {"chat_id": chat_id, "text": _sd_doc[:4096]}
+                    if thread_id:
+                        _sd_payload["message_thread_id"] = thread_id
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_sd_token}/sendMessage",
+                        json=_sd_payload, timeout=15,
+                    )
+            except Exception as e:
+                logger.error(f"[SMOKE_DETAIL] {e}")
+        threading.Thread(target=_send_smoke_detail, daemon=True).start()
+
     elif data.startswith("smoke_design_modify:"):
         project_id = int(data.split(":")[1])
         await query.answer()
