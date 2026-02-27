@@ -1,13 +1,14 @@
 """CTO — Chief Technology Officer. Dominio: infrastruttura, codice, deploy, sicurezza tecnica.
-v5.12: pattern matching preciso (min 200 chars) + salva prompt in code_tasks + pin in #technology.
-       Rimosso execute_in_cloud — Claude Code e' un tool locale, non puo' girare in cloud.
+v5.13: CODEACTION card singola con [Approva][Dettaglio]. Zero duplicati.
+       Prompt mai nel messaggio principale — solo nella vista dettaglio.
+       Dedup: se code_task esiste gia' per stesso titolo, aggiorna senza re-inviare card.
 """
 import json
 import re
 import os
 import requests as _requests
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from core.base_chief import BaseChief
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
@@ -15,7 +16,7 @@ from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 
-# Pattern per "manda questo prompt:", "esegui questo:", "incolla in code:", "lancia:"
+# Pattern per "manda questo prompt:", "esegui questo:", "incolla in code:", "lancia questo:"
 # NOTA: "prompt:" da solo e' troppo generico — rimosso per evitare falsi positivi
 _PROMPT_PATTERN = re.compile(
     r'(?:manda questo prompt|esegui questo|incolla in code|lancia questo)\s*[:]\s*(.+)',
@@ -86,14 +87,15 @@ class CTO(BaseChief):
         return anomalies
 
     # ============================================================
-    # PATTERN DETECTION: "manda questo prompt:" (min 200 chars)
+    # PATTERN DETECTION + CODEACTION CARD (v5.13)
     # ============================================================
 
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
                         project_scope_id=None, recent_messages=None):
         """Override: intercetta pattern 'manda questo prompt:' PRIMA di qualsiasi logica.
-        Requisito: almeno 200 caratteri dopo i due punti. Se meno → risponde prompt troppo corto.
+        Requisito: almeno 200 caratteri dopo i due punti. Se meno -> risponde prompt troppo corto.
+        Se OK -> salva in code_tasks + invia CODEACTION card con bottoni. Zero prompt nel messaggio.
         """
         match = _PROMPT_PATTERN.search(question)
         if match:
@@ -105,9 +107,9 @@ class CTO(BaseChief):
                     "Mandami il contenuto completo del prompt (minimo 200 caratteri dopo i due punti)."
                 )
             logger.info("[CTO] Pattern 'manda prompt' rilevato (%d chars)", len(raw_prompt))
-            return self._save_and_deliver_prompt(raw_prompt)
+            return self._save_and_send_card(raw_prompt)
 
-        # Nessun pattern → risposta Chief normale
+        # Nessun pattern -> risposta Chief normale
         return super().answer_question(
             question, user_context=user_context,
             project_context=project_context,
@@ -116,42 +118,107 @@ class CTO(BaseChief):
             recent_messages=recent_messages,
         )
 
-    def _save_and_deliver_prompt(self, prompt_text: str) -> str:
-        """Salva il prompt in code_tasks e lo restituisce formattato per Claude Code."""
-        # 1. Salva in code_tasks
+    # ---- SAVE + CARD ----
+
+    def _save_and_send_card(self, prompt_text: str) -> str:
+        """Salva in code_tasks (con dedup) e invia CODEACTION card. Return marker per skip."""
+        title_short = prompt_text[:100]
+
+        # 1. Dedup — cerca task esistente con stesso titolo nell'ultima ora
+        existing_id = self._find_existing_task(title_short)
+
+        if existing_id:
+            # Aggiorna prompt nel task esistente, NON re-inviare card
+            try:
+                supabase.table("code_tasks").update({
+                    "prompt": prompt_text,
+                    "sandbox_check": json.dumps({
+                        "source": "cto_direct_update",
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                    }),
+                }).eq("id", existing_id).execute()
+                logger.info("[CTO] Dedup: aggiornato code_task #%d", existing_id)
+            except Exception as e:
+                logger.warning("[CTO] dedup update error: %s", e)
+            return "<<CODEACTION_SENT>>"
+
+        # 2. Crea nuovo code_task
         task_id = None
         try:
             result = supabase.table("code_tasks").insert({
-                "title": prompt_text[:100],
+                "title": title_short,
                 "prompt": prompt_text,
                 "requested_by": "cto",
-                "status": "ready",
+                "status": "pending_approval",
                 "sandbox_passed": True,
-                "sandbox_check": json.dumps({"source": "cto_direct", "checked_at": datetime.now(timezone.utc).isoformat()}),
+                "sandbox_check": json.dumps({
+                    "source": "cto_direct",
+                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                }),
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }).execute()
             if result.data:
                 task_id = result.data[0].get("id")
         except Exception as e:
-            logger.warning(f"[CTO] code_tasks insert error: {e}")
+            logger.warning("[CTO] code_tasks insert error: %s", e)
+            return "Errore salvataggio code_task."
 
-        # 2. Pin nel topic #technology
-        self._pin_prompt_in_topic(prompt_text, task_id)
+        if not task_id:
+            return "Errore: code_task non creato."
 
-        # 3. Restituisci prompt formattato
-        sep = "\u2501" * 15
-        response = (
-            "\u2705 Prompt pronto (code_task #" + str(task_id or "?") + ").\n"
-            "Incolla questo in Claude Code sul PC:\n"
-            + sep + "\n"
-            + prompt_text[:3500] + "\n"
-            + sep
-        )
-        return response
+        # 3. Estrai metadata dal prompt
+        meta = self._extract_prompt_meta(prompt_text)
 
-    def _pin_prompt_in_topic(self, prompt_text: str, task_id: Optional[int] = None) -> None:
-        """Invia e pinna il prompt nel topic #technology."""
-        if not TELEGRAM_BOT_TOKEN:
+        # 4. Invia CODEACTION card al topic #technology
+        self._send_codeaction_card(task_id, meta)
+
+        return "<<CODEACTION_SENT>>"
+
+    def _find_existing_task(self, title_short: str) -> Optional[int]:
+        """Cerca code_task esistente per dedup (stesso titolo, ultimo 1h, pending/ready)."""
+        try:
+            hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            r = supabase.table("code_tasks").select("id") \
+                .eq("title", title_short) \
+                .gte("created_at", hour_ago) \
+                .limit(1).execute()
+            if r.data:
+                status_check = supabase.table("code_tasks").select("id,status") \
+                    .eq("id", r.data[0]["id"]).execute()
+                if status_check.data and status_check.data[0].get("status") in ("pending_approval", "ready"):
+                    return r.data[0]["id"]
+        except Exception as e:
+            logger.warning("[CTO] dedup check error: %s", e)
+        return None
+
+    def _extract_prompt_meta(self, prompt_text: str) -> Dict:
+        """Estrai titolo, file e stima dal prompt con regex (veloce, zero API call)."""
+        # Title: prima riga significativa (>10 chars, non "Esegui con --")
+        title = "Azione codice"
+        for line in prompt_text.strip().split('\n'):
+            clean = line.strip().rstrip('.').strip()
+            if clean and len(clean) > 10 and not clean.lower().startswith("esegui con"):
+                title = clean[:60]
+                break
+
+        # File: cerca path .py nel prompt
+        file_matches = re.findall(r'[\w\-/]+\.py', prompt_text)
+        main_file = file_matches[0] if file_matches else "da determinare"
+
+        # Time: stima basata su lunghezza prompt
+        chars = len(prompt_text)
+        if chars < 500:
+            time_est = 2
+        elif chars < 2000:
+            time_est = 5
+        else:
+            time_est = 10
+
+        return {"title": title, "main_file": main_file, "time_minutes": time_est}
+
+    def _send_codeaction_card(self, task_id: int, meta: Dict) -> None:
+        """Invia CODEACTION card al topic #technology con inline keyboard."""
+        if not TELEGRAM_BOT_TOKEN or not task_id:
             return
         try:
             topic_r = supabase.table("org_config").select("value").eq("key", "chief_topic_cto").execute()
@@ -161,29 +228,37 @@ class CTO(BaseChief):
             topic_id = int(topic_r.data[0]["value"])
             group_id = int(group_r.data[0]["value"])
 
-            tag = "#" + str(task_id) if task_id else ""
-            text = (
-                "\U0001f4cc PROMPT PRONTO " + tag + "\n"
-                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                + prompt_text[:3800] + "\n"
-                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+            title = meta.get("title", "Azione codice")
+            main_file = meta.get("main_file", "da determinare")
+            time_est = meta.get("time_minutes", 5)
+
+            sep = "\u2500" * 15
+            card_text = (
+                "\u26a1 CODEACTION \u2014 CTO\n"
+                + sep + "\n"
+                + "\U0001f4cb " + str(title) + "\n"
+                + "\U0001f4c1 File: " + str(main_file) + "\n"
+                + "\u23f1\ufe0f Stima: " + str(time_est) + " min\n"
+                + sep
             )
-            send_resp = _requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+            markup = {"inline_keyboard": [[
+                {"text": "\u2705 Approva", "callback_data": "code_approve:" + str(task_id)},
+                {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(task_id)},
+            ]]}
+
+            _requests.post(
+                "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                json={
+                    "chat_id": group_id,
+                    "message_thread_id": topic_id,
+                    "text": card_text,
+                    "reply_markup": markup,
+                },
                 timeout=10,
             )
-            # Pin il messaggio
-            if send_resp.status_code == 200:
-                msg_id = send_resp.json().get("result", {}).get("message_id")
-                if msg_id:
-                    _requests.post(
-                        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/pinChatMessage",
-                        json={"chat_id": group_id, "message_id": msg_id, "disable_notification": True},
-                        timeout=10,
-                    )
+            logger.info("[CTO] CODEACTION card #%d inviata al topic", task_id)
         except Exception as e:
-            logger.warning(f"[CTO] pin prompt error: {e}")
+            logger.warning("[CTO] send_codeaction_card error: %s", e)
 
     # ============================================================
     # GENERA PROMPT TECNICI PER ALTRI CHIEF
@@ -205,52 +280,53 @@ class CTO(BaseChief):
             "Repo: deploy-agents/ (agents-runner), deploy/ (command-center).\n"
             "Rispondi SOLO con il prompt tecnico, nient'altro."
         )
-        prompt = f"Richiesta: {task_description}"
+        prompt = "Richiesta: " + task_description
         if context:
-            prompt += f"\n\nContesto: {context}"
+            prompt = prompt + "\n\nContesto: " + context
 
         try:
             technical = self.call_claude(prompt, system=system, max_tokens=3000, model="claude-sonnet-4-6")
             return technical
         except Exception as e:
-            logger.error(f"[CTO] build_technical_prompt error: {e}")
+            logger.error("[CTO] build_technical_prompt error: %s", e)
             return task_description
 
     def generate_and_deliver_prompt(self, task_description: str, context: str = "") -> Dict:
-        """
-        Genera prompt tecnico completo e lo consegna:
-        1. Salva in code_tasks con status='ready'
-        2. Pin nel topic #technology
-        3. Ritorna il prompt per il Chief chiamante
-        """
+        """Genera prompt tecnico + CODEACTION card. Per chiamate inter-agente."""
         technical_prompt = self.build_technical_prompt(task_description, context)
 
-        # Salva in code_tasks
-        task_id = None
-        try:
-            result = supabase.table("code_tasks").insert({
-                "title": task_description[:100],
-                "prompt": technical_prompt,
-                "requested_by": "cto",
-                "status": "ready",
-                "sandbox_passed": True,
-                "sandbox_check": json.dumps({
-                    "source": "cto_inter_agent",
-                    "task_description": task_description[:500],
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
-                }),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }).execute()
-            if result.data:
-                task_id = result.data[0].get("id")
-        except Exception as e:
-            logger.warning(f"[CTO] code_tasks insert error: {e}")
+        title_short = task_description[:100]
 
-        # Pin nel topic
-        self._pin_prompt_in_topic(technical_prompt, task_id)
+        # Dedup
+        existing_id = self._find_existing_task(title_short)
+        task_id = existing_id
+
+        if not task_id:
+            try:
+                result = supabase.table("code_tasks").insert({
+                    "title": title_short,
+                    "prompt": technical_prompt,
+                    "requested_by": "cto",
+                    "status": "pending_approval",
+                    "sandbox_passed": True,
+                    "sandbox_check": json.dumps({
+                        "source": "cto_inter_agent",
+                        "task_description": task_description[:500],
+                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                    }),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }).execute()
+                if result.data:
+                    task_id = result.data[0].get("id")
+            except Exception as e:
+                logger.warning("[CTO] code_tasks insert error: %s", e)
+
+        if task_id and not existing_id:
+            meta = self._extract_prompt_meta(technical_prompt)
+            self._send_codeaction_card(task_id, meta)
 
         return {
-            "status": "ready",
+            "status": "pending_approval",
             "task_id": task_id,
             "prompt": technical_prompt,
         }

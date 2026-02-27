@@ -4108,8 +4108,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     f"{_cd_sep}"
                 )
                 _cd_markup = json.dumps({"inline_keyboard": [[
-                    {"text": "\u2705 Valida questo prompt", "callback_data": f"code_approve:{_cd_task_id}"},
-                    {"text": "\u270f\ufe0f Modifica", "callback_data": f"code_modify:{_cd_task_id}"},
+                    {"text": "\u2705 Approva", "callback_data": f"code_approve:{_cd_task_id}"},
                     {"text": "\u274c Annulla", "callback_data": f"code_cancel:{_cd_task_id}"},
                 ]]})
                 _token_cd = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -4618,8 +4617,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except asyncio.TimeoutError:
                 _answer_t = f"[{_chief_t.name}] Risposta in elaborazione, riprova tra un momento."
+            # v5.13: se CTO ha gia' inviato CODEACTION card, non duplicare il messaggio
+            _is_codeaction = "<<CODEACTION_SENT>>" in str(_answer_t)
             _token_t = os.getenv("TELEGRAM_BOT_TOKEN")
-            if _token_t:
+            if _token_t and not _is_codeaction:
                 http_requests.post(
                     f"https://api.telegram.org/bot{_token_t}/sendMessage",
                     json={
@@ -4633,6 +4634,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Storia garantita — scrittura sincrona DOPO risposta Chief
             _scope_write = f"{chat_id}:{thread_id}"
             _cid_write = _chief_t.chief_id
+            _answer_hist = "CODEACTION card inviata" if _is_codeaction else (_answer_t or "")
             try:
                 supabase.table("topic_conversation_history").insert({
                     "scope_id": _scope_write, "role": "user",
@@ -4640,11 +4642,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }).execute()
                 supabase.table("topic_conversation_history").insert({
                     "scope_id": _scope_write, "role": "bot",
-                    "text": (_answer_t or "")[:2000], "chief_id": _cid_write,
+                    "text": _answer_hist[:2000], "chief_id": _cid_write,
                 }).execute()
             except Exception as _hw:
                 logger.warning(f"[HISTORY_WRITE] {_hw}")
-            _topic_buffer_add(chat_id, thread_id, _answer_t, role="bot")
+            _topic_buffer_add(chat_id, thread_id, _answer_hist, role="bot")
             threading.Thread(
                 target=_trigger_extract_facts, args=(msg, _chief_t.chief_id), daemon=True
             ).start()
@@ -4704,9 +4706,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except asyncio.TimeoutError:
                     _answer = f"[{chief.name}] Risposta in elaborazione, riprova tra un momento."
-                await update.message.reply_text(
-                    f"\U0001f9e0 *{chief.name}*\n\n{_answer[:3800]}", parse_mode="Markdown"
-                )
+                # v5.13: skip se CTO ha gia' inviato CODEACTION card
+                if "<<CODEACTION_SENT>>" not in str(_answer):
+                    await update.message.reply_text(
+                        f"\U0001f9e0 *{chief.name}*\n\n{_answer[:3800]}", parse_mode="Markdown"
+                    )
                 _topic_buffer_add(chat_id, 0, _answer[:200], role="bot")
             else:
                 await update.message.reply_text(f"Chief per '{_csuite_match}' non trovato.")
