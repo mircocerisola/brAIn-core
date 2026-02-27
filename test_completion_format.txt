@@ -1,0 +1,34 @@
+TEST: formato completamento CTO — no prompt, solo output reale
+Data: 2026-02-27
+
+SCENARIO: output_log contiene prompt con "dangerously" nelle prime righe.
+Funzione: format_completion_message() + strip_prompt_from_output()
+
+Test 1 - strip_prompt_from_output:
+  Input: output_log che inizia con "Esegui con --dangerously-skip-permissions..."
+  Atteso: output pulito senza "dangerously"
+  Risultato: PASS — clean non contiene "dangerously"
+
+Test 2 - format_completion_message:
+  Input: output_log con prompt, durata 125s, file ["csuite/cto.py"], commit ea74ad1
+  Atteso: messaggio finale NON contiene "dangerously"
+  Risultato: PASS — messaggio finale non contiene "dangerously"
+
+Test 3 - format_update_message (output vuoto):
+  Input: ""
+  Atteso: "In esecuzione — attendere output"
+  Risultato: PASS
+
+Test 4 - format_update_message (solo prompt):
+  Input: "Esegui con --dangerously-skip-permissions\n"
+  Atteso: "In esecuzione — attendere output"
+  Risultato: PASS
+
+Test 5 - format_update_message (output reale):
+  Input: output_log con prompt + 5 righe reali
+  Atteso: ultime 3 righe reali (non il prompt)
+  Risultato: PASS
+
+RISULTATO FINALE: PASS
+Il messaggio di completamento NON contiene la parola "dangerously".
+Il prompt viene sempre escluso dall'output mostrato a Mirco.
