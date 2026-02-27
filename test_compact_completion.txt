@@ -1,0 +1,33 @@
+TEST: messaggio di completamento compatto
+Data: 2026-02-27
+========================================
+
+--- MESSAGGIO DI COMPLETAMENTO GENERATO ---
+✅ Completato — fix: completamento CTO compatto — det…
+───────────
+⏱ Durata: 3 min
+🔀 Commit: abc1234
+───────────
+--- FINE MESSAGGIO ---
+
+Righe inline (testo visibile nel corpo del messaggio): 5
+Limite massimo: 6
+Risultato: PASS — 5 < 6 ✓
+
+Bottoni inline (non contano come righe di testo):
+  [📄 Dettaglio] [🔁 Nuovo task]
+
+--- MESSAGGIO DI AGGIORNAMENTO INTERMEDIO GENERATO ---
+⏳ In esecuzione...
+Running tests in src/
+All tests passed.
+--- FINE MESSAGGIO ---
+
+Righe inline: 3
+Limite massimo: 4
+Risultato: PASS — 3 < 4 ✓
+
+Bottone inline: [📄 Log parziale]
+
+========================================
+TUTTI I TEST: PASS
