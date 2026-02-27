@@ -189,6 +189,7 @@ class BaseChief(BaseAgent):
         """
         Ritorna contesto DB rilevante per il dominio.
         Override nelle sottoclassi per dati specifici.
+        v5.11: errori restituiti come stringa 'errore lettura DB: {motivo}'
         """
         context: Dict[str, Any] = {}
         try:
@@ -199,7 +200,7 @@ class BaseChief(BaseAgent):
             context["recent_decisions"] = r.data or []
         except Exception as e:
             logger.warning(f"[{self.name}] get_domain_context error: {e}")
-            context["recent_decisions"] = []
+            context["recent_decisions"] = f"errore lettura DB: {e}"
         try:
             r = supabase.table("chief_memory") \
                 .select("key,value,updated_at") \
@@ -208,7 +209,7 @@ class BaseChief(BaseAgent):
             context["memory"] = {row["key"]: row["value"] for row in (r.data or [])}
         except Exception as e:
             logger.warning(f"[{self.name}] chief_memory error: {e}")
-            context["memory"] = {}
+            context["memory"] = f"errore lettura DB: {e}"
         return context
 
     def build_system_prompt(self, project_context: Optional[str] = None,
@@ -308,9 +309,28 @@ class BaseChief(BaseAgent):
         parts.append(
             "=== REGOLA FONDAMENTALE ===\n"
             "Rispondi SOLO su argomenti del tuo dominio come descritto nel PROFILO E RUOLO. "
-            "Se la richiesta non è di tua competenza, attiva check_domain_routing(). "
+            "Se la richiesta non \u00e8 di tua competenza, attiva check_domain_routing(). "
             "Rispondi sempre in italiano, conciso, formato card con separatori \u2501\u2501\u2501. "
-            "Zero fuffa, vai al punto. UNA sola domanda alla volta se devi chiedere."
+            "Zero fuffa, vai al punto. UNA sola domanda alla volta se devi chiedere.\n\n"
+            "INFRASTRUTTURA INVISIBILE: Non menzionare mai Command Center, bot, /comandi, "
+            "endpoint, API interne, o altri agenti interni nelle tue risposte. "
+            "Sei tu che agisci direttamente. I dati li hai nella sezione DATI LIVE. "
+            "Se hai bisogno di eseguire codice, descrivi l'azione necessaria. "
+            "Mai delegare visibilmente ad altri sistemi. Mai dire 'chiedo a', 'attivo', "
+            "'digita /comando'. Tu agisci, tu decidi, tu rispondi.\n\n"
+            "DATI AUTONOMI: Hai accesso diretto ai dati del tuo dominio nella sezione DATI LIVE. "
+            "Usa SEMPRE quei dati per rispondere alle domande. "
+            "Se un dato mostra un errore di lettura, riportalo esplicitamente. "
+            "Mai dire 'non ho accesso' o 'non posso leggere il database'.\n\n"
+            "AZIONE CODICE: Se la tua risposta richiede modifiche al codice "
+            "(nuovo agente, fix bug, nuova feature, modifica file), "
+            "NON eseguire direttamente. Aggiungi in fondo alla risposta:\n"
+            "<<CODE_ACTION>>\n"
+            "{\"title\": \"...\", \"description\": \"2-3 righe\", "
+            "\"files\": [\"file1.py\"], \"time_estimate\": \"15 min\", "
+            "\"prompt\": \"prompt dettagliato per Claude Code\"}\n"
+            "<<END_CODE_ACTION>>\n"
+            "Il sistema inviera' automaticamente una card di approvazione a Mirco."
         )
 
         return "\n\n".join(parts)
@@ -334,18 +354,22 @@ class BaseChief(BaseAgent):
             recent_messages=recent_messages,
         )
 
-        # FIX 4: inietta dati live dal dominio
+        # FIX 4: inietta dati live dal dominio (FIX 2 v5.11: limit 2000 chars, include errors)
         try:
             domain_ctx = self.get_domain_context()
             live_parts = []
             for k, v in domain_ctx.items():
-                if k not in ("recent_decisions", "memory") and v:
-                    live_parts.append(
-                        f"{k}: {json.dumps(v, ensure_ascii=False, default=str)[:400]}"
-                    )
+                if k not in ("recent_decisions", "memory"):
+                    if v or isinstance(v, str):
+                        live_parts.append(
+                            f"{k}: {json.dumps(v, ensure_ascii=False, default=str)[:2000]}"
+                        )
             if live_parts:
                 system += "\n\n=== DATI LIVE ===\n" + "\n\n".join(live_parts)
+            else:
+                system += "\n\n=== DATI LIVE ===\nNessun dato disponibile per il dominio."
         except Exception as e:
+            system += f"\n\n=== DATI LIVE ===\nErrore lettura dati dominio: {e}"
             logger.warning(f"[{self.name}] get_domain_context in answer_question: {e}")
 
         if user_context:
@@ -355,7 +379,7 @@ class BaseChief(BaseAgent):
         model = self._select_model(question)
 
         try:
-            return self.call_claude(
+            response = self.call_claude(
                 question,
                 system=system,
                 max_tokens=1500,
@@ -365,6 +389,30 @@ class BaseChief(BaseAgent):
         except Exception as e:
             logger.error(f"[{self.name}] answer_question error: {e}")
             return f"[{self.name}] Errore nella risposta: {e}"
+
+        # FIX 3 v5.11: Detect CODE_ACTION marker in response
+        import re as _re
+        _ca_match = _re.search(
+            r'<<CODE_ACTION>>\s*(\{.*?\})\s*<<END_CODE_ACTION>>',
+            response, _re.DOTALL,
+        )
+        if _ca_match:
+            try:
+                _ca_data = json.loads(_ca_match.group(1))
+                self.validate_prompt_sandbox(
+                    prompt_text=_ca_data.get("prompt", response),
+                    task_title=_ca_data.get("title", "Azione codice"),
+                    triggered_by_message=question[:500],
+                    code_action_meta=_ca_data,
+                )
+            except Exception as e:
+                logger.warning(f"[{self.name}] CODE_ACTION parse/sandbox error: {e}")
+            # Remove marker from visible response
+            response = _re.sub(
+                r'<<CODE_ACTION>>.*?<<END_CODE_ACTION>>', '', response, flags=_re.DOTALL
+            ).strip()
+
+        return response
 
     def answer_question_with_routing(self, question: str, user_context: Optional[str] = None,
                                      no_redirect: bool = False,
@@ -511,14 +559,16 @@ class BaseChief(BaseAgent):
 
     def validate_prompt_sandbox(self, prompt_text: str,
                                 task_title: str = "",
-                                triggered_by_message: str = "") -> Dict[str, Any]:
+                                triggered_by_message: str = "",
+                                code_action_meta: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Valida un prompt prima di salvarlo in code_tasks.
         1. Chiama Claude Haiku per analizzare files e tabelle toccate
         2. Confronta col perimetro hardcoded del Chief
-        3. Se OK → salva in code_tasks con sandbox_passed=True e ritorna {ok: True, task_id: X}
-        4. Se violazione → alerta Mirco con card + inline keyboard, NON salva, ritorna {ok: False}
+        3. Se OK → salva in code_tasks con sandbox_passed=True, invia card approvazione a Mirco
+        4. Se violazione → alerta Mirco con card + inline keyboard, salva come blocked
         Solo CTO può autorizzare override (callback sandbox_override:task_id).
+        code_action_meta: opzionale, contiene {title, description, files, time_estimate, prompt}
         """
         chief_id = self.chief_id or self.name.lower()
         perimeter = SANDBOX_PERIMETERS.get(chief_id, {})
@@ -597,7 +647,35 @@ class BaseChief(BaseAgent):
             except Exception as e:
                 logger.warning(f"[{self.name}] code_tasks insert error: {e}")
 
-            logger.info(f"[{self.name}] Sandbox OK: task_id={task_id}")
+            # FIX 3 v5.11: Card approvazione a Mirco
+            _meta = code_action_meta or {}
+            _desc = _meta.get("description", task_title or prompt_text[:150])
+            _files_list = _meta.get("files", files_touched[:5])
+            _files_str = ", ".join(_files_list) if _files_list else "da determinare"
+            _time_est = _meta.get("time_estimate", "da valutare")
+
+            card_text = (
+                f"\u26a1 AZIONE CODICE \u2014 {self.name} vuole agire\n"
+                f"{sep}\n"
+                f"{_desc[:300]}\n"
+                f"\U0001f4c1 File: {_files_str}\n"
+                f"\u23f1\ufe0f Stima: {_time_est}\n"
+                f"{sep}"
+            )
+            approval_markup = {
+                "inline_keyboard": [[
+                    {"text": "\u2705 Valida", "callback_data": f"code_approve:{task_id}"},
+                    {"text": "\u270f\ufe0f Cambia prompt", "callback_data": f"code_modify:{task_id}"},
+                ], [
+                    {"text": "\u274c Annulla", "callback_data": f"code_cancel:{task_id}"},
+                    {"text": "\U0001f50d Dettaglio prompt", "callback_data": f"code_detail:{task_id}"},
+                ]]
+            }
+            _chat_id_appr = _get_telegram_chat_id_sync()
+            if _chat_id_appr and task_id:
+                _send_telegram_message(str(_chat_id_appr), card_text, approval_markup)
+
+            logger.info(f"[{self.name}] Sandbox OK: task_id={task_id}, card inviata")
             return {"ok": True, "task_id": task_id, "chief": chief_id}
 
         else:

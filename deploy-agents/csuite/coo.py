@@ -21,34 +21,45 @@ class COO(BaseChief):
 
     def get_domain_context(self):
         ctx = super().get_domain_context()
-        # Cantieri attivi
+        # Cantieri attivi — FULL data (v5.11)
         try:
-            r = supabase.table("projects").select("id,name,status,build_phase,created_at") \
-                .neq("status", "archived").execute()
+            r = supabase.table("projects").select(
+                "id,name,status,build_phase,pipeline_step,pipeline_territory,"
+                "pipeline_locked,topic_id,smoke_test_url,created_at,updated_at"
+            ).neq("status", "archived").execute()
             ctx["active_projects"] = r.data or []
-        except Exception:
-            ctx["active_projects"] = []
-        # Action queue pending
+        except Exception as e:
+            ctx["active_projects"] = f"errore lettura DB: {e}"
+        # Action queue pending — FULL details (v5.11)
         try:
-            r = supabase.table("action_queue").select("action_type,status") \
-                .eq("status", "pending").execute()
-            ctx["pending_actions"] = len(r.data or [])
-        except Exception:
-            ctx["pending_actions"] = 0
+            r = supabase.table("action_queue").select(
+                "id,action_type,title,description,project_id,status,created_at"
+            ).eq("status", "pending").order("created_at", desc=True).execute()
+            ctx["pending_actions"] = r.data or []
+        except Exception as e:
+            ctx["pending_actions"] = f"errore lettura DB: {e}"
         # Prodotti live (ex-CPO)
         try:
             r = supabase.table("projects").select("id,name,status,build_phase") \
                 .in_("status", ["build_complete", "launch_approved", "live"]).execute()
             ctx["products_live"] = r.data or []
-        except Exception:
-            ctx["products_live"] = []
+        except Exception as e:
+            ctx["products_live"] = f"errore lettura DB: {e}"
         # KPI recenti (ex-CPO)
         try:
             r = supabase.table("kpi_daily").select("project_id,metric_name,value,recorded_at") \
                 .order("recorded_at", desc=True).limit(20).execute()
             ctx["recent_kpis"] = r.data or []
-        except Exception:
-            ctx["recent_kpis"] = []
+        except Exception as e:
+            ctx["recent_kpis"] = f"errore lettura DB: {e}"
+        # Agent logs recenti (v5.11) — ultimi 20
+        try:
+            r = supabase.table("agent_logs").select(
+                "agent_id,action,status,cost_usd,created_at"
+            ).order("created_at", desc=True).limit(20).execute()
+            ctx["recent_logs"] = r.data or []
+        except Exception as e:
+            ctx["recent_logs"] = f"errore lettura DB: {e}"
         return ctx
 
     def check_anomalies(self):

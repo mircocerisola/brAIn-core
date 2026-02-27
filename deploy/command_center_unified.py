@@ -338,6 +338,7 @@ NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 # ---- CODA AZIONI PRIORITIZZATA ----
 ACTION_QUEUE_TABLE = "action_queue"
 _current_action = {}  # chat_id -> action dict (azione in attesa di risposta)
+_code_modify_pending = {}  # chat_id -> code_task_id (per FIX 3: modifica prompt codice)
 
 # ---- CODE AGENT ----
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -3972,6 +3973,99 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
+    # ---- CODE ACTION APPROVAL callbacks (FIX 3 v5.11) ----
+    elif data.startswith("code_approve:"):
+        _ca_task_id = int(data.split(":")[1])
+        await query.answer("Approvato!")
+        try:
+            supabase.table("code_tasks").update({
+                "status": "approved",
+                "override_by": "mirco",
+            }).eq("id", _ca_task_id).execute()
+        except Exception as e:
+            logger.error(f"[CODE_APPROVE] {e}")
+        _token_ca = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_ca:
+            _payload_ca = {
+                "chat_id": chat_id,
+                "text": f"\u2705 Azione codice #{_ca_task_id} approvata. brain_runner.py la eseguira' entro 30s.",
+            }
+            if thread_id:
+                _payload_ca["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_ca}/sendMessage",
+                json=_payload_ca, timeout=10,
+            )
+
+    elif data.startswith("code_detail:"):
+        _cd_task_id = int(data.split(":")[1])
+        await query.answer()
+        try:
+            _cd_r = supabase.table("code_tasks").select("prompt,title").eq("id", _cd_task_id).execute()
+            if _cd_r.data:
+                _cd_prompt = _cd_r.data[0].get("prompt", "N/A")
+                _cd_title = _cd_r.data[0].get("title", "Azione codice")
+                _cd_sep = "\u2501" * 15
+                _cd_text = (
+                    f"\U0001f4cb Prompt completo \u2014 {_cd_title}\n"
+                    f"{_cd_sep}\n"
+                    f"{_cd_prompt[:3500]}\n"
+                    f"{_cd_sep}"
+                )
+                _cd_markup = json.dumps({"inline_keyboard": [[
+                    {"text": "\u2705 Valida questo prompt", "callback_data": f"code_approve:{_cd_task_id}"},
+                    {"text": "\u270f\ufe0f Modifica", "callback_data": f"code_modify:{_cd_task_id}"},
+                    {"text": "\u274c Annulla", "callback_data": f"code_cancel:{_cd_task_id}"},
+                ]]})
+                _token_cd = os.getenv("TELEGRAM_BOT_TOKEN")
+                if _token_cd:
+                    _payload_cd = {"chat_id": chat_id, "text": _cd_text, "reply_markup": _cd_markup}
+                    if thread_id:
+                        _payload_cd["message_thread_id"] = thread_id
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_token_cd}/sendMessage",
+                        json=_payload_cd, timeout=15,
+                    )
+        except Exception as e:
+            logger.error(f"[CODE_DETAIL] {e}")
+
+    elif data.startswith("code_modify:"):
+        _cm_task_id = int(data.split(":")[1])
+        await query.answer()
+        _code_modify_pending[chat_id] = _cm_task_id
+        _token_cm = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_cm:
+            _payload_cm = {
+                "chat_id": chat_id,
+                "text": f"Cosa vuoi cambiare nel prompt #{_cm_task_id}? Rispondi con le tue indicazioni.",
+            }
+            if thread_id:
+                _payload_cm["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_cm}/sendMessage",
+                json=_payload_cm, timeout=10,
+            )
+
+    elif data.startswith("code_cancel:"):
+        _cc_task_id = int(data.split(":")[1])
+        await query.answer("Annullato.")
+        try:
+            supabase.table("code_tasks").update({"status": "cancelled"}).eq("id", _cc_task_id).execute()
+        except Exception as e:
+            logger.error(f"[CODE_CANCEL] {e}")
+        _token_cc = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_cc:
+            _payload_cc = {
+                "chat_id": chat_id,
+                "text": f"\u274c Azione codice #{_cc_task_id} annullata.",
+            }
+            if thread_id:
+                _payload_cc["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_cc}/sendMessage",
+                json=_payload_cc, timeout=10,
+            )
+
     else:
         await query.answer()
 
@@ -4294,6 +4388,71 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Traccia ultimo messaggio per notifiche intelligenti
     _last_mirco_message_time = time.time()
+
+    # ---- CODE MODIFY PENDING (FIX 3 v5.11) ----
+    # Se Mirco sta rispondendo a "Cosa vuoi cambiare nel prompt?"
+    if chat_id in _code_modify_pending:
+        _cm_tid = _code_modify_pending.pop(chat_id)
+        _cm_feedback = msg
+        def _regenerate_prompt():
+            try:
+                _cm_r = supabase.table("code_tasks").select("prompt,title,requested_by").eq("id", _cm_tid).execute()
+                if not _cm_r.data:
+                    return
+                _cm_orig = _cm_r.data[0].get("prompt", "")
+                _cm_title = _cm_r.data[0].get("title", "Azione codice")
+                # Rigenera prompt con Haiku
+                from anthropic import Anthropic
+                _cm_client = Anthropic()
+                _cm_resp = _cm_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=2000,
+                    messages=[{"role": "user", "content": (
+                        f"Modifica questo prompt di codice secondo le indicazioni dell'utente.\n\n"
+                        f"PROMPT ORIGINALE:\n{_cm_orig[:3000]}\n\n"
+                        f"MODIFICHE RICHIESTE:\n{_cm_feedback[:1000]}\n\n"
+                        f"Rispondi SOLO con il prompt modificato completo, niente altro."
+                    )}],
+                )
+                _cm_new_prompt = _cm_resp.content[0].text
+                # Aggiorna code_tasks
+                supabase.table("code_tasks").update({
+                    "prompt": _cm_new_prompt,
+                    "title": _cm_title,
+                }).eq("id", _cm_tid).execute()
+                # Invia nuova card
+                _cm_sep = "\u2501" * 15
+                _cm_card = (
+                    f"\u26a1 PROMPT MODIFICATO \u2014 #{_cm_tid}\n"
+                    f"{_cm_sep}\n"
+                    f"{_cm_new_prompt[:300]}...\n"
+                    f"{_cm_sep}"
+                )
+                _cm_markup = json.dumps({"inline_keyboard": [[
+                    {"text": "\u2705 Valida", "callback_data": f"code_approve:{_cm_tid}"},
+                    {"text": "\u270f\ufe0f Cambia ancora", "callback_data": f"code_modify:{_cm_tid}"},
+                ], [
+                    {"text": "\u274c Annulla", "callback_data": f"code_cancel:{_cm_tid}"},
+                    {"text": "\U0001f50d Dettaglio", "callback_data": f"code_detail:{_cm_tid}"},
+                ]]})
+                _cm_token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if _cm_token:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_cm_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": _cm_card, "reply_markup": _cm_markup},
+                        timeout=15,
+                    )
+            except Exception as e:
+                logger.error(f"[CODE_MODIFY_REGEN] {e}")
+                _cm_token2 = os.getenv("TELEGRAM_BOT_TOKEN")
+                if _cm_token2:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_cm_token2}/sendMessage",
+                        json={"chat_id": chat_id, "text": f"Errore rigenerazione prompt: {e}"},
+                        timeout=10,
+                    )
+        threading.Thread(target=_regenerate_prompt, daemon=True).start()
+        return
 
     # ---- ACTIVE SESSION — carica contesto progetto attivo ----
     _active_proj_ctx = None
