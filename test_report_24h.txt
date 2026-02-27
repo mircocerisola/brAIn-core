@@ -1,0 +1,76 @@
+=================================================================
+TEST REPORT: generate_daily_report() — filtro ultime 24h
+Eseguito: 2026-02-27 19:37:05
+=================================================================
+
+ARCHITETTURA:
+  generate_daily_report() → definito in BaseChief, ereditato da tutti i Chief
+  _get_daily_report_sections(since_24h) → override in ogni Chief
+  Range temporale: now_rome() - timedelta(hours=24)
+
+[PASS] BaseChief
+  generate_daily_report() definita: True
+  since_24h = now_rome()-24h: True
+  Filtro .gte(created_at, since_24h) su agent_logs: True
+  Header data italiano: True
+  Footer budget giornaliero: True
+  Skip se nessun dato 24h: True
+  Salva in chief_decisions: True
+  Invia al topic Chief: True
+
+[PASS] CFO
+  _get_daily_report_sections() override: True
+  Tabelle Supabase: ['agent_logs', 'finance_metrics']
+  Filtri .gte(timestamp, since_24h): 2 / 2
+  Tutte le query filtrate: True
+  _daily_report_emoji() override: True
+  Eredita generate_daily_report (non ridefinisce): True
+
+[PASS] CMO
+  _get_daily_report_sections() override: True
+  Tabelle Supabase: ['smoke_test_prospects', 'smoke_test_events', 'marketing_reports', 'brand_assets']
+  Filtri .gte(timestamp, since_24h): 4 / 4
+  Tutte le query filtrate: True
+  _daily_report_emoji() override: True
+  Eredita generate_daily_report (non ridefinisce): True
+
+[PASS] CSO
+  _get_daily_report_sections() override: True
+  Tabelle Supabase: ['problems', 'solutions', 'smoke_test_prospects', 'problems']
+  Filtri .gte(timestamp, since_24h): 4 / 4
+  Tutte le query filtrate: True
+  _daily_report_emoji() override: True
+  Eredita generate_daily_report (non ridefinisce): True
+
+[PASS] COO
+  _get_daily_report_sections() override: True
+  Tabelle Supabase: ['action_queue', 'agent_logs', 'projects', 'kpi_daily']
+  Filtri .gte(timestamp, since_24h): 4 / 4
+  Tutte le query filtrate: True
+  _daily_report_emoji() override: True
+  Eredita generate_daily_report (non ridefinisce): True
+
+[PASS] CLO
+  _get_daily_report_sections() override: True
+  Tabelle Supabase: ['ethics_violations', 'legal_reviews', 'agent_logs']
+  Filtri .gte(timestamp, since_24h): 3 / 3
+  Tutte le query filtrate: True
+  _daily_report_emoji() override: True
+  Eredita generate_daily_report (non ridefinisce): True
+
+=================================================================
+RISULTATO FINALE: TUTTI I TEST SUPERATI ✓
+=================================================================
+
+DETTAGLIO SEZIONI 24H PER CHIEF:
+  CFO  → agent_logs (costi/agente/modello), finance_metrics, anomalie
+  CMO  → smoke_test_prospects, smoke_test_events, marketing_reports, brand_assets
+  CSO  → problems, solutions, smoke_test_prospects, anomalia pipeline
+  COO  → action_queue, agent_logs, projects (updated_at), kpi_daily (recorded_at)
+  CLO  → ethics_violations, legal_reviews, agent_logs (ethics_monitor)
+
+FORMATO REPORT:
+  Apertura: '{Giorno} {DD} {mese} {YYYY} — ore {HH:MM}' (es. Giovedì 27 febbraio 2026 — ore 08:00)
+  Sezioni: omesse se nessun dato nelle ultime 24h
+  Chiusura: '💶 TOTALE 24H: €X.XX / €33 budget (Y%)'
+  Se tutto vuoto E costi=0 → nessun report inviato
