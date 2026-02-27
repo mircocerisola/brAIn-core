@@ -877,3 +877,75 @@ async def run_cleanup_old_topics_endpoint(request):
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_flush_bos_endpoint(request):
+    """POST /admin/flush-bos — invia BOS pending in action_queue a #strategy via Telegram"""
+    import requests as _req
+    try:
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return web.json_response({"error": "TELEGRAM_BOT_TOKEN mancante"}, status=500)
+
+        group_id = None
+        strategy_topic = None
+        try:
+            r = supabase.table("org_config").select("key,value").in_(
+                "key", ["telegram_group_id", "chief_topic_cso"]
+            ).execute()
+            for row in (r.data or []):
+                if row["key"] == "telegram_group_id":
+                    group_id = row["value"]
+                elif row["key"] == "chief_topic_cso":
+                    strategy_topic = row["value"]
+        except Exception:
+            pass
+
+        if not group_id or not strategy_topic:
+            return web.json_response({"error": "group_id o strategy_topic mancante"}, status=500)
+
+        pending = supabase.table("action_queue").select("*").eq(
+            "action_type", "approve_bos"
+        ).eq("status", "pending").order("created_at").execute()
+        actions = pending.data or []
+
+        sent = []
+        for action in actions:
+            payload = action.get("payload") or {}
+            sol_id = payload.get("solution_id")
+            bos_score = payload.get("bos_score", 0)
+            sol_title = payload.get("sol_title", "")
+            prob_title = payload.get("problem_title", "")
+            action_id = action["id"]
+
+            text = (
+                f"BOS {bos_score:.2f} - {sol_title}\n"
+                f"Problema: {prob_title}\n"
+                f"{action.get('description', '')}"
+            )
+            keyboard = {"inline_keyboard": [[
+                {"text": "Approva", "callback_data": f"bos_approve:{action_id}:{sol_id}"},
+                {"text": "Rifiuta", "callback_data": f"bos_reject:{action_id}"},
+                {"text": "Dettagli", "callback_data": f"bos_details:{action_id}"},
+            ]]}
+            try:
+                resp = _req.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={
+                        "chat_id": group_id,
+                        "message_thread_id": int(strategy_topic),
+                        "text": text,
+                        "reply_markup": keyboard,
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    sent.append({"action_id": action_id, "sol_id": sol_id})
+                else:
+                    sent.append({"action_id": action_id, "error": resp.text[:100]})
+            except Exception as e:
+                sent.append({"action_id": action_id, "error": str(e)})
+
+        return web.json_response({"status": "ok", "sent": len(sent), "details": sent})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)

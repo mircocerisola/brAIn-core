@@ -12,7 +12,8 @@ from core.utils import (log_to_supabase, notify_telegram, extract_json, search_p
                         get_mirco_preferences, get_sector_preference_modifier,
                         get_pipeline_thresholds, get_scan_strategy, get_scan_schedule_strategy,
                         get_sector_with_fewest_problems, get_last_sector_rotation,
-                        get_high_bos_problem_sectors, build_strategy_queries)
+                        get_high_bos_problem_sectors, build_strategy_queries,
+                        SCANNER_SECTORS)
 
 
 def scanner_make_fingerprint(title, sector):

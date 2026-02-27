@@ -46,6 +46,7 @@ from core.endpoints import (
     run_health_check_endpoint,
     run_smoke_design_endpoint, run_restaurant_reposition_endpoint,
     run_smoke_daily_update_endpoint,
+    run_flush_bos_endpoint,
 )
 
 
@@ -147,6 +148,7 @@ async def main():
     app.router.add_post("/admin/cleanup-old-topics", run_cleanup_old_topics_endpoint)
     app.router.add_post("/admin/restaurant-reposition", run_restaurant_reposition_endpoint)
     app.router.add_post("/admin/health-check", run_health_check_endpoint)
+    app.router.add_post("/admin/flush-bos", run_flush_bos_endpoint)
 
     # All
     app.router.add_post("/all", run_all_endpoint)
