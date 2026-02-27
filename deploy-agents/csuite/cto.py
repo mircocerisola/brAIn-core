@@ -215,6 +215,7 @@ class CTO(BaseChief):
         if not TELEGRAM_BOT_TOKEN or not task_id:
             return
         try:
+            from core.templates import CODEACTION_CARD_TEMPLATE
             topic_r = supabase.table("org_config").select("value").eq("key", "chief_topic_cto").execute()
             group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
             if not topic_r.data or not group_r.data:
@@ -222,18 +223,10 @@ class CTO(BaseChief):
             topic_id = int(topic_r.data[0]["value"])
             group_id = int(group_r.data[0]["value"])
 
-            title = meta.get("title", "Azione codice")
-            main_file = meta.get("main_file", "da determinare")
-            time_est = meta.get("time_minutes", 5)
-
-            sep = "\u2500" * 15
-            card_text = (
-                "\u26a1 CODEACTION \u2014 CTO\n"
-                + sep + "\n"
-                + "\U0001f4cb " + str(title) + "\n"
-                + "\U0001f4c1 File: " + str(main_file) + "\n"
-                + "\u23f1\ufe0f Stima: " + str(time_est) + " min\n"
-                + sep
+            card_text = CODEACTION_CARD_TEMPLATE.format(
+                title=meta.get("title", "Azione codice"),
+                main_file=meta.get("main_file", "da determinare"),
+                time_minutes=meta.get("time_minutes", 5),
             )
             markup = {"inline_keyboard": [[
                 {"text": "\u2705 Approva", "callback_data": "code_approve:" + str(task_id)},

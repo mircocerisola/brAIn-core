@@ -645,38 +645,21 @@ def design_smoke_test(project_id: int) -> dict:
     # Avanza pipeline
     advance_pipeline_step(project_id, "smoke_test_designing")
 
-    # ── 7. Costruisci card COMPATTA (max 5 righe) ──
+    # ── 7. Costruisci card con template fisso ──
     budget_str = "EUR" + str(budget_eur) if budget_eur and budget_eur > 0 else "gratuito"
     blockers_count = len(blockers)
-    short_target = (kpi_data.get("target_description") or target_desc)[:60]
 
-    card = (
-        "\U0001f52c SMOKE TEST \u2014 " + brand_name + "\n"
-        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-        "\U0001f4cb " + sol_title[:60] + "\n"
-        "\U0001f465 " + str(prospects_count) + " prospect | \u23f1\ufe0f " + str(duration_days) + " giorni | \U0001f4b6 " + budget_str + "\n"
-        "\U0001f3af KPI: " + kpi_success[:80] + "\n"
+    from core.templates import format_smoke_test_card, smoke_test_buttons
+    card = format_smoke_test_card(
+        brand_name=brand_name,
+        obiettivo=sol_title[:60],
+        n_prospect=prospects_count,
+        durata=duration_days,
+        budget=budget_str,
+        kpi_successo=kpi_success[:80],
+        n_azioni=blockers_count,
     )
-    if blockers_count > 0:
-        card += "\u26a0\ufe0f Serve da te: " + str(blockers_count) + " azione/i prima di partire\n"
-    card += "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-
-    reply_markup = {
-        "inline_keyboard": [
-            [
-                {"text": "\u2705 Avvia",
-                 "callback_data": "smoke_design_approve:" + str(project_id)},
-                {"text": "\U0001f4c4 Dettaglio",
-                 "callback_data": "smoke_detail:" + str(project_id)},
-            ],
-            [
-                {"text": "\u270f\ufe0f Modifica",
-                 "callback_data": "smoke_design_modify:" + str(project_id)},
-                {"text": "\u274c Archivia",
-                 "callback_data": "smoke_design_archive:" + str(project_id)},
-            ],
-        ]
-    }
+    reply_markup = smoke_test_buttons(project_id)
 
     if group_id and topic_id:
         _send_topic_raw(group_id, topic_id, card, reply_markup)

@@ -4091,6 +4091,96 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 f"https://api.telegram.org/bot{_token_ca}/sendMessage",
                 json=_payload_ca, timeout=10,
             )
+        # v5.14: avvia monitor progressi in background (ogni 5 min)
+        _mon_tid = _ca_task_id
+        _mon_chat = chat_id
+        _mon_thread = thread_id
+        def _code_progress_monitor():
+            import time as _time
+            _tok = os.getenv("TELEGRAM_BOT_TOKEN")
+            if not _tok:
+                return
+            # Recupera titolo task
+            _titolo = "Azione codice"
+            try:
+                _tr = supabase.table("code_tasks").select("title").eq("id", _mon_tid).execute()
+                if _tr.data:
+                    _titolo = (_tr.data[0].get("title") or "Azione codice")[:60]
+            except Exception:
+                pass
+            _start_ts = datetime.now(tz=None)
+            _ora_avvio = _start_ts.strftime("%H:%M")
+            _elapsed = 0
+            _max_checks = 12  # max 60 min di monitoraggio
+            for _i in range(_max_checks):
+                _time.sleep(300)  # 5 minuti
+                _elapsed += 5
+                # Controlla stato
+                try:
+                    _sr = supabase.table("code_tasks").select("status,output").eq("id", _mon_tid).execute()
+                    if not _sr.data:
+                        break
+                    _st = _sr.data[0].get("status", "")
+                    _out = _sr.data[0].get("output", "")
+                    if _st == "done":
+                        _dur = _elapsed
+                        _out_section = ""
+                        if _out:
+                            _out_section = "\U0001f4ac Output:\n" + str(_out)[:500] + "\n"
+                        _done_text = (
+                            "\u2705 Prompt completato\n"
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                            "\U0001f4cb Task: " + _titolo + "\n"
+                            "\u23f1\ufe0f Durata: " + str(_dur) + " min\n"
+                            + _out_section +
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+                        )
+                        _p = {"chat_id": _mon_chat, "text": _done_text}
+                        if _mon_thread:
+                            _p["message_thread_id"] = _mon_thread
+                        http_requests.post(
+                            f"https://api.telegram.org/bot{_tok}/sendMessage",
+                            json=_p, timeout=10,
+                        )
+                        break
+                    elif _st == "error":
+                        _err_text = (
+                            "\u274c Prompt fallito\n"
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                            "\U0001f4cb Task: " + _titolo + "\n"
+                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
+                            "\u26a0\ufe0f Errore: " + str(_out or "sconosciuto")[:300] + "\n"
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+                        )
+                        _p = {"chat_id": _mon_chat, "text": _err_text}
+                        if _mon_thread:
+                            _p["message_thread_id"] = _mon_thread
+                        http_requests.post(
+                            f"https://api.telegram.org/bot{_tok}/sendMessage",
+                            json=_p, timeout=10,
+                        )
+                        break
+                    else:
+                        # Ancora in esecuzione — aggiornamento
+                        _prog_text = (
+                            "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                            "\U0001f504 Prompt ancora in esecuzione\n"
+                            "\U0001f4cb Task: " + _titolo + "\n"
+                            "\U0001f550 Avviato alle " + _ora_avvio + "\n"
+                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+                        )
+                        _p = {"chat_id": _mon_chat, "text": _prog_text}
+                        if _mon_thread:
+                            _p["message_thread_id"] = _mon_thread
+                        http_requests.post(
+                            f"https://api.telegram.org/bot{_tok}/sendMessage",
+                            json=_p, timeout=10,
+                        )
+                except Exception as _me:
+                    logger.warning(f"[CODE_MONITOR] {_me}")
+                    break
+        threading.Thread(target=_code_progress_monitor, daemon=True).start()
 
     elif data.startswith("code_detail:"):
         _cd_task_id = int(data.split(":")[1])
