@@ -48,6 +48,65 @@ class CLO(BaseChief):
             ctx["ethics_monitor_log"] = []
         return ctx
 
+
+    def _daily_report_emoji(self) -> str:
+        return "\u2696\ufe0f"
+
+    def _get_daily_report_sections(self, since_24h: str) -> list:
+        """CLO: ethics violations, legal reviews, compliance log — ultime 24h."""
+        sections = []
+
+        # 1. Ethics violations nelle ultime 24h
+        try:
+            r = supabase.table("ethics_violations").select(
+                "project_id,principle_id,severity,blocked,resolved"
+            ).gte("created_at", since_24h).order("created_at", desc=True).execute()
+            if r.data:
+                blocked = sum(1 for v in r.data if v.get("blocked"))
+                unresolved = sum(1 for v in r.data if not v.get("resolved"))
+                viol_lines = "\n".join(
+                    f"  [{v.get('severity','?')}] proj #{v.get('project_id','?')} | {v.get('principle_id','?')}"
+                    f"{' | BLOCCATO' if v.get('blocked') else ''}"
+                    for v in r.data[:5]
+                )
+                sections.append(
+                    f"\U0001f6ab VIOLATIONS ({len(r.data)} | {blocked} bloccate | {unresolved} aperte)\n{viol_lines}"
+                )
+        except Exception as e:
+            logger.warning("[CLO] ethics_violations error: %s", e)
+
+        # 2. Legal reviews nelle ultime 24h
+        try:
+            r = supabase.table("legal_reviews").select(
+                "project_id,status,risks_found,created_at"
+            ).gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+            if r.data:
+                lr_lines = "\n".join(
+                    f"  proj #{row.get('project_id','?')} | {row.get('status','?')} | rischi: {row.get('risks_found','?')}"
+                    for row in r.data
+                )
+                sections.append(f"\U0001f4cb LEGAL REVIEWS ({len(r.data)})\n{lr_lines}")
+        except Exception as e:
+            logger.warning("[CLO] legal_reviews error: %s", e)
+
+        # 3. Log ethics monitor nelle ultime 24h
+        try:
+            r = supabase.table("agent_logs").select("action,status,error") \
+                .eq("agent_id", "ethics_monitor") \
+                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+            if r.data:
+                errors = [l for l in r.data if l.get("status") == "error"]
+                em_lines = "\n".join(
+                    f"  {log.get('action','?')[:50]} [{log.get('status','?')}]"
+                    for log in r.data[:5]
+                )
+                err_note = f" | {len(errors)} errori" if errors else ""
+                sections.append(f"\U0001f916 ETHICS MONITOR ({len(r.data)}{err_note})\n{em_lines}")
+        except Exception as e:
+            logger.warning("[CLO] ethics_monitor error: %s", e)
+
+        return sections
+
     def check_anomalies(self):
         anomalies = []
         try:
