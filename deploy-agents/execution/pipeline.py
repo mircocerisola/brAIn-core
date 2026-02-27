@@ -304,8 +304,17 @@ def create_build_blocker(project_id: int, problem: str, action: str,
                          time_estimate: str, group_id, topic_id) -> int:
     """Crea azione bloccante in action_queue e manda alert nel topic."""
     action_id = None
+    # Recupera user_id di Mirco per il blocker
+    mirco_uid = 0
+    try:
+        uid_r = supabase.table("org_config").select("value").eq("key", "telegram_user_id").execute()
+        if uid_r.data:
+            mirco_uid = int(uid_r.data[0]["value"])
+    except Exception:
+        pass
     try:
         r = supabase.table("action_queue").insert({
+            "user_id": mirco_uid,
             "action_type": "build_blocker",
             "project_id": project_id,
             "payload": {"problem": problem, "action": action, "time_estimate": time_estimate},

@@ -74,22 +74,34 @@ def run_smoke_design(solution_id):
 
     # Anti-duplicazione: riusa progetto esistente
     try:
-        existing = supabase.table("projects").select("id,status,pipeline_step").eq("bos_id", int(solution_id)).execute()
+        existing = supabase.table("projects").select(
+            "id,status,pipeline_step,brand_name,brand_email,brand_domain,smoke_test_method"
+        ).eq("bos_id", int(solution_id)).execute()
         if existing.data:
             proj = existing.data[0]
             if proj.get("status") not in ("new", "init", "failed", "smoke_test_pending"):
                 logger.info("[SMOKE_DESIGN] solution %s gia' processata, skip", solution_id)
                 return {"status": "skipped", "reason": "progetto gia' in corso"}
             project_id = proj["id"]
-            # Genera brand+method se mancanti e aggiorna progetto
-            brand = _generate_brand_identity(solution, slug)
-            method = select_smoke_test_method(solution)
+            # Preserva brand esistente se gia' impostato, altrimenti genera
+            if proj.get("brand_name") and proj.get("brand_email"):
+                brand = {
+                    "brand_name": proj["brand_name"],
+                    "brand_email": proj["brand_email"],
+                    "brand_domain": proj.get("brand_domain") or "",
+                    "brand_linkedin": "",
+                    "brand_landing_url": "",
+                }
+                method = proj.get("smoke_test_method") or select_smoke_test_method(solution)
+            else:
+                brand = _generate_brand_identity(solution, slug)
+                method = select_smoke_test_method(solution)
             supabase.table("projects").update({
                 "brand_name": brand["brand_name"],
                 "brand_email": brand["brand_email"],
                 "brand_domain": brand["brand_domain"],
-                "brand_linkedin": brand["brand_linkedin"],
-                "brand_landing_url": brand["brand_landing_url"],
+                "brand_linkedin": brand.get("brand_linkedin", ""),
+                "brand_landing_url": brand.get("brand_landing_url", ""),
                 "smoke_test_method": method,
                 "status": "smoke_test_pending",
                 "pipeline_locked": False,
