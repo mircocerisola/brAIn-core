@@ -210,15 +210,7 @@ async def telegram_webhook(request):
 async def main():
     global tg_app
     logger.info("brAIn CTO v1.0 — Claude Code CLI runner")
-    token = os.getenv("TELEGRAM_BOT_TOKEN_CTO") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-    tg_app = Application.builder().token(token).build()
-    tg_app.add_handler(CommandHandler("start", cmd_start))
-    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    await tg_app.initialize()
-    await tg_app.start()
-    if WEBHOOK_URL:
-        await tg_app.bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Webhook: {WEBHOOK_URL}")
+
     app = web.Application()
     app.router.add_get("/", health_check)
     app.router.add_post("/", telegram_webhook)
@@ -226,14 +218,34 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", PORT).start()
     logger.info(f"Running on :{PORT}")
+
+    token = os.getenv("TELEGRAM_BOT_TOKEN_CTO") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if token:
+        try:
+            tg_app = Application.builder().token(token).build()
+            tg_app.add_handler(CommandHandler("start", cmd_start))
+            tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            await tg_app.initialize()
+            await tg_app.start()
+            if WEBHOOK_URL:
+                await tg_app.bot.set_webhook(url=WEBHOOK_URL)
+                logger.info(f"Webhook: {WEBHOOK_URL}")
+            logger.info("Telegram OK")
+        except Exception as e:
+            logger.warning(f"Telegram non disponibile: {e}")
+            tg_app = None
+    else:
+        logger.warning("TELEGRAM_BOT_TOKEN non impostato — solo HTTP health check attivo")
+
     try:
         while True:
             await asyncio.sleep(3600)
     except Exception:
         pass
     finally:
-        await tg_app.stop()
-        await tg_app.shutdown()
+        if tg_app:
+            await tg_app.stop()
+            await tg_app.shutdown()
         await runner.cleanup()
 
 
