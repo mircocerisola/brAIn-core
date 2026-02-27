@@ -77,7 +77,7 @@ def run_smoke_design(solution_id):
         existing = supabase.table("projects").select("id,status,pipeline_step").eq("bos_id", int(solution_id)).execute()
         if existing.data:
             proj = existing.data[0]
-            if proj.get("status") not in ("new", "init", "failed"):
+            if proj.get("status") not in ("new", "init", "failed", "smoke_test_pending"):
                 logger.info("[SMOKE_DESIGN] solution %s gia' processata, skip", solution_id)
                 return {"status": "skipped", "reason": "progetto gia' in corso"}
             project_id = proj["id"]
