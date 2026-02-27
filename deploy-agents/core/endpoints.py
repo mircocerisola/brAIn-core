@@ -538,18 +538,18 @@ async def run_csuite_morning_report_endpoint(request):
 
 
 async def run_cso_relaunch_smoke_endpoint(request):
-    """POST /cso/relaunch-smoke — {project_id, project_name?} — rilancia smoke test."""
+    """POST /cso/relaunch-smoke — {project_id} — rilancia smoke test con prospect reali."""
     try:
         data = await request.json()
         project_id = int(data.get("project_id", 0))
-        project_name = data.get("project_name", "RestaAI")
         if not project_id:
             return web.json_response({"error": "project_id obbligatorio"}, status=400)
         from csuite import get_chief
         cso = get_chief("strategy")
         if not cso:
             return web.json_response({"error": "CSO non trovato"}, status=500)
-        result = cso.send_smoke_relaunch(project_id, project_name)
+        # v5.17: start_smoke_test trova prospect reali e manda card
+        result = cso.start_smoke_test(project_id)
         return web.json_response(result)
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
