@@ -1,12 +1,13 @@
 """CTO — Chief Technology Officer. Dominio: infrastruttura, codice, deploy, sicurezza tecnica.
-v5.17: brain_runner executor puro + CTO gestisce flusso Mirco + output reale Claude Code.
-       execute_approved_task: lancia brain_runner.run(), monitor loop 5min con output reale.
-       interrupt_task: brain_runner.interrupt(pid). Zero timeout — gira finche' non finisce.
+v5.18: Claude Code headless in Cloud Run Job. CTO triggera job, monitora output_log da DB.
+       execute_approved_task: status=ready, trigger job, monitor loop 5min.
+       interrupt_task: status=interrupt_requested. Zero brain_runner locale.
 """
 import json
 import re
 import os
 import threading
+import time
 import requests as _requests
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
@@ -14,13 +15,21 @@ from typing import Any, Dict, List, Optional
 from core.base_chief import BaseChief
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome, format_time_rome
-from core import brain_runner
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 
+# Cloud Run Job config
+_GCP_PROJECT = "brain-core-487914"
+_GCP_REGION = "europe-west3"
+_JOB_NAME = "brain-code-executor"
+_JOBS_API_URL = (
+    "https://run.googleapis.com/v2/projects/" + _GCP_PROJECT +
+    "/locations/" + _GCP_REGION +
+    "/jobs/" + _JOB_NAME + ":run"
+)
+
 # Pattern: qualsiasi messaggio che contiene "Esegui con --dangerously-skip-permissions"
-# Cattura tutto da quel punto in poi — e' il prompt completo per Claude Code
 _PROMPT_PATTERN = re.compile(
     r'(Esegui con --dangerously-skip-permissions.+)',
     re.IGNORECASE | re.DOTALL,
@@ -53,20 +62,20 @@ class CTO(BaseChief):
                 errors[agent] = errors.get(agent, 0) + 1
             ctx["weekly_errors_by_agent"] = sorted(errors.items(), key=lambda x: x[1], reverse=True)[:5]
         except Exception as e:
-            ctx["weekly_errors_by_agent"] = f"errore lettura DB: {e}"
+            ctx["weekly_errors_by_agent"] = "errore lettura DB: " + str(e)
         try:
             r = supabase.table("capability_log").select("name,description,created_at") \
                 .order("created_at", desc=True).limit(5).execute()
             ctx["recent_capabilities"] = r.data or []
         except Exception as e:
-            ctx["recent_capabilities"] = f"errore lettura DB: {e}"
+            ctx["recent_capabilities"] = "errore lettura DB: " + str(e)
         try:
             r = supabase.table("code_tasks").select(
                 "id,title,status,requested_by,created_at"
             ).order("created_at", desc=True).limit(10).execute()
             ctx["recent_code_tasks"] = r.data or []
         except Exception as e:
-            ctx["recent_code_tasks"] = f"errore lettura DB: {e}"
+            ctx["recent_code_tasks"] = "errore lettura DB: " + str(e)
         return ctx
 
     def check_anomalies(self):
@@ -79,7 +88,7 @@ class CTO(BaseChief):
             if error_count > 10:
                 anomalies.append({
                     "type": "high_error_rate",
-                    "description": f"{error_count} errori nell'ultima ora",
+                    "description": str(error_count) + " errori nell'ultima ora",
                     "severity": "critical" if error_count > 20 else "high",
                 })
         except Exception:
@@ -94,17 +103,13 @@ class CTO(BaseChief):
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
                         project_scope_id=None, recent_messages=None):
-        """Override: intercetta 'Esegui con --dangerously-skip-permissions' PRIMA di qualsiasi logica.
-        Se trovato -> salva in code_tasks + invia CODEACTION card con bottoni. Mai prompt nel messaggio.
-        Mai chiedere conferme — card generata sempre e subito.
-        """
+        """Override: intercetta 'Esegui con --dangerously-skip-permissions' PRIMA di qualsiasi logica."""
         match = _PROMPT_PATTERN.search(question)
         if match:
             raw_prompt = match.group(1).strip()
             logger.info("[CTO] Pattern 'dangerously-skip-permissions' rilevato (%d chars)", len(raw_prompt))
             return self._save_and_send_card(raw_prompt)
 
-        # Nessun pattern -> risposta Chief normale
         return super().answer_question(
             question, user_context=user_context,
             project_context=project_context,
@@ -115,11 +120,10 @@ class CTO(BaseChief):
 
     # ---- SAVE + CODEACTION CARD ----
 
-    def _save_and_send_card(self, prompt_text: str) -> str:
+    def _save_and_send_card(self, prompt_text):
         """Salva in code_tasks (con dedup) e invia CODEACTION card. Return marker per skip."""
         title_short = prompt_text[:100]
 
-        # 1. Dedup — cerca task esistente con stesso titolo nell'ultima ora
         existing_id = self._find_existing_task(title_short)
 
         if existing_id:
@@ -136,7 +140,6 @@ class CTO(BaseChief):
                 logger.warning("[CTO] dedup update error: %s", e)
             return "<<CODEACTION_SENT>>"
 
-        # 2. Crea nuovo code_task
         task_id = None
         try:
             result = supabase.table("code_tasks").insert({
@@ -160,15 +163,12 @@ class CTO(BaseChief):
         if not task_id:
             return "Errore: code_task non creato."
 
-        # 3. Estrai metadata dal prompt
         meta = self._extract_prompt_meta(prompt_text)
-
-        # 4. Invia CODEACTION card al topic #technology
         self._send_codeaction_card(task_id, meta)
 
         return "<<CODEACTION_SENT>>"
 
-    def _find_existing_task(self, title_short: str) -> Optional[int]:
+    def _find_existing_task(self, title_short):
         """Cerca code_task esistente per dedup (stesso titolo, ultimo 1h, pending/ready)."""
         try:
             hour_ago = (now_rome() - timedelta(hours=1)).isoformat()
@@ -182,7 +182,7 @@ class CTO(BaseChief):
             logger.warning("[CTO] dedup check error: %s", e)
         return None
 
-    def _extract_prompt_meta(self, prompt_text: str) -> Dict:
+    def _extract_prompt_meta(self, prompt_text):
         """Estrai titolo (prime 8 parole dopo il flag), file e stima dal prompt."""
         after_flag = re.sub(
             r'(?i)esegui con --dangerously-skip-permissions\.?\s*', '', prompt_text, count=1
@@ -208,7 +208,7 @@ class CTO(BaseChief):
 
         return {"title": title, "main_file": main_file, "time_minutes": time_est}
 
-    def _send_codeaction_card(self, task_id: int, meta: Dict) -> None:
+    def _send_codeaction_card(self, task_id, meta):
         """Invia CODEACTION card al topic #technology con inline keyboard."""
         if not TELEGRAM_BOT_TOKEN or not task_id:
             return
@@ -246,211 +246,212 @@ class CTO(BaseChief):
             logger.warning("[CTO] send_codeaction_card error: %s", e)
 
     # ============================================================
-    # ESECUZIONE TASK APPROVATI — brain_runner + monitor output reale
+    # ESECUZIONE VIA CLOUD RUN JOB — trigger + monitor da DB
     # ============================================================
 
-    def execute_approved_task(self, task_id: int, chat_id: int, thread_id: int = None):
-        """Esegue un task approvato: lancia brain_runner, monitora, invia output reale a Mirco.
-        Zero timeout — gira finche' non finisce o Mirco interrompe.
-        """
-        # 1. Recupera prompt da code_tasks
+    def execute_approved_task(self, task_id, chat_id, thread_id=None):
+        """Approva task: status=ready, triggera Cloud Run Job, avvia monitor output_log."""
+
+        # 1. Recupera titolo
+        titolo = "Azione codice"
         try:
-            r = supabase.table("code_tasks").select("prompt,title").eq("id", task_id).execute()
-            if not r.data:
-                self._send_telegram(chat_id, thread_id, "Errore: task #" + str(task_id) + " non trovato.")
-                return
-            prompt = r.data[0].get("prompt", "")
-            titolo = (r.data[0].get("title") or "Azione codice")[:60]
-        except Exception as e:
-            self._send_telegram(chat_id, thread_id, "Errore lettura task: " + str(e))
-            return
+            r = supabase.table("code_tasks").select("title").eq("id", task_id).execute()
+            if r.data:
+                titolo = (r.data[0].get("title") or "Azione codice")[:60]
+        except Exception:
+            pass
 
-        # 2. Lancia brain_runner
-        result = brain_runner.run(prompt)
-        if result.get("status") == "error":
-            err_msg = result.get("error", "sconosciuto")
-            self._send_telegram(chat_id, thread_id,
-                "\u274c Errore avvio Claude Code\n"
-                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                + err_msg + "\n"
-                "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-            try:
-                supabase.table("code_tasks").update({
-                    "status": "error", "output": err_msg,
-                }).eq("id", task_id).execute()
-            except Exception:
-                pass
-            return
-
-        pid = result["pid"]
-        ora_avvio = format_time_rome()
-
-        # 3. Salva PID + stato running in code_tasks
+        # 2. Status -> ready (il Job lo trovera')
         try:
             supabase.table("code_tasks").update({
-                "status": "running",
-                "pid": pid,
-                "started_at": now_rome().isoformat(),
+                "status": "ready",
             }).eq("id", task_id).execute()
         except Exception as e:
-            logger.warning("[CTO] code_tasks update pid error: %s", e)
+            logger.warning("[CTO] update status ready: %s", e)
+            self._send_telegram(chat_id, thread_id,
+                                "\u274c Errore: impossibile preparare task #" + str(task_id))
+            return
 
-        # 4. Invia conferma avvio
-        self._send_telegram(chat_id, thread_id,
-            "\u2699\ufe0f Prompt in esecuzione\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-            "\U0001f504 Avviato alle " + ora_avvio + "\n"
-            "\U0001f4cb Task: " + titolo + "\n"
-            "PID: " + str(pid) + "\n"
-            "\u23f3 Aggiornamento ogni 5 minuti\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+        # 3. Trigger Cloud Run Job con CODE_TASK_ID
+        job_ok = self._trigger_cloud_run_job(task_id)
 
-        # 5. Monitor loop in background — zero timeout, gira finche' non finisce
+        # 4. Conferma a Mirco
+        ora = format_time_rome()
+        sep = "\u2500" * 15
+        if job_ok:
+            self._send_telegram(chat_id, thread_id,
+                "\u2699\ufe0f Claude Code avviato in cloud\n"
+                + sep + "\n"
+                "\U0001f4cb Task: " + titolo + "\n"
+                "\U0001f504 Avviato alle " + ora + "\n"
+                "\u2601\ufe0f Esecuzione: Cloud Run Job\n"
+                "\u23f3 Aggiornamento ogni 5 minuti\n"
+                + sep)
+        else:
+            self._send_telegram(chat_id, thread_id,
+                "\u26a0\ufe0f Task #" + str(task_id) + " in coda (ready)\n"
+                + sep + "\n"
+                "\U0001f4cb " + titolo + "\n"
+                "Job trigger fallito \u2014 il task rimane in stato 'ready'.\n"
+                "Verra' eseguito al prossimo run del job.\n"
+                + sep)
+
+        # 5. Monitor loop in background — legge output_log da DB
         _tid = task_id
         _cid = chat_id
         _thid = thread_id
         _ttl = titolo
-        _ora = ora_avvio
-        _pid = pid
 
-        def _monitor_loop():
-            import time as _time
+        def _monitor():
             _elapsed = 0
-            _last_stderr_count = 0
+            _last_log_len = 0
 
             while True:
-                _time.sleep(300)  # 5 minuti
+                time.sleep(300)  # 5 minuti
                 _elapsed += 5
 
-                output = brain_runner.get_output(_pid)
-                if output.get("error"):
-                    logger.warning("[CTO] get_output error: %s", output["error"])
-                    break
+                try:
+                    r = supabase.table("code_tasks").select(
+                        "status,output_log,output"
+                    ).eq("id", _tid).execute()
+                    if not r.data:
+                        break
+                    task = r.data[0]
+                except Exception as e:
+                    logger.warning("[CTO] monitor read error: %s", e)
+                    continue
 
-                stderr_lines = output.get("stderr", [])
-                stdout_lines = output.get("stdout", [])
+                status = task.get("status", "")
+                output_log = task.get("output_log") or ""
+                output_final = task.get("output") or ""
 
-                # Errori stderr nuovi — notifica immediata
-                if len(stderr_lines) > _last_stderr_count:
-                    new_errs = stderr_lines[_last_stderr_count:]
-                    _last_stderr_count = len(stderr_lines)
-                    err_preview = "\n".join(new_errs[-3:])[:500]
-                    self._send_telegram(_cid, _thid,
-                        "\u26a0\ufe0f Errore rilevato \u2014 " + str(_elapsed) + " min\n"
-                        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                        + err_preview + "\n"
-                        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+                # Task terminato
+                if status in ("done", "error", "interrupted"):
+                    text_out = output_final or output_log
+                    last_lines = "\n".join(text_out.split("\n")[-10:])[:1000]
+                    sep = "\u2500" * 15
 
-                if not output.get("running", True):
-                    # Processo terminato
-                    rc = output.get("returncode", -1)
-                    last_10 = "\n".join(stdout_lines[-10:])[:1000] if stdout_lines else "Nessun output"
-
-                    # Cerca commit hash e file modificati
-                    commit_hash = ""
-                    files_modified = ""
-                    for line in stdout_lines:
-                        if "commit" in line.lower() and len(line) > 6:
-                            commit_hash = line.strip()[:80]
-                        if "file" in line.lower() and "changed" in line.lower():
-                            files_modified = line.strip()[:80]
-
-                    if rc == 0:
-                        done_parts = [
-                            "\u2705 Prompt completato",
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                            "\U0001f4cb Task: " + _ttl,
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min",
-                        ]
-                        if files_modified:
-                            done_parts.append("\U0001f4c1 " + files_modified)
-                        if commit_hash:
-                            done_parts.append("\U0001f517 " + commit_hash)
-                        done_parts.append("\U0001f4ac Output:")
-                        done_parts.append(last_10)
-                        done_parts.append("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
-                        self._send_telegram(_cid, _thid, "\n".join(done_parts))
-                        try:
-                            supabase.table("code_tasks").update({
-                                "status": "done",
-                                "completed_at": now_rome().isoformat(),
-                                "output": "\n".join(stdout_lines[-50:]),
-                            }).eq("id", _tid).execute()
-                        except Exception:
-                            pass
+                    if status == "done":
+                        self._send_telegram(_cid, _thid,
+                            "\u2705 Prompt completato\n"
+                            + sep + "\n"
+                            "\U0001f4cb " + _ttl + "\n"
+                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
+                            "\U0001f4ac Output:\n"
+                            + last_lines + "\n"
+                            + sep)
+                    elif status == "interrupted":
+                        self._send_telegram(_cid, _thid,
+                            "\U0001f6d1 Task interrotto\n"
+                            + sep + "\n"
+                            "\U0001f4cb " + _ttl + "\n"
+                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
+                            + sep)
                     else:
-                        err_out = "\n".join(stderr_lines[-5:])[:500] if stderr_lines else "Sconosciuto"
-                        fail_parts = [
-                            "\u274c Prompt fallito (exit code " + str(rc) + ")",
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                            "\U0001f4cb Task: " + _ttl,
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min",
-                            "\u26a0\ufe0f Errore:",
-                            err_out,
-                            "\U0001f4ac Ultimo output:",
-                            last_10,
-                            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-                        ]
-                        self._send_telegram(_cid, _thid, "\n".join(fail_parts))
-                        try:
-                            supabase.table("code_tasks").update({
-                                "status": "error",
-                                "completed_at": now_rome().isoformat(),
-                                "output": "\n".join((stdout_lines + stderr_lines)[-50:]),
-                            }).eq("id", _tid).execute()
-                        except Exception:
-                            pass
+                        self._send_telegram(_cid, _thid,
+                            "\u274c Prompt fallito\n"
+                            + sep + "\n"
+                            "\U0001f4cb " + _ttl + "\n"
+                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
+                            "\u26a0\ufe0f Output:\n"
+                            + last_lines + "\n"
+                            + sep)
                     break
-                else:
-                    # Ancora in esecuzione — aggiornamento con output reale
-                    last_3 = "\n".join(stdout_lines[-3:])[:500] if stdout_lines else "In attesa output..."
 
-                    markup = json.dumps({"inline_keyboard": [[
-                        {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
-                        {"text": "\U0001f6d1 Interrompi", "callback_data": "code_interrupt:" + str(_tid)},
-                    ]]})
+                # Ancora in esecuzione — aggiornamento con output reale
+                log_lines = output_log.split("\n") if output_log else []
+                new_content = len(output_log) > _last_log_len
+                _last_log_len = len(output_log)
 
-                    prog_text = (
-                        "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
-                        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
-                        + last_3 + "\n"
-                        "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
-                    )
-                    self._send_telegram(_cid, _thid, prog_text, reply_markup=markup)
+                last_3 = "\n".join(log_lines[-3:])[:500] if log_lines else "In attesa output..."
 
-        threading.Thread(target=_monitor_loop, daemon=True).start()
-        logger.info("[CTO] Monitor avviato per task #%d PID=%d", task_id, pid)
+                markup = {"inline_keyboard": [[
+                    {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
+                    {"text": "\U0001f6d1 Interrompi", "callback_data": "code_interrupt:" + str(_tid)},
+                ]]}
 
-    def interrupt_task(self, task_id: int, chat_id: int, thread_id: int = None):
-        """Interrompe un task in esecuzione via brain_runner.interrupt(pid)."""
-        try:
-            r = supabase.table("code_tasks").select("pid,title").eq("id", task_id).execute()
-            if not r.data or not r.data[0].get("pid"):
-                self._send_telegram(chat_id, thread_id, "Task non trovato o nessun PID.")
-                return
-            pid = r.data[0]["pid"]
-            titolo = (r.data[0].get("title") or "Azione codice")[:60]
-        except Exception as e:
-            self._send_telegram(chat_id, thread_id, "Errore: " + str(e))
-            return
+                self._send_telegram(_cid, _thid,
+                    "\u23f3 Aggiornamento \u2014 " + str(_elapsed) + " min\n"
+                    "\u2500" * 15 + "\n"
+                    + last_3 + "\n"
+                    "\u2500" * 15,
+                    reply_markup=markup)
 
-        result = brain_runner.interrupt(pid)
-        logger.info("[CTO] interrupt_task #%d PID=%d result=%s", task_id, pid, result)
+        threading.Thread(target=_monitor, daemon=True).start()
+        logger.info("[CTO] Monitor avviato per task #%d", task_id)
 
+    def interrupt_task(self, task_id, chat_id, thread_id=None):
+        """Interrompe un task: setta status=interrupt_requested. Il Job lo rileva e termina."""
         try:
             supabase.table("code_tasks").update({
-                "status": "interrupted",
-                "completed_at": now_rome().isoformat(),
+                "status": "interrupt_requested",
             }).eq("id", task_id).execute()
+        except Exception as e:
+            self._send_telegram(chat_id, thread_id, "Errore interrupt: " + str(e))
+            return
+
+        logger.info("[CTO] interrupt_task #%d -> interrupt_requested", task_id)
+
+        sep = "\u2500" * 15
+        titolo = ""
+        try:
+            r = supabase.table("code_tasks").select("title").eq("id", task_id).execute()
+            if r.data:
+                titolo = (r.data[0].get("title") or "")[:60]
         except Exception:
             pass
 
         self._send_telegram(chat_id, thread_id,
-            "\U0001f6d1 Task interrotto\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\U0001f6d1 Interruzione richiesta\n"
+            + sep + "\n"
             "\U0001f4cb " + titolo + "\n"
-            "PID " + str(pid) + " terminato.\n"
-            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+            "Il job terminera' il processo.\n"
+            + sep)
+
+    # ---- CLOUD RUN JOB TRIGGER ----
+
+    def _trigger_cloud_run_job(self, task_id):
+        """Triggera il Cloud Run Job brain-code-executor con CODE_TASK_ID."""
+        try:
+            # Access token dal metadata server (solo su Cloud Run)
+            token_r = _requests.get(
+                "http://metadata.google.internal/computeMetadata/v1/"
+                "instance/service-accounts/default/token",
+                headers={"Metadata-Flavor": "Google"},
+                timeout=5,
+            )
+            if token_r.status_code != 200:
+                logger.warning("[CTO] metadata token error: %d", token_r.status_code)
+                return False
+            access_token = token_r.json()["access_token"]
+
+            # Trigger job con override CODE_TASK_ID
+            r = _requests.post(
+                _JOBS_API_URL,
+                headers={
+                    "Authorization": "Bearer " + access_token,
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "overrides": {
+                        "containerOverrides": [{
+                            "env": [
+                                {"name": "CODE_TASK_ID", "value": str(task_id)},
+                            ],
+                        }],
+                    },
+                },
+                timeout=30,
+            )
+            if r.status_code in (200, 201, 202):
+                logger.info("[CTO] Cloud Run Job triggered task=%d resp=%d", task_id, r.status_code)
+                return True
+            else:
+                logger.warning("[CTO] Job trigger failed: %d %s", r.status_code, r.text[:300])
+                return False
+        except Exception as e:
+            logger.warning("[CTO] trigger job error: %s", e)
+            return False
 
     # ---- TELEGRAM HELPER ----
 
@@ -475,7 +476,7 @@ class CTO(BaseChief):
     # GENERA PROMPT TECNICI PER ALTRI CHIEF
     # ============================================================
 
-    def build_technical_prompt(self, task_description: str, context: str = "") -> str:
+    def build_technical_prompt(self, task_description, context=""):
         """Trasforma una richiesta funzionale in prompt tecnico completo per Claude Code."""
         system = (
             "Sei un tech lead senior di brAIn, un organismo AI-native.\n"
@@ -502,7 +503,7 @@ class CTO(BaseChief):
             logger.error("[CTO] build_technical_prompt error: %s", e)
             return task_description
 
-    def generate_and_deliver_prompt(self, task_description: str, context: str = "") -> Dict:
+    def generate_and_deliver_prompt(self, task_description, context=""):
         """Genera prompt tecnico + CODEACTION card. Per chiamate inter-agente."""
         technical_prompt = self.build_technical_prompt(task_description, context)
 
