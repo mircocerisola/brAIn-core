@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity
+from core.templates import now_rome
 
 
 def run_targeted_scan(source_name=None, use_top=False, sector=None):
@@ -79,7 +80,7 @@ def run_source_refresh():
         if last_scanned:
             try:
                 last_dt = datetime.fromisoformat(last_scanned.replace("Z", "+00:00"))
-                days_since = (datetime.now(timezone.utc) - last_dt).days
+                days_since = (now_rome() - last_dt).days
             except:
                 days_since = 30
         else:
@@ -149,7 +150,7 @@ def run_sources_cleanup_weekly():
                     threshold_used = min(dynamic_threshold or 0, absolute_threshold) if s in bottom_sources else absolute_threshold
                     supabase.table("scan_sources").update({
                         "status": "archived",
-                        "notes": f"Archiviata automaticamente {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: score {score:.2f} (soglia {threshold_used:.2f})",
+                        "notes": f"Archiviata automaticamente {now_rome().strftime('%Y-%m-%d')}: score {score:.2f} (soglia {threshold_used:.2f})",
                     }).eq("id", s["id"]).execute()
                     archived_sources.append({"id": s["id"], "name": s["name"], "score": round(score, 3)})
                     logger.info(f"[CLEANUP] Archiviata: {s['name']} (score {score:.2f})")

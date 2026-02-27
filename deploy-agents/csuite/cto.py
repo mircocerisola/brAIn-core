@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from core.base_chief import BaseChief
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
+from core.templates import now_rome
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = "mircocerisola/brAIn-core"
@@ -41,7 +42,7 @@ class CTO(BaseChief):
     def get_domain_context(self):
         ctx = super().get_domain_context()
         try:
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            week_ago = (now_rome() - timedelta(days=7)).isoformat()
             r = supabase.table("agent_logs").select("agent_id,status,error") \
                 .eq("status", "error").gte("created_at", week_ago).execute()
             errors = {}
@@ -69,7 +70,7 @@ class CTO(BaseChief):
     def check_anomalies(self):
         anomalies = []
         try:
-            hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            hour_ago = (now_rome() - timedelta(hours=1)).isoformat()
             r = supabase.table("agent_logs").select("id,status").eq("status", "error") \
                 .gte("created_at", hour_ago).execute()
             error_count = len(r.data or [])
@@ -125,7 +126,7 @@ class CTO(BaseChief):
                     "prompt": prompt_text,
                     "sandbox_check": json.dumps({
                         "source": "cto_direct_update",
-                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                        "checked_at": now_rome().isoformat(),
                     }),
                 }).eq("id", existing_id).execute()
                 logger.info("[CTO] Dedup: aggiornato code_task #%d", existing_id)
@@ -144,9 +145,9 @@ class CTO(BaseChief):
                 "sandbox_passed": True,
                 "sandbox_check": json.dumps({
                     "source": "cto_direct",
-                    "checked_at": datetime.now(timezone.utc).isoformat(),
+                    "checked_at": now_rome().isoformat(),
                 }),
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_rome().isoformat(),
             }).execute()
             if result.data:
                 task_id = result.data[0].get("id")
@@ -168,7 +169,7 @@ class CTO(BaseChief):
     def _find_existing_task(self, title_short: str) -> Optional[int]:
         """Cerca code_task esistente per dedup (stesso titolo, ultimo 1h, pending/ready)."""
         try:
-            hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+            hour_ago = (now_rome() - timedelta(hours=1)).isoformat()
             r = supabase.table("code_tasks").select("id,status") \
                 .eq("title", title_short) \
                 .gte("created_at", hour_ago) \
@@ -297,9 +298,9 @@ class CTO(BaseChief):
                     "sandbox_check": json.dumps({
                         "source": "cto_inter_agent",
                         "task_description": task_description[:500],
-                        "checked_at": datetime.now(timezone.utc).isoformat(),
+                        "checked_at": now_rome().isoformat(),
                     }),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": now_rome().isoformat(),
                 }).execute()
                 if result.data:
                     task_id = result.data[0].get("id")

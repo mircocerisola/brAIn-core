@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity, extract_json, emit_event
+from core.templates import now_rome
 
 
 KNOWLEDGE_PROMPT = """Sei il Knowledge Keeper di brAIn.
@@ -25,7 +26,7 @@ SOLO JSON."""
 def run_knowledge_keeper():
     logger.info("Knowledge Keeper v1.1 starting...")
 
-    since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    since = (now_rome() - timedelta(hours=24)).isoformat()
     try:
         logs = supabase.table("agent_logs").select("*").gte("created_at", since).order("created_at", desc=True).limit(50).execute()
         logs = logs.data or []

@@ -8,11 +8,12 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity
+from core.templates import now_rome
 
 
 def update_kpi_daily():
     """Aggiorna kpi_daily per oggi. Chiamare a mezzanotte via Cloud Scheduler → /kpi/update."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = now_rome()
     today = now_utc.strftime("%Y-%m-%d")
     today_start = f"{today}T00:00:00+00:00"
 

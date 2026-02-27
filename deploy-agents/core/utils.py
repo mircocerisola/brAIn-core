@@ -10,6 +10,7 @@ import anthropic
 from supabase import create_client
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, COMMAND_CENTER_URL, PERPLEXITY_API_KEY, logger, _state
+from core.templates import now_rome
 
 
 def get_telegram_chat_id():
@@ -82,7 +83,7 @@ def mark_event_done(event_id, status="completed"):
     try:
         supabase.table("agent_events").update({
             "status": status,
-            "processed_at": datetime.now(timezone.utc).isoformat(),
+            "processed_at": now_rome().isoformat(),
         }).eq("id", event_id).execute()
     except:
         pass
@@ -299,7 +300,7 @@ SOLO JSON."""
 
 def get_scan_strategy():
     """Determina quale strategia usare basata su ora (rotazione 6 cicli legacy, usata solo come fallback)."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     cycle_in_day = now.hour // 4  # 0-5
     day_offset = now.timetuple().tm_yday % 6
     strategy_index = (cycle_in_day + day_offset) % 6
@@ -316,7 +317,7 @@ def get_scan_schedule_strategy():
     Aggiorna last_used sulla riga corrispondente.
     Ogni 2 ore un ciclo diverso: 12 slot al giorno.
     """
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     current_hour = now.hour
     # Arrotonda all'ora pari (0,2,4,...,22)
     slot_hour = (current_hour // 2) * 2

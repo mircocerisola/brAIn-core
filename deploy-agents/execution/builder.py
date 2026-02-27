@@ -13,6 +13,7 @@ from execution.project import (_github_project_api, _commit_to_project_repo,
     _create_supabase_project, _save_gcp_secret, _create_github_repo,
     SPEC_SYSTEM_PROMPT_AR, SPEC_HUMAN_SYSTEM_PROMPT, get_project_db,
     send_project_notification, get_chief_topic_id)
+from core.templates import now_rome
 try:
     from intelligence.memory import update_project_episode as _update_project_episode
 except Exception:
@@ -240,7 +241,7 @@ Genera il SPEC.md completo seguendo esattamente la struttura richiesta."""
         logger.error(f"[SPEC] DB update error: {e}")
 
     if github_repo:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ts = now_rome().strftime("%Y-%m-%d %H:%M UTC")
         # Commit come SPEC_CODE.md (versione tecnica per AI agents)
         ok = _commit_to_project_repo(
             github_repo, "SPEC_CODE.md", spec_md,
@@ -668,8 +669,8 @@ def run_build_agent(project_id):
     _send_to_topic(group_id, topic_id, f"\u2705 {files_committed} file committati su GitHub — salvataggio log in corso...")
 
     # Salva log iterazione su GitHub
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
-    iter_content = f"# Fase 1 — {FASE_DESCRIPTIONS[1]}\n\nData: {datetime.now(timezone.utc).isoformat()}\n\nFile generati: {files_committed}\n\n---\n\n{code_output}"
+    ts = now_rome().strftime("%Y%m%d_%H")
+    iter_content = f"# Fase 1 — {FASE_DESCRIPTIONS[1]}\n\nData: {now_rome().isoformat()}\n\nFile generati: {files_committed}\n\n---\n\n{code_output}"
     _commit_to_project_repo(github_repo, f"iterations/{ts}_fase1.md", iter_content, "log(fase-1): iterazione salvata")
 
     # Aggiorna status e build_phase
@@ -826,7 +827,7 @@ def enqueue_spec_review_action(project_id):
                 "context_type": "spec_review",
                 "project_id": project_id,
                 "solution_id": None,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": now_rome().isoformat(),
             }, on_conflict="telegram_user_id").execute()
         except Exception as _e:
             logger.warning(f"[ACTIVE_SESSION] save spec_review: {_e}")

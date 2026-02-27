@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity
+from core.templates import now_rome
 
 
 def run_idea_recycler():
@@ -26,7 +27,7 @@ def run_idea_recycler():
 
     recycled = 0
     for problem in archived:
-        age_days = (datetime.now(timezone.utc) - datetime.fromisoformat(problem["created_at"].replace("Z", "+00:00"))).days
+        age_days = (now_rome() - datetime.fromisoformat(problem["created_at"].replace("Z", "+00:00"))).days
         if age_days < 14:
             continue
 

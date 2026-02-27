@@ -7,6 +7,7 @@ import os, json, time, re
 from datetime import datetime, timezone, timedelta
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json, search_perplexity
+from core.templates import now_rome
 from execution.project import _send_to_topic, _commit_to_project_repo
 from execution.pipeline import (
     advance_pipeline_step, generate_smoke_results_card,
@@ -937,7 +938,7 @@ def analyze_smoke_results(project_id):
             "recommendation": insights.get("recommendation", ""),
             "cso_recommendation": insights.get("reasoning", ""),
             "conversion_rate": pct_positive,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": now_rome().isoformat(),
         }).eq("id", smoke_id).execute()
     except Exception as e:
         logger.error("[SMOKE_RESULTS] DB update: %s", e)
@@ -965,7 +966,7 @@ def analyze_smoke_results(project_id):
 
     # Commit SPEC_UPDATES.md su GitHub se repo esiste
     if github_repo:
-        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        date_str = now_rome().strftime("%Y-%m-%d")
         spec_updates = "# Risultati Smoke Test — " + brand_name + "\n"
         spec_updates += "Data: " + date_str + "\n\n"
         spec_updates += "## Segnale: " + (insights.get("overall_signal") or "N/A").upper() + "\n"
@@ -1073,7 +1074,7 @@ def _send_blocker_reminder(project):
     reminder_count = plan.get("reminder_count", 0)
     doc_sent = plan.get("doc_sent_at", "")
 
-    now = datetime.now(timezone.utc)
+    now = now_rome()
 
     # Se non c'e' un doc_sent_at o last_reminder, usa created_at del primo blocker
     if not last_reminder and not doc_sent:
@@ -1162,7 +1163,7 @@ def _send_daily_update_for_project(project):
     if started:
         try:
             start_dt = datetime.fromisoformat(started.replace("Z", "+00:00"))
-            day = (datetime.now(timezone.utc) - start_dt).days + 1
+            day = (now_rome() - start_dt).days + 1
         except Exception:
             day = 1
 
@@ -1204,7 +1205,7 @@ def _send_daily_update_for_project(project):
             "contacted": contacted,
             "positive": positive,
             "pct": pct,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_rome().isoformat(),
         })
         supabase.table("smoke_tests").update({"daily_updates": json.dumps(updates)}).eq("id", smoke_id).execute()
     except Exception:

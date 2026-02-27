@@ -9,6 +9,7 @@ from calendar import monthrange
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, COMMAND_CENTER_URL, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id
+from core.templates import now_rome
 
 
 def _get_rome_tz():
@@ -83,10 +84,10 @@ def _get_period_cost(since_iso, until_iso=None):
 def generate_cost_report_v2():
     """Report costi ogni 4h (ore pari Europe/Rome): ultime 4h / oggi / 7g / mese + top spender."""
     logger.info("[REPORT] Generating cost report...")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = now_rome()
     rome_tz = _get_rome_tz()
-    now_rome = now_utc.astimezone(rome_tz)
-    data_it = f"{now_rome.day} {MESI_IT_REPORT[now_rome.month]} {now_rome.year} {now_rome.strftime('%H:%M')}"
+    now_local = now_utc.astimezone(rome_tz)
+    data_it = f"{now_local.day} {MESI_IT_REPORT[now_local.month]} {now_local.year} {now_local.strftime('%H:%M')}"
 
     since_4h = (now_utc - timedelta(hours=4)).isoformat()
     today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
@@ -153,10 +154,10 @@ def generate_cost_report_v2():
 def generate_activity_report_v2():
     """Report attività ogni 4h (ore dispari Europe/Rome): scanner, pipeline, cantieri."""
     logger.info("[REPORT] Generating activity report...")
-    now_utc = datetime.now(timezone.utc)
+    now_utc = now_rome()
     rome_tz = _get_rome_tz()
-    now_rome = now_utc.astimezone(rome_tz)
-    data_it = f"{now_rome.day} {MESI_IT_REPORT[now_rome.month]} {now_rome.year} {now_rome.strftime('%H:%M')}"
+    now_local = now_utc.astimezone(rome_tz)
+    data_it = f"{now_local.day} {MESI_IT_REPORT[now_local.month]} {now_local.year} {now_local.strftime('%H:%M')}"
 
     today_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
     since_8h = (now_utc - timedelta(hours=8)).isoformat()

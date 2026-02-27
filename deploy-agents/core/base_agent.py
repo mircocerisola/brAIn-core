@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
+from core.templates import now_rome
 
 
 class BaseAgent:
@@ -139,7 +140,7 @@ class BaseAgent:
                 "cost_usd": cost,
                 "duration_ms": duration_ms,
                 "status": status,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_rome().isoformat(),
             }
             if error:
                 row["error"] = error[:500]

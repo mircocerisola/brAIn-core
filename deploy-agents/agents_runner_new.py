@@ -34,6 +34,7 @@ from finance.finance import (
 from finance.reports import (
     generate_cost_report_v2, generate_activity_report_v2, _get_rome_tz
 )
+from core.templates import now_rome
 from execution.project import init_project, get_project_db, _generate_team_invite_link_sync
 from execution.builder import (
     run_spec_generator, generate_build_prompt, run_build_agent,
@@ -160,7 +161,7 @@ async def run_activity_report_endpoint(request):
     return web.json_response(result)
 
 async def run_auto_report_endpoint(request):
-    hour = datetime.now(_get_rome_tz()).hour
+    hour = now_rome().hour
     if hour % 4 == 0:
         result = generate_cost_report_v2()
     else:

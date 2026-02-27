@@ -8,14 +8,15 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, search_perplexity, get_pipeline_thresholds
+from core.templates import now_rome
 
 
 def run_action_queue_cleanup():
     """Pulizia settimanale action_queue: rimuove entry pending > 7 giorni e processed > 30 giorni."""
     logger.info("[QUEUE_CLEANUP] Starting action_queue cleanup...")
     try:
-        threshold_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-        threshold_30d = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+        threshold_7d = (now_rome() - timedelta(days=7)).isoformat()
+        threshold_30d = (now_rome() - timedelta(days=30)).isoformat()
         # Marca come expired le pending > 7 giorni
         r1 = supabase.table("action_queue").update({"status": "expired"}) \
             .eq("status", "pending").lt("created_at", threshold_7d).execute()
@@ -43,7 +44,7 @@ def run_weekly_threshold_update():
     soglia_bos = thresholds["bos"]
 
     # BOS calcolati nell'ultima settimana
-    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    week_ago = (now_rome() - timedelta(days=7)).isoformat()
     try:
         result = supabase.table("solutions").select("bos_score") \
             .not_.is_("bos_score", "null").gte("created_at", week_ago).execute()

@@ -1,7 +1,27 @@
 """
 brAIn — core/templates.py
 Template fissi per card Telegram. Unico formato ammesso in tutto il codebase.
+Funzioni fuso orario Europe/Rome centralizzate.
 """
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+_ROME_TZ = ZoneInfo("Europe/Rome")
+
+
+def now_rome():
+    """Ritorna datetime corrente in fuso orario Europe/Rome."""
+    return datetime.now(_ROME_TZ)
+
+
+def format_time_rome():
+    """Ritorna ora corrente HH:MM in fuso orario Rome."""
+    return now_rome().strftime("%H:%M")
+
+
+def format_date_rome():
+    """Ritorna data corrente 'dd Mon YYYY' in fuso orario Rome."""
+    return now_rome().strftime("%d %b %Y")
 
 # ── SMOKE TEST CARD ─────────────────────────────────────────────────────────
 SMOKE_TEST_CARD_TEMPLATE = (

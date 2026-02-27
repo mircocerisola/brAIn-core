@@ -7,6 +7,7 @@ from datetime import datetime
 from aiohttp import web
 
 from core.config import supabase, logger
+from core.templates import now_rome
 from core.utils import get_telegram_chat_id, get_standard_queries
 from intelligence.scanner import run_world_scanner, run_custom_scan, run_scan
 from intelligence.architect import run_solution_architect
@@ -144,7 +145,7 @@ async def run_activity_report_endpoint(request):
     return web.json_response(result)
 
 async def run_auto_report_endpoint(request):
-    hour = datetime.now(_get_rome_tz()).hour
+    hour = now_rome().hour
     if hour % 4 == 0:
         result = generate_cost_report_v2()
     else:
@@ -740,14 +741,13 @@ async def run_resend_spec_endpoint(request):
         )
 
         # Salva active_session su Supabase per contesto persistente
-        from datetime import timezone as _tz
         try:
             supabase.table("active_session").upsert({
                 "telegram_user_id": int(mirco_chat_id),
                 "context_type": "spec_review",
                 "project_id": project_id,
                 "solution_id": None,
-                "updated_at": datetime.now(_tz.utc).isoformat(),
+                "updated_at": now_rome().isoformat(),
             }, on_conflict="telegram_user_id").execute()
         except Exception as _ae:
             logger.warning(f"[ACTIVE_SESSION] save resend-spec: {_ae}")

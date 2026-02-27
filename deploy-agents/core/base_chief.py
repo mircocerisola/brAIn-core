@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.base_agent import BaseAgent
+from core.templates import now_rome
 
 
 # ============================================================
@@ -624,7 +625,7 @@ class BaseChief(BaseAgent):
             "unauthorized_files": unauthorized_files,
             "unauthorized_tables": unauthorized_tables,
             "perimeter": chief_id,
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": now_rome().isoformat(),
         }
 
         if sandbox_ok:
@@ -640,7 +641,7 @@ class BaseChief(BaseAgent):
                     "sandbox_passed": True,
                     "triggered_by_message": triggered_by_message[:500] if triggered_by_message else None,
                     "routing_chain": json.dumps([{"from": chief_id, "action": "sandbox_validate"}]),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": now_rome().isoformat(),
                 }).execute()
                 if result.data:
                     task_id = result.data[0].get("id")
@@ -702,7 +703,7 @@ class BaseChief(BaseAgent):
                     "sandbox_check": json.dumps(sandbox_check),
                     "sandbox_passed": False,
                     "triggered_by_message": triggered_by_message[:500] if triggered_by_message else None,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": now_rome().isoformat(),
                 }).execute()
                 if result.data:
                     task_id = result.data[0].get("id")
@@ -733,7 +734,7 @@ class BaseChief(BaseAgent):
         Sempre inviato — usa get_domain_context() come base dati.
         Invia al Forum Topic del Chief. Ritorna il testo o None se errore.
         """
-        four_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+        four_hours_ago = (now_rome() - timedelta(hours=4)).isoformat()
 
         # Decisioni recenti (escludi brief_report)
         recent_decisions = []
@@ -784,7 +785,7 @@ class BaseChief(BaseAgent):
 
         ctx = "\n\n".join(ctx_parts) if ctx_parts else "Nessun dato significativo disponibile."
 
-        today_str = datetime.now(timezone.utc).strftime("%d %b").lstrip("0")
+        today_str = now_rome().strftime("%d %b").lstrip("0")
         prompt = (
             f"Sei il {self.name} di brAIn. Genera un report di stato breve (max 10 righe, italiano).\n"
             f"Dominio: {self.domain}\n"
@@ -817,7 +818,7 @@ class BaseChief(BaseAgent):
                 "decision_type": "brief_report",
                 "summary": text[:500],
                 "full_text": text,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_rome().isoformat(),
             }).execute()
         except Exception as e:
             logger.warning(f"[{self.name}] generate_brief_report save error: {e}")
@@ -851,7 +852,7 @@ class BaseChief(BaseAgent):
                     "decision_type": "weekly_briefing",
                     "summary": briefing_text[:1000],
                     "full_text": briefing_text,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "created_at": now_rome().isoformat(),
                 }).execute()
             except Exception as e:
                 logger.warning(f"[{self.name}] Save briefing error: {e}")
@@ -890,7 +891,7 @@ class BaseChief(BaseAgent):
                     "chief_domain": self.domain,
                     "key": key,
                     "value": assessment,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": now_rome().isoformat(),
                 }).execute()
             except Exception as e:
                 logger.warning(f"[{self.name}] Save capability error: {e}")
@@ -907,7 +908,7 @@ class BaseChief(BaseAgent):
                 "decision_type": decision_type,
                 "summary": summary[:1000],
                 "full_text": full_text or summary,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_rome().isoformat(),
             }).execute()
         except Exception as e:
             logger.warning(f"[{self.name}] save_decision error: {e}")
@@ -965,7 +966,7 @@ def agent_to_agent_call(from_chief_id: str, to_chief_id: str,
             "decision_type": f"inter_agent_{from_chief_id}_to_{to_chief_id}",
             "summary": f"{from_chief_id} -> {to_chief_id}: {task[:200]}",
             "full_text": json.dumps(result, ensure_ascii=False, default=str)[:2000],
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now_rome().isoformat(),
         }).execute()
     except Exception:
         pass
@@ -985,7 +986,7 @@ def send_system_health_check() -> Dict[str, Any]:
     Controlla: DB, scheduler jobs, progetti attivi, ultimi errori.
     """
     sep = "\u2501" * 15
-    now_str = datetime.now(timezone.utc).strftime("%d/%m %H:%M UTC")
+    now_str = now_rome().strftime("%d/%m %H:%M UTC")
 
     checks: Dict[str, str] = {}
     details: List[str] = []
@@ -1020,7 +1021,7 @@ def send_system_health_check() -> Dict[str, Any]:
 
     # 4. Errori recenti (ultimi 30 min)
     try:
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        cutoff = (now_rome() - timedelta(minutes=30)).isoformat()
         r = supabase.table("agent_logs").select("agent_id,error").eq("status", "error") \
             .gte("created_at", cutoff).limit(5).execute()
         errors = r.data or []

@@ -9,6 +9,7 @@ import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPABASE_ACCESS_TOKEN, DB_PASSWORD, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
 from execution.project import get_project_db, _send_to_topic, _get_telegram_group_id, _commit_to_project_repo
+from core.templates import now_rome
 
 
 def run_legal_review(project_id):
@@ -214,7 +215,7 @@ Max 800 parole. Solo il documento, niente intro."""
 
     # Commit su GitHub
     if github_repo:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        ts = now_rome().strftime("%Y-%m-%d")
         _commit_to_project_repo(github_repo, "docs/privacy_policy.md",
                                 docs.get("privacy_policy", ""), f"docs: Privacy Policy {ts}")
         _commit_to_project_repo(github_repo, "docs/terms_of_service.md",

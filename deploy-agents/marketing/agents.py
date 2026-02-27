@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
+from core.templates import now_rome
 
 
 def _mkt_card(emoji, title, context, lines):
@@ -71,7 +72,7 @@ def _mkt_get_or_create_brand_asset(project_id, target="project"):
 
 def _mkt_update_brand_asset(asset_id, fields):
     try:
-        fields["updated_at"] = datetime.now(timezone.utc).isoformat()
+        fields["updated_at"] = now_rome().isoformat()
         supabase.table("brand_assets").update(fields).eq("id", asset_id).execute()
     except Exception as e:
         logger.warning(f"[MKT] brand_asset update: {e}")
@@ -244,7 +245,7 @@ _{tagline}_
 """
 
     # Commit su GitHub
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "brand", "BRAND_DNA.md", brand_dna_md, f"mkt: Brand DNA {brand_name} — {ts}")
         _mkt_commit(github_repo, "brand", "BRAND_GUIDELINES.md", brand_guidelines_md, f"mkt: Brand Guidelines — {ts}")
@@ -459,7 +460,7 @@ Genera in JSON:
 """
 
     # Commit su GitHub
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "product", "POSITIONING.md", positioning_md, f"mkt: Positioning — {ts}")
         _mkt_commit(github_repo, "product", "MESSAGING_FRAMEWORK.md", messaging_md, f"mkt: Messaging Framework — {ts}")
@@ -662,7 +663,7 @@ Genera JSON:
 {cnt_data.get('cta_secondary', '')}
 """
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "content", "COPY_KIT.md", copy_kit_md, f"mkt: Copy Kit — {ts}")
         _mkt_commit(github_repo, "content", "EMAIL_SEQUENCES.md", email_md, f"mkt: Email Sequences — {ts}")
@@ -826,7 +827,7 @@ Target conversion: {funnel.get('bofu', {}).get('conversion_target', '')}
 Vedi EMAIL_SEQUENCES.md nel folder /content per i copy completi.
 """
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "demand_gen", "GROWTH_STRATEGY.md", growth_md, f"mkt: Growth Strategy — {ts}")
         _mkt_commit(github_repo, "demand_gen", "PAID_MEDIA_PLAN.md", paid_md, f"mkt: Paid Media — {ts}")
@@ -970,7 +971,7 @@ Genera JSON:
 
 {_post_lines}"""
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "social", "SOCIAL_STRATEGY.md", social_strategy_md, f"mkt: Social Strategy — {ts}")
         _mkt_commit(github_repo, "social", "CONTENT_TEMPLATES.md", templates_md, f"mkt: Content Templates — {ts}")
@@ -1131,7 +1132,7 @@ Oggetto: Re: {pr_data.get('outreach_email_subject', '')}
 "Grazie per il feedback. Capisco la tua frustrazione con [issue]. Stiamo [azione] per risolvere. Ti contatto in privato per aiutarti direttamente."
 """
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "pr", "PRESS_KIT.md", press_kit_md, f"mkt: Press Kit — {ts}")
         _mkt_commit(github_repo, "pr", "MEDIA_LIST.md", media_list_md, f"mkt: Media List — {ts}")
@@ -1268,7 +1269,7 @@ _{cm_data.get('upsell_message', '')}_
 - Segnale 3 → Offerta speciale + call
 """
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "customer", "ONBOARDING_JOURNEY.md", onboarding_md, f"mkt: Onboarding — {ts}")
         _mkt_commit(github_repo, "customer", "RETENTION_PLAYBOOK.md", retention_md, f"mkt: Retention — {ts}")
@@ -1405,7 +1406,7 @@ Genera JSON:
 **Costo totale stimato (must-have only):** €{sum(t.get('cost_eur',0) for t in martech if t.get('priority')=='must')}/mese
 """
 
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    ts = now_rome().strftime("%Y-%m-%d")
     if github_repo:
         _mkt_commit(github_repo, "ops", "TRACKING_PLAN.md", tracking_md, f"mkt: Tracking Plan — {ts}")
         _mkt_commit(github_repo, "ops", "ATTRIBUTION_MODEL.md", attribution_md, f"mkt: Attribution — {ts}")
@@ -1480,7 +1481,7 @@ def generate_marketing_report(project_id=None):
         north_star = conv
 
         # Salva in marketing_reports
-        week_start = (datetime.now(timezone.utc) - timedelta(days=datetime.now(timezone.utc).weekday())).strftime("%Y-%m-%d")
+        week_start = (now_rome() - timedelta(days=now_rome().weekday())).strftime("%Y-%m-%d")
         try:
             supabase.table("marketing_reports").insert({
                 "project_id": pid,

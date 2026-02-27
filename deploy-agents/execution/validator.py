@@ -10,6 +10,7 @@ from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, GITHUB_TOKEN, SUPA
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id, extract_json
 from execution.project import (get_project_db, _send_to_topic, _commit_to_project_repo,
     _get_telegram_group_id, _github_project_api, SPEC_SYSTEM_PROMPT_AR)
+from core.templates import now_rome
 from execution.builder import FASE_DESCRIPTIONS, enqueue_spec_review_action
 try:
     from intelligence.memory import update_project_episode as _update_project_episode
@@ -136,7 +137,7 @@ Analizza e dai il verdetto."""
             try:
                 supabase.table("projects").update({
                     "status": "killed",
-                    "notes": f"KILL — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}: {verdict_text[:200]}",
+                    "notes": f"KILL — {now_rome().strftime('%Y-%m-%d')}: {verdict_text[:200]}",
                 }).eq("id", project_id).execute()
                 _update_project_episode(project_id, f"Verdetto KILL: {verdict_text[:150]}", "killed", "Progetto archiviato")
             except:
@@ -305,8 +306,8 @@ Genera il codice per la Fase {next_phase}."""
         files_committed = 1
 
     # Salva log iterazione
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H")
-    iter_content = f"# Fase {next_phase} — {fase_desc}\n\nData: {datetime.now(timezone.utc).isoformat()}\nFeedback: {feedback}\n\n---\n\n{code_output}"
+    ts = now_rome().strftime("%Y%m%d_%H")
+    iter_content = f"# Fase {next_phase} — {fase_desc}\n\nData: {now_rome().isoformat()}\nFeedback: {feedback}\n\n---\n\n{code_output}"
     _commit_to_project_repo(github_repo, f"iterations/{ts}_fase{next_phase}.md", iter_content, f"log(fase-{next_phase}): iterazione salvata")
 
     cost = (tokens_in * 3.0 + tokens_out * 15.0) / 1_000_000
@@ -399,7 +400,7 @@ def _generate_team_invite_link_sync(project_id):
     if not group_id or not TELEGRAM_BOT_TOKEN:
         return None
     try:
-        expire_date = int((datetime.now(timezone.utc) + timedelta(hours=24)).timestamp())
+        expire_date = int((now_rome() + timedelta(hours=24)).timestamp())
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/createChatInviteLink",
             json={
@@ -487,7 +488,7 @@ Rispondi SOLO con il SPEC.md aggiornato completo."""
 
     github_repo = project.get("github_repo", "")
     if github_repo:
-        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ts = now_rome().strftime("%Y-%m-%d %H:%M UTC")
         _commit_to_project_repo(
             github_repo, "SPEC.md", new_spec,
             f"update: SPEC.md modificato da Mirco — {ts}",

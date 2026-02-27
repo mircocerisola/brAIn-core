@@ -9,6 +9,7 @@ from calendar import monthrange
 import requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, COMMAND_CENTER_URL, logger
 from core.utils import log_to_supabase, notify_telegram, get_telegram_chat_id
+from core.templates import now_rome
 
 MONTHLY_BUDGET_EUR = 1000.0
 DEFAULT_USD_TO_EUR = 0.92
@@ -37,7 +38,7 @@ def finance_get_usd_to_eur():
                 fetched_dt = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
             else:
                 fetched_dt = fetched_at
-            age_days = (datetime.now(timezone.utc) - fetched_dt).days
+            age_days = (now_rome() - fetched_dt).days
             if age_days < 30:
                 return float(result.data[0]["rate"])
     except Exception as e:
@@ -177,7 +178,7 @@ def finance_get_all_time_costs():
 
 def finance_get_daily_series(days):
     """Array di costi giornalieri per gli ultimi N giorni. Ritorna [(date_str, cost_usd), ...]."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     series = []
     for i in range(days, 0, -1):
         d = (now - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -191,7 +192,7 @@ def finance_get_month_costs(year, month):
     first_day = f"{year}-{month:02d}-01"
     _, last = monthrange(year, month)
     last_day = f"{year}-{month:02d}-{last}"
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = now_rome().strftime("%Y-%m-%d")
     end = min(last_day, today)
     data = finance_get_range_costs(first_day, end)
     return data["total_cost_usd"] if data else 0.0
@@ -201,7 +202,7 @@ def finance_get_month_costs(year, month):
 
 def finance_burn_rates():
     """Burn rate: oggi, media 7gg, media 30gg (tutto in USD variabili)."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     today = now.strftime("%Y-%m-%d")
     today_costs = finance_get_daily_costs(today)
     today_usd = today_costs["total_cost_usd"] if today_costs else 0.0
@@ -236,7 +237,7 @@ def finance_projections(usd_to_eur):
 
 def finance_runway(usd_to_eur):
     """Giorni di runway rimanenti con budget mensile 1000 EUR."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     year, month = now.year, now.month
     _, days_in_month = monthrange(year, month)
     days_elapsed = now.day
@@ -275,7 +276,7 @@ def finance_runway(usd_to_eur):
 
 def finance_cost_per_value(days=30):
     """Costo per problema trovato, soluzione generata, BOS calcolato."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     since = (now - timedelta(days=days)).strftime("%Y-%m-%d")
 
     # Costi per agente nel periodo
@@ -340,7 +341,7 @@ def finance_cost_per_value(days=30):
 
 def finance_optimization_suggestions(days=7):
     """Analizza log e suggerisce ottimizzazioni con risparmio stimato."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     since = (now - timedelta(days=days)).strftime("%Y-%m-%d")
     try:
         logs = _paginated_logs(
@@ -458,7 +459,7 @@ def finance_detect_anomalies():
             })
 
     # 3-sigma per agente (ultimi 30gg aggregati per agente per giorno)
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     since = (now - timedelta(days=30)).strftime("%Y-%m-%d")
     try:
         logs = _paginated_logs(
@@ -503,7 +504,7 @@ def finance_detect_anomalies():
 
 def finance_cfo_metrics(usd_to_eur):
     """Metriche enterprise: margine operativo, rapporti, unit economics."""
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     year, month = now.year, now.month
     _, days_in_month = monthrange(year, month)
     days_elapsed = now.day
@@ -584,7 +585,7 @@ def finance_save_metrics(daily_data, projection_usd, projection_eur, budget_pct,
 def finance_morning_report():
     """Report CFO mattutino: costi ieri, trend, burn rate, runway, alert."""
     logger.info("[FINANCE] Morning report starting...")
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
     usd_to_eur = finance_get_usd_to_eur()
 
@@ -664,7 +665,7 @@ def finance_morning_report():
 def finance_weekly_report():
     """Report CFO settimanale: analisi completa, confronto, ottimizzazioni, anomalie."""
     logger.info("[FINANCE] Weekly report starting...")
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     usd_to_eur = finance_get_usd_to_eur()
 
     # Questa settimana (lun-dom)
@@ -764,7 +765,7 @@ def finance_weekly_report():
 def finance_monthly_report():
     """Report CFO mensile: trend, piano ottimizzazione, previsione mese successivo."""
     logger.info("[FINANCE] Monthly report starting...")
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     usd_to_eur = finance_get_usd_to_eur()
 
     # Mese precedente
@@ -869,7 +870,7 @@ def run_finance_agent(target_date=None):
     """Analisi finanziaria completa — usata da /finance endpoint."""
     logger.info("Finance Agent v2.0 — CFO AI starting...")
 
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     if target_date:
         date_str = target_date
     else:

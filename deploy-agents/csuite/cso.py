@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from core.base_chief import BaseChief
 from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
+from core.templates import now_rome
 
 _SMOKE_TEST_INSTRUCTIONS = (
     "Sei responsabile diretto degli step 4-7 della pipeline: "
@@ -111,7 +112,7 @@ class CSO(BaseChief):
         anomalies = []
         try:
             from datetime import datetime, timezone, timedelta
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            week_ago = (now_rome() - timedelta(days=7)).isoformat()
             r = supabase.table("problems").select("id").gte("created_at", week_ago).execute()
             count = len(r.data or [])
             if count < 10:

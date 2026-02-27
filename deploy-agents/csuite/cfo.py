@@ -2,6 +2,7 @@
 import json
 from core.base_chief import BaseChief
 from core.config import supabase, logger
+from core.templates import now_rome
 
 
 class CFO(BaseChief):
@@ -22,7 +23,7 @@ class CFO(BaseChief):
         ctx = super().get_domain_context()
         try:
             from datetime import datetime, timezone, timedelta
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            week_ago = (now_rome() - timedelta(days=7)).isoformat()
             # FIX 4a: costi per agente E per modello (ultimi 7 giorni)
             r = supabase.table("agent_logs").select("agent_id,model_used,cost_usd") \
                 .gte("created_at", week_ago).execute()
@@ -89,7 +90,7 @@ class CFO(BaseChief):
         anomalies = []
         try:
             from datetime import datetime, timezone, timedelta
-            yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+            yesterday = (now_rome() - timedelta(days=1)).isoformat()
             r = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
             daily_cost = sum(float(row.get("cost_usd") or 0) for row in (r.data or []))
             budget_daily = 33.0  # €1000/mese / 30 giorni

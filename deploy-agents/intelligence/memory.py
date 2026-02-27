@@ -11,6 +11,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from core.config import supabase, claude, logger
+from core.templates import now_rome
 
 
 # ============================================================
@@ -52,7 +53,7 @@ def create_episode(scope_type: str, scope_id: str, messages: List[Dict[str, str]
             "summary": summary,
             "messages_covered": len(messages),
             "importance": 3,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now_rome().isoformat(),
         }).execute()
         episode_id = result.data[0]["id"] if result.data else None
         logger.info(f"[MEMORY] Episode created scope={scope_type}:{scope_id} id={episode_id}")
@@ -83,7 +84,7 @@ def get_episodes(scope_type: str, scope_id: str, limit: int = 5) -> List[str]:
 
         # Aggiorna access_count e last_accessed_at in background
         try:
-            now = datetime.now(timezone.utc).isoformat()
+            now = now_rome().isoformat()
             for eid in ids:
                 supabase.table("episodic_memory").update({
                     "last_accessed_at": now,
@@ -119,7 +120,7 @@ def update_project_episode(project_id: int, event_text: str, status: str, next_s
             "summary": summary,
             "messages_covered": 1,
             "importance": 5,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now_rome().isoformat(),
         }).execute()
         logger.info(f"[MEMORY] Project episode saved project_id={project_id} status={status}")
     except Exception as e:
@@ -241,7 +242,7 @@ def cleanup_memory() -> Dict[str, Any]:
     - Elimina topic_conversation_history > 7gg
     - Unifica episodi > 30gg con importance <= 3 per scope
     """
-    now = datetime.now(timezone.utc)
+    now = now_rome()
     deleted_episodes = 0
     deleted_messages = 0
     merged_episodes = 0
@@ -325,7 +326,7 @@ def cleanup_memory() -> Dict[str, Any]:
                         "summary": merged_summary,
                         "messages_covered": sum(ep.get("messages_covered", 1) or 1 for ep in episodes),
                         "importance": 3,
-                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "created_at": now_rome().isoformat(),
                     }).execute()
                     merged_episodes += 1
                 except Exception as e:

@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib, json, time
 from datetime import datetime, timezone
 from typing import Optional
+from core.templates import now_rome
 import requests as _requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 
@@ -236,7 +237,7 @@ def update_project_loc(project_id: int, new_files_loc: int, new_files_count: int
         supabase.table("projects").update({
             "lines_of_code": total_loc,
             "files_count": total_files,
-            "last_code_update": datetime.now(timezone.utc).isoformat(),
+            "last_code_update": now_rome().isoformat(),
         }).eq("id", project_id).execute()
         supabase.table("project_reports").insert({
             "project_id": project_id,
@@ -748,8 +749,8 @@ def _send_operational_document(project_id, brand_name, method, method_label,
         r = supabase.table("projects").select("smoke_test_plan").eq("id", project_id).execute()
         if r.data:
             plan_stored = json.loads(r.data[0].get("smoke_test_plan") or "{}")
-            plan_stored["doc_sent_at"] = datetime.now(timezone.utc).isoformat()
-            plan_stored["last_reminder_at"] = datetime.now(timezone.utc).isoformat()
+            plan_stored["doc_sent_at"] = now_rome().isoformat()
+            plan_stored["last_reminder_at"] = now_rome().isoformat()
             plan_stored["reminder_count"] = 0
             supabase.table("projects").update({
                 "smoke_test_plan": json.dumps(plan_stored),

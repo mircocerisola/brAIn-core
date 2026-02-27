@@ -10,6 +10,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
+from core.templates import now_rome
 
 
 def _get_technology_topic() -> tuple:
@@ -53,8 +54,8 @@ def _save_cdo_report(cto_domain: str, report_type: str, title: str, content: str
             "title": title,
             "content": content,
             "importance": 3,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now_rome().isoformat(),
+            "updated_at": now_rome().isoformat(),
         }).execute()
     except Exception as e:
         logger.warning(f"[CDO] save_cdo_report error: {e}")
@@ -69,7 +70,7 @@ def audit_data_quality() -> Dict[str, Any]:
     - chief_knowledge non aggiornato da >14gg per un Chief
     Produce report al CTO nel topic #technology.
     """
-    start = datetime.now(timezone.utc)
+    start = now_rome()
     sep = "\u2501" * 15
     issues: List[str] = []
     logger.info("[CDO] Avvio audit_data_quality")
@@ -131,7 +132,7 @@ def audit_data_quality() -> Dict[str, Any]:
         logger.warning(f"[CDO] spec_md check: {e}")
 
     # Costruisci report
-    duration_s = int((datetime.now(timezone.utc) - start).total_seconds())
+    duration_s = int((now_rome() - start).total_seconds())
     status_icon = "🟢" if not issues else ("🔴" if len(issues) > 3 else "🟡")
 
     report_lines = [
@@ -167,7 +168,7 @@ def optimize_knowledge_storage() -> Dict[str, Any]:
     - Suggerisce compressione learning simili
     - Propone threshold auto-archiviazione
     """
-    start = datetime.now(timezone.utc)
+    start = now_rome()
     sep = "\u2501" * 15
     logger.info("[CDO] Avvio optimize_knowledge_storage")
 
@@ -205,7 +206,7 @@ def optimize_knowledge_storage() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[CDO] coaching analysis: {e}")
 
-    duration_s = int((datetime.now(timezone.utc) - start).total_seconds())
+    duration_s = int((now_rome() - start).total_seconds())
 
     stats_lines = [f"  {t}: {cnt} righe" for t, cnt in table_stats.items()]
     report_lines = [
@@ -235,7 +236,7 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
     Traccia crescita settimanale org_shared_knowledge e chief_knowledge per ogni Chief.
     Alert CPeO se un Chief non riceve nuova conoscenza da >7gg.
     """
-    start = datetime.now(timezone.utc)
+    start = now_rome()
     sep = "\u2501" * 15
     week_ago = (start - timedelta(days=7)).isoformat()
     logger.info("[CDO] Avvio monitor_knowledge_growth")
@@ -265,7 +266,7 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
             growth[chief_id] = 0
             alerts.append(chief_id.upper())
 
-    duration_s = int((datetime.now(timezone.utc) - start).total_seconds())
+    duration_s = int((now_rome() - start).total_seconds())
 
     chief_lines = []
     for cid in ["cso", "coo", "cto", "cmo", "cfo", "clo", "cpeo"]:

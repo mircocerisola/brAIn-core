@@ -15,6 +15,7 @@ from core.utils import (log_to_supabase, notify_telegram, extract_json, search_p
                         get_high_bos_problem_sectors, build_strategy_queries)
 from intelligence.architect import (run_solution_architect, research_problem,
     generate_solutions_unconstrained, assess_feasibility, save_solution_v2)
+from core.templates import now_rome
 
 
 FEASIBILITY_ENGINE_PROMPT = """Sei il Feasibility Engine di brAIn. Valuta la fattibilita' tecnica ed economica di una soluzione MVP.
@@ -388,7 +389,7 @@ def calculate_bos(solution_id):
 def check_bos_weekly_target():
     """Verifica target dinamico: solo il 10% dei BOS deve superare soglia_bos."""
     try:
-        week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+        week_ago = (now_rome() - timedelta(days=7)).isoformat()
         result = supabase.table("solutions").select(
             "bos_score"
         ).not_.is_("bos_score", "null").gte("created_at", week_ago).execute()

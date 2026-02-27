@@ -11,6 +11,7 @@ from typing import Dict, Any, List
 
 from core.config import supabase, claude, logger
 from core.utils import notify_telegram, log_to_supabase
+from core.templates import now_rome
 
 
 # ============================================================
@@ -176,7 +177,7 @@ Rispondi SOLO con il JSON array, nessun altro testo."""
                 "suggestion": v.get("suggestion", ""),
                 "blocked": blocked,
                 "ethics_version": ETHICAL_CODE["version"],
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": now_rome().isoformat(),
             }).execute()
         except Exception as e:
             logger.warning(f"[ETHICS] Save violation error: {e}")

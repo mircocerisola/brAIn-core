@@ -14,6 +14,7 @@ from core.utils import (log_to_supabase, notify_telegram, extract_json, search_p
                         get_sector_with_fewest_problems, get_last_sector_rotation,
                         get_high_bos_problem_sectors, build_strategy_queries,
                         SCANNER_SECTORS)
+from core.templates import now_rome
 
 
 def scanner_make_fingerprint(title, sector):
@@ -407,7 +408,7 @@ def run_scan(queries, max_problems=None):
         time.sleep(1)
 
     # Aggiorna statistiche fonti — solo quelle che hanno contribuito problemi
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now_iso = now_rome().isoformat()
     for source in sources:
         sid = source.get("id")
         try:

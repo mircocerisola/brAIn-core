@@ -1,6 +1,7 @@
 """COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue."""
 from core.base_chief import BaseChief
 from core.config import supabase
+from core.templates import now_rome
 
 
 class COO(BaseChief):
@@ -72,7 +73,7 @@ class COO(BaseChief):
                 created = row.get("created_at", "")
                 if created:
                     from dateutil.parser import parse as parse_dt
-                    age = (datetime.now(timezone.utc) - parse_dt(created)).days
+                    age = (now_rome() - parse_dt(created)).days
                     if age > 7:
                         anomalies.append({
                             "type": "stale_action",
@@ -92,7 +93,7 @@ class COO(BaseChief):
                 if updated:
                     from datetime import datetime, timezone
                     from dateutil.parser import parse as parse_dt
-                    age = (datetime.now(timezone.utc) - parse_dt(updated)).days
+                    age = (now_rome() - parse_dt(updated)).days
                     if age > 5:
                         anomalies.append({
                             "type": "stale_build",

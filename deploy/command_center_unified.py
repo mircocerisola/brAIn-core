@@ -15,6 +15,12 @@ import asyncio
 import threading
 import base64
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+_ROME_TZ = ZoneInfo("Europe/Rome")
+
+def _now_rome():
+    return datetime.now(_ROME_TZ)
 from aiohttp import web
 from dotenv import load_dotenv
 import anthropic
@@ -158,13 +164,12 @@ def _get_strategy_topic_id():
 def _save_active_session(user_id, context_type, project_id=None, solution_id=None):
     """Salva/aggiorna sessione attiva su Supabase (upsert per user_id)."""
     try:
-        from datetime import timezone
         data = {
             "telegram_user_id": int(user_id),
             "context_type": context_type,
             "project_id": project_id,
             "solution_id": solution_id,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": _now_rome().isoformat(),
         }
         supabase.table("active_session").upsert(data, on_conflict="telegram_user_id").execute()
     except Exception as e:
@@ -174,8 +179,7 @@ def _save_active_session(user_id, context_type, project_id=None, solution_id=Non
 def _load_active_session(user_id):
     """Carica sessione attiva se aggiornata negli ultimi 30 minuti. Ritorna dict o None."""
     try:
-        from datetime import timezone, timedelta
-        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        cutoff = (_now_rome() - timedelta(minutes=30)).isoformat()
         r = supabase.table("active_session").select("*") \
             .eq("telegram_user_id", int(user_id)) \
             .gt("updated_at", cutoff) \
@@ -467,7 +471,7 @@ def build_system_prompt(chat_id=None, conversation_summary=None, active_project_
     if active_project_context:
         active_section = f"\nPROGETTO ATTIVO (non chiedere di che progetto si tratta — usa questo contesto):\n{active_project_context}\n"
 
-    oggi = datetime.now().strftime("%d/%m/%Y")
+    oggi = _now_rome().strftime("%d/%m/%Y")
 
     return f"""Oggi e' il {oggi}.
 
@@ -590,7 +594,7 @@ def get_minimal_context():
         s_active = supabase.table("solutions").select("id", count="exact").eq("status_detail", "active").execute()
         s_archived = supabase.table("solutions").select("id", count="exact").eq("status_detail", "archived").execute()
         # Costi ultimi 24h
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+        yesterday = (_now_rome() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
         cost_24h_eur = round(sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])) * USD_TO_EUR, 4)
         # Ultimi eventi pipeline
@@ -894,7 +898,7 @@ def get_system_status():
                     }
             status["agenti"] = agents
 
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
+        yesterday = (_now_rome() - timedelta(days=1)).isoformat()
         costs = supabase.table("agent_logs").select("cost_usd").gte("created_at", yesterday).execute()
         status["costi_24h_eur"] = round(
             sum(float(c.get("cost_usd", 0) or 0) for c in (costs.data or [])) * USD_TO_EUR, 4
@@ -911,7 +915,7 @@ def get_system_status():
 
 def get_cost_report(days=7):
     try:
-        since = (datetime.now() - timedelta(days=days)).isoformat()
+        since = (_now_rome() - timedelta(days=days)).isoformat()
         logs = supabase.table("agent_logs") \
             .select("agent_id,cost_usd,tokens_input,tokens_output,model_used") \
             .gte("created_at", since).limit(500).execute()
@@ -1297,7 +1301,7 @@ def complete_action(action_id, new_status="completed"):
     try:
         supabase.table(ACTION_QUEUE_TABLE).update({
             "status": new_status,
-            "completed_at": datetime.now().isoformat(),
+            "completed_at": _now_rome().isoformat(),
         }).eq("id", action_id).execute()
         logger.info(f"[ACTION_QUEUE] Azione {action_id} -> {new_status}")
         return True
@@ -3941,8 +3945,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "cost_detail_4h":
         await query.answer()
         try:
-            from datetime import timedelta
-            since_4h = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+            since_4h = (_now_rome() - timedelta(hours=4)).isoformat()
             logs = supabase.table("agent_logs").select("agent_id,cost_usd,action").gte("created_at", since_4h).execute().data or []
             by_agent = {}
             for l in logs:
@@ -3965,9 +3968,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "cost_trend_7d":
         await query.answer()
         try:
-            from datetime import timedelta
             lines = ["\U0001f4ca *Trend costi 7 giorni*", "\u2501" * 15]
-            now_utc = datetime.now(timezone.utc)
+            now_utc = _now_rome()
             for d in range(6, -1, -1):
                 day = now_utc - timedelta(days=d)
                 day_str = day.strftime("%Y-%m-%d")
@@ -4108,10 +4110,11 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     _titolo = (_tr.data[0].get("title") or "Azione codice")[:60]
             except Exception:
                 pass
-            _start_ts = datetime.now(tz=None)
+            _start_ts = _now_rome()
             _ora_avvio = _start_ts.strftime("%H:%M")
             _elapsed = 0
-            _max_checks = 12  # max 60 min di monitoraggio
+            _max_checks = 3  # max 15 min di monitoraggio
+            _completed = False
             for _i in range(_max_checks):
                 _time.sleep(300)  # 5 minuti
                 _elapsed += 5
@@ -4142,6 +4145,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             f"https://api.telegram.org/bot{_tok}/sendMessage",
                             json=_p, timeout=10,
                         )
+                        _completed = True
                         break
                     elif _st == "error":
                         _err_text = (
@@ -4159,6 +4163,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                             f"https://api.telegram.org/bot{_tok}/sendMessage",
                             json=_p, timeout=10,
                         )
+                        _completed = True
                         break
                     else:
                         # Ancora in esecuzione — aggiornamento
@@ -4180,6 +4185,27 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 except Exception as _me:
                     logger.warning(f"[CODE_MONITOR] {_me}")
                     break
+            # Timeout raggiunto senza completamento
+            if not _completed:
+                _timeout_text = (
+                    "\u26a0\ufe0f Timeout \u2014 15 min superati\n"
+                    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                    "\U0001f4cb Task: " + _titolo + "\n"
+                    "\U0001f550 Avviato alle " + _ora_avvio + "\n"
+                    "Il prompt e' ancora in esecuzione su Claude Code.\n"
+                    "Controlla il PC per vedere lo stato manuale.\n"
+                    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+                )
+                _p = {"chat_id": _mon_chat, "text": _timeout_text}
+                if _mon_thread:
+                    _p["message_thread_id"] = _mon_thread
+                try:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_tok}/sendMessage",
+                        json=_p, timeout=10,
+                    )
+                except Exception:
+                    pass
         threading.Thread(target=_code_progress_monitor, daemon=True).start()
 
     elif data.startswith("code_detail:"):

@@ -6,6 +6,7 @@ from typing import Dict, Any, List
 
 from core.base_chief import BaseChief
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
+from core.templates import now_rome
 
 
 class CPeO(BaseChief):
@@ -42,7 +43,7 @@ class CPeO(BaseChief):
             ctx["revenue_shares"] = []
         # Chief knowledge growth ultima settimana
         try:
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            week_ago = (now_rome() - timedelta(days=7)).isoformat()
             r = supabase.table("chief_knowledge").select("chief_id,knowledge_type") \
                 .gte("created_at", week_ago).execute()
             growth: Dict[str, int] = {}
@@ -65,7 +66,7 @@ def coach_chiefs() -> Dict[str, Any]:
     Genera learning in chief_knowledge (knowledge_type='coaching', importance=4).
     Invia report al topic #people.
     """
-    start = datetime.now(timezone.utc)
+    start = now_rome()
     sep = "\u2501" * 15
     week_ago = (start - timedelta(days=7)).isoformat()
     logger.info("[CPeO] Avvio coach_chiefs")
