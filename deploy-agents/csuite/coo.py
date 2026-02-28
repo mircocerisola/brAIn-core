@@ -41,13 +41,11 @@ class COO(BaseChief):
     MY_REFUSE_DOMAINS = []  # COO coordina tutto, non rifiuta nulla
     briefing_prompt_template = (
         "Sei il COO di brAIn — Chief Operations & Revenue Officer. "
-        "Genera un briefing operativo settimanale includendo: "
-        "1) Status cantieri attivi (fase, blocchi, build_phase), "
-        "2) Prodotti live e metriche chiave (KPI, conversione, smoke test), "
-        "3) Pipeline problemi→soluzioni→BOS (velocità, colli di bottiglia), "
-        "4) SLA rispettati/violati e action_queue pending, "
-        "5) Manager di cantiere attivi e loro performance, "
-        "6) Azioni operative e di prodotto prioritarie."
+        "Genera un briefing operativo settimanale PRECISO basato sui dati reali del contesto. "
+        "NON inventare informazioni. Se un dato manca, scrivi 'dato mancante'. "
+        "Per ogni cantiere attivo elenca le azioni con stato reale: "
+        "completata, in corso, bloccata, in attesa Mirco. "
+        "Indica CHI deve fare COSA per ogni azione."
     )
 
     def get_domain_context(self):
@@ -91,6 +89,14 @@ class COO(BaseChief):
             ctx["recent_logs"] = r.data or []
         except Exception as e:
             ctx["recent_logs"] = f"errore lettura DB: {e}"
+        # Project tasks per cantieri attivi
+        try:
+            r = supabase.table("project_tasks").select(
+                "id,project_id,title,status,assigned_to,priority"
+            ).order("project_id").order("id").execute()
+            ctx["project_tasks"] = r.data or []
+        except Exception as e:
+            ctx["project_tasks"] = f"errore lettura DB: {e}"
         return ctx
 
 
