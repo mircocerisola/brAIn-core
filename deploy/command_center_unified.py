@@ -2861,9 +2861,26 @@ async def handle_project_message(update, project):
             f"SPEC (estratto): {spec_excerpt}"
         )
 
-        # v5.31: conversation_state — riusa Chief attivo se presente (skip Haiku)
+        _chief_domain_map = {
+            "cso": "strategy", "coo": "ops", "cto": "tech",
+            "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
+        }
+        _chief_name_map = {
+            "cso": "CSO", "coo": "COO", "cto": "CTO",
+            "cmo": "CMO", "cfo": "CFO", "clo": "CLO", "cpeo": "CPeO",
+        }
+
+        # PRIORITA' 1: menzione esplicita di un Chief nel messaggio (override tutto)
         _chief_id = None
-        if _CSUITE_DIRECT and thread_id:
+        _msg_lower = msg.strip().lower()
+        for _cid_check in _chief_domain_map:
+            if _cid_check in _msg_lower:
+                _chief_id = _cid_check
+                logger.info(f"[ROUTING] menzione esplicita: '{_cid_check}' -> {_chief_id}")
+                break
+
+        # PRIORITA' 2: conversation_state — riusa Chief attivo se presente
+        if not _chief_id and _CSUITE_DIRECT and thread_id:
             try:
                 _coo_state = _csuite_get_chief("ops")
                 if _coo_state and hasattr(_coo_state, "get_active_chief_for_topic"):
@@ -2878,25 +2895,7 @@ async def handle_project_message(update, project):
             except Exception as _se:
                 logger.warning(f"[ROUTING] conversation_state check: {_se}")
 
-        _chief_domain_map = {
-            "cso": "strategy", "coo": "ops", "cto": "tech",
-            "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
-        }
-        _chief_name_map = {
-            "cso": "CSO", "coo": "COO", "cto": "CTO",
-            "cmo": "CMO", "cfo": "CFO", "clo": "CLO", "cpeo": "CPeO",
-        }
-
-        # Menzione esplicita di un Chief nel messaggio: routing diretto (skip Haiku)
-        if not _chief_id:
-            _msg_lower = msg.strip().lower()
-            for _cid_check in _chief_domain_map:
-                if _cid_check in _msg_lower:
-                    _chief_id = _cid_check
-                    logger.info(f"[ROUTING] menzione esplicita: '{_cid_check}' nel messaggio -> {_chief_id}")
-                    break
-
-        # Se nessun Chief attivo e nessuna menzione, classifica con Haiku
+        # PRIORITA' 3: classifica con Haiku (nessuna menzione, nessuno stato)
         if not _chief_id:
             _classify_prompt = (
                 f"Sei un sistema di routing per il C-Suite di brAIn.\n"
