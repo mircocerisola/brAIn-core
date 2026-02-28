@@ -127,8 +127,10 @@ def run_all_anomaly_checks():
                 all_anomalies[domain] = anomalies
                 for a in anomalies:
                     if a.get("severity") in ("critical", "high"):
+                        _anom_icons = {"strategy": "\U0001f3af", "operations": "\u2699\ufe0f", "technology": "\U0001f4bb", "marketing": "\U0001f3a8", "finance": "\U0001f4b0", "legal": "\u2696\ufe0f", "people": "\U0001f9e0"}
+                        _anom_icon = _anom_icons.get(domain, "")
                         notify_telegram(
-                            f"⚠️ *{chief.name} Anomalia* [{a['severity'].upper()}]\n{a['description']}",
+                            f"{_anom_icon} {chief.name}\n⚠️ Anomalia [{a['severity'].upper()}]\n{a['description']}",
                             level="warning",
                             source=chief.name,
                         )

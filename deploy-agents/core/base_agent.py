@@ -57,8 +57,10 @@ class BaseAgent:
                 # v5.36: alert Mirco quando circuit apre
                 try:
                     from core.utils import notify_telegram
+                    _cb_icon = "\u2699\ufe0f"  # default COO
+                    _cb_name = self.name or "SYSTEM"
                     notify_telegram(
-                        f"[{self.name}] Circuit breaker aperto — {self.CIRCUIT_THRESHOLD} errori consecutivi. "
+                        f"{_cb_icon} {_cb_name}\nCircuit breaker aperto — {self.CIRCUIT_THRESHOLD} errori consecutivi. "
                         f"Reset in {self.CIRCUIT_RESET_SECONDS}s.",
                         level="critical",
                     )

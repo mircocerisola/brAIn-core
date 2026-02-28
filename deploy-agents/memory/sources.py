@@ -200,9 +200,9 @@ def run_sources_cleanup_weekly():
                 )
             except Exception as e:
                 logger.warning(f"[CLEANUP] notify error: {e}")
-                notify_telegram(src_msg)
+                notify_telegram("\u2699\ufe0f COO\n" + src_msg)
         else:
-            notify_telegram(src_msg)
+            notify_telegram("\u2699\ufe0f COO\n" + src_msg)
 
     # Report settimanale soglie
     dt_str = f"{dynamic_threshold:.2f}" if dynamic_threshold is not None else "N/A"
@@ -214,7 +214,7 @@ def run_sources_cleanup_weekly():
         f"Soglia assoluta: {absolute_threshold}\n"
         f"{SEP}"
     )
-    notify_telegram(report)
+    notify_telegram("\u2699\ufe0f COO\n" + report)
 
     log_to_supabase("source_cleanup", "weekly_cleanup", 1,
         f"{len(all_sources)} fonti analizzate",

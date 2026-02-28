@@ -545,7 +545,8 @@ def _ensure_spec_and_repo(project_id, project, group_id):
             # FIX 3: alert cantiere e abort
             _send_to_topic(group_id, topic_id,
                 f"\u274c Build {name}: impossibile creare/trovare repo GitHub.\n"
-                f"Verifica GITHUB_TOKEN in agents-runner.")
+                f"Verifica GITHUB_TOKEN in agents-runner.",
+                chief="cto")
             return None, None
 
     return spec_md, github_repo
@@ -710,7 +711,7 @@ def run_build_agent(project_id):
             {"text": "\u270f\ufe0f Modifica", "callback_data": f"build_modify:{project_id}:1"},
         ]]
     }
-    _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
+    _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup, chief="cto")
     # Sblocca pipeline
     try:
         supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()

@@ -179,7 +179,7 @@ Analizza e dai il verdetto."""
         val_reply_markup = {"inline_keyboard": [val_keyboard]}
 
         if group_id and topic_id:
-            _send_to_topic(group_id, topic_id, report_msg, reply_markup=val_reply_markup)
+            _send_to_topic(group_id, topic_id, report_msg, reply_markup=val_reply_markup, chief="cto")
         if chat_id and TELEGRAM_BOT_TOKEN:
             try:
                 requests.post(

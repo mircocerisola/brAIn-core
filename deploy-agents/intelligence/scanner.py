@@ -510,7 +510,7 @@ def run_custom_scan(topic):
         import threading
         threading.Thread(target=run_auto_pipeline, args=(saved_ids,), daemon=True).start()
     elif result.get("saved", 0) == 0:
-        notify_telegram(f"Scan su '{topic}' completato ma non ho trovato problemi nuovi.")
+        notify_telegram(f"\U0001f3af CSO\nScan su '{topic}' completato ma non ho trovato problemi nuovi.")
     return result
 
 

@@ -195,7 +195,8 @@ Rispondi SOLO con il JSON array, nessun altro testo."""
             for v in critical_violations
         )
         notify_telegram(
-            f"🚫 *ETHICS BLOCK — {project_name}*\n\n"
+            "\U0001f9e0 CPeO\n"
+            f"🚫 ETHICS BLOCK — {project_name}\n\n"
             f"Il progetto è stato bloccato per violazioni etiche critiche:\n{violations_text}\n\n"
             f"Progetto ID: {project_id} — status: ethics_blocked",
             level="critical",
@@ -207,7 +208,7 @@ Rispondi SOLO con il JSON array, nessun altro testo."""
             # Violazioni non critiche: notifica senza bloccare
             v_text = "\n".join(f"- [{v['principle_id']}] {v['violation'][:80]}" for v in violations)
             notify_telegram(
-                f"⚠️ *Ethics Warning — {project_name}*\n{v_text}",
+                f"\U0001f9e0 CPeO\n⚠️ Ethics Warning — {project_name}\n{v_text}",
                 level="warning",
                 source="ethics_monitor",
             )

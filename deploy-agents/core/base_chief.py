@@ -930,7 +930,9 @@ class BaseChief(BaseAgent):
             _files_str = ", ".join(_files_list) if _files_list else "da determinare"
             _time_est = _meta.get("time_estimate", "da valutare")
 
+            _CHIEF_ICONS_SB = {"cto": "\U0001f4bb", "coo": "\u2699\ufe0f", "cso": "\U0001f3af", "cmo": "\U0001f3a8", "cfo": "\U0001f4b0", "clo": "\u2696\ufe0f", "cpeo": "\U0001f9e0"}
             card_text = (
+                f"{_CHIEF_ICONS_SB.get(chief_id, '')} {chief_id.upper()}\n"
                 f"\u26a1 AZIONE CODICE \u2014 {self.name} vuole agire\n\n"
                 f"{_desc[:300]}\n"
                 f"\U0001f4c1 File: {_files_str}\n"
@@ -957,7 +959,9 @@ class BaseChief(BaseAgent):
             uf_str = ", ".join(unauthorized_files) if unauthorized_files else "nessuno"
             ut_str = ", ".join(unauthorized_tables) if unauthorized_tables else "nessuna"
 
+            _CHIEF_ICONS_BLK = {"cto": "\U0001f4bb", "coo": "\u2699\ufe0f", "cso": "\U0001f3af", "cmo": "\U0001f3a8", "cfo": "\U0001f4b0", "clo": "\u2696\ufe0f", "cpeo": "\U0001f9e0"}
             alert_text = (
+                f"{_CHIEF_ICONS_BLK.get(chief_id, '')} {chief_id.upper()}\n"
                 f"\U0001f6a8 Prompt bloccato \u2014 {self.name}\n\n"
                 f"\u26a0\ufe0f Tocca aree fuori perimetro\n"
                 f"\U0001f4c1 File non autorizzati: {uf_str}\n"

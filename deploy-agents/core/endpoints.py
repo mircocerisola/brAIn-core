@@ -1163,6 +1163,7 @@ async def run_flush_bos_endpoint(request):
             action_id = action["id"]
 
             text = (
+                f"\U0001f3af CSO\n"
                 f"BOS {bos_score:.2f} - {sol_title}\n"
                 f"Problema: {prob_title}\n"
                 f"{action.get('description', '')}"

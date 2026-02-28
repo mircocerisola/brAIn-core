@@ -119,7 +119,41 @@ PORT = int(os.environ.get("PORT", 8080))
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "")
 AGENTS_RUNNER_URL = os.environ.get("AGENTS_RUNNER_URL", "")
 
-claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+_raw_claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+
+
+class _RetryMessages:
+    """Wrapper su messages.create() con retry 2x + jitter per command_center."""
+
+    def __init__(self, client):
+        self._client = client
+
+    def create(self, **kwargs):
+        import random as _rand
+        for attempt in range(3):
+            try:
+                return self._client.messages.create(**kwargs)
+            except Exception as e:
+                if attempt < 2:
+                    _wait = 2 * (attempt + 1) + _rand.uniform(0, 1)
+                    import time as _t
+                    _t.sleep(_wait)
+                    continue
+                raise
+
+
+class _RetryClaude:
+    """Proxy Anthropic con messages wrappato in retry."""
+
+    def __init__(self, client):
+        self._client = client
+        self.messages = _RetryMessages(client)
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+
+claude = _RetryClaude(_raw_claude)
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
@@ -1935,13 +1969,17 @@ def ask_claude(user_message, chat_id=None, is_photo=False, image_b64=None, activ
         all_tool_messages = []  # tool exchanges da salvare in DB
 
         for _ in range(MAX_TOOL_LOOPS):
-            resp = claude.messages.create(
-                model=MODEL,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-                tools=TOOLS,
-            )
+            try:
+                resp = claude.messages.create(
+                    model=MODEL,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=messages,
+                    tools=TOOLS,
+                )
+            except Exception as e:
+                logger.error("[ASK_CLAUDE] API error: %s", e)
+                return "Ho un problema tecnico temporaneo. Riprova tra qualche secondo."
             total_in += resp.usage.input_tokens
             total_out += resp.usage.output_tokens
 
@@ -2942,7 +2980,7 @@ async def handle_project_message(update, project):
                 f"Rispondi SOLO con una di queste parole: cso|coo|cto|cmo|cfo|clo|cpeo"
             )
             try:
-                _claude_client = __import__("anthropic").Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+                _claude_client = _RetryClaude(__import__("anthropic").Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", "")))
                 _cr = _claude_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=10,
@@ -2997,7 +3035,20 @@ async def handle_project_message(update, project):
                         _ploop.run_in_executor(None, _call_project_chief_sync), timeout=25.0
                     )
                 except asyncio.TimeoutError:
-                    _proj_answer = f"[{_chief_display}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
+                    # Retry silenzioso con timeout doppio
+                    try:
+                        _proj_answer = await asyncio.wait_for(
+                            _ploop.run_in_executor(None, _call_project_chief_sync), timeout=120.0
+                        )
+                    except (asyncio.TimeoutError, Exception) as _retry_err:
+                        _chief_emoji = {"coo": "\u2699\ufe0f", "cso": "\U0001f3af", "cmo": "\U0001f3a8", "cto": "\U0001f4bb", "clo": "\u2696\ufe0f", "cpeo": "\U0001f9e0", "cfo": "\U0001f4b0"}
+                        _cid = getattr(_proj_chief, "chief_id", "coo")
+                        _proj_answer = (
+                            _chief_emoji.get(_cid, "\u2699\ufe0f") + " " + _cid.upper()
+                            + "\n\nLa mia risposta sta richiedendo piu tempo del previsto. "
+                            + "Ho rilanciato la richiesta. Se non ricevi risposta entro 2 minuti, rimandami il messaggio."
+                        )
+                        logger.warning("[TIMEOUT_DOUBLE] project chief %s: %s", _cid, _retry_err)
                 _proj_chief_name = _proj_chief.name
             else:
                 _proj_answer = f"Chief '{_domain_target}' non trovato."
@@ -4430,20 +4481,25 @@ def _run_code_agent_sync(chat_id, prompt):
 
         # 3. Chiama Claude Sonnet
         start = time.time()
-        response = claude.messages.create(
-            model=CODE_AGENT_MODEL,
-            max_tokens=8192,
-            system=CODE_AGENT_PROMPT,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"FILE NEL REPO:\n{file_list}\n\n"
-                    f"CODICE ESISTENTE (estratti):\n{context_text}\n\n"
-                    f"RICHIESTA DI MIRCO: {prompt}\n\n"
-                    f"Scrivi il codice. SOLO JSON."
-                ),
-            }],
-        )
+        try:
+            response = claude.messages.create(
+                model=CODE_AGENT_MODEL,
+                max_tokens=8192,
+                system=CODE_AGENT_PROMPT,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"FILE NEL REPO:\n{file_list}\n\n"
+                        f"CODICE ESISTENTE (estratti):\n{context_text}\n\n"
+                        f"RICHIESTA DI MIRCO: {prompt}\n\n"
+                        f"Scrivi il codice. SOLO JSON."
+                    ),
+                }],
+            )
+        except Exception as e:
+            logger.error("[CODE_AGENT] Claude API error: %s", e)
+            _send_telegram_sync(chat_id, "\U0001f4bb CTO\n\nHo un problema tecnico con il Code Agent. Ho segnalato il bug. Riprova tra qualche minuto.")
+            return
         duration = int((time.time() - start) * 1000)
         reply = response.content[0].text
 
@@ -4720,7 +4776,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 _cm_title = _cm_r.data[0].get("title", "Azione codice")
                 # Rigenera prompt con Haiku
                 from anthropic import Anthropic
-                _cm_client = Anthropic()
+                _cm_client = _RetryClaude(Anthropic())
                 _cm_resp = _cm_client.messages.create(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=2000,
@@ -4781,7 +4837,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return
                 _tf_plan = _tf_r.data[0]
                 from anthropic import Anthropic
-                _tf_client = Anthropic()
+                _tf_client = _RetryClaude(Anthropic())
                 _tf_resp = _tf_client.messages.create(
                     model="claude-sonnet-4-6",
                     max_tokens=3000,
@@ -4895,7 +4951,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _loop_t.run_in_executor(None, _call_chief_topic), timeout=25.0
                 )
             except asyncio.TimeoutError:
-                _answer_t = f"[{_chief_t.name}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
+                # Retry silenzioso con timeout doppio
+                try:
+                    _answer_t = await asyncio.wait_for(
+                        _loop_t.run_in_executor(None, _call_chief_topic), timeout=120.0
+                    )
+                except (asyncio.TimeoutError, Exception) as _retry_err:
+                    _chief_emoji = {"coo": "\u2699\ufe0f", "cso": "\U0001f3af", "cmo": "\U0001f3a8", "cto": "\U0001f4bb", "clo": "\u2696\ufe0f", "cpeo": "\U0001f9e0", "cfo": "\U0001f4b0"}
+                    _cid_t = getattr(_chief_t, "chief_id", "coo")
+                    _answer_t = (
+                        _chief_emoji.get(_cid_t, "\u2699\ufe0f") + " " + _cid_t.upper()
+                        + "\n\nLa mia risposta sta richiedendo piu tempo del previsto. "
+                        + "Ho rilanciato la richiesta. Se non ricevi risposta entro 2 minuti, rimandami il messaggio."
+                    )
+                    logger.warning("[TIMEOUT_DOUBLE] chief topic %s: %s", _cid_t, _retry_err)
             # v5.13: se CTO ha gia' inviato CODEACTION card, non duplicare il messaggio
             _is_codeaction = "<<CODEACTION_SENT>>" in str(_answer_t)
             _token_t = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -4983,7 +5052,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         _loop.run_in_executor(None, _call_chief_sync), timeout=25.0
                     )
                 except asyncio.TimeoutError:
-                    _answer = f"[{chief.name}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
+                    # Retry silenzioso con timeout doppio
+                    try:
+                        _answer = await asyncio.wait_for(
+                            _loop.run_in_executor(None, _call_chief_sync), timeout=120.0
+                        )
+                    except (asyncio.TimeoutError, Exception) as _retry_err:
+                        _chief_emoji = {"coo": "\u2699\ufe0f", "cso": "\U0001f3af", "cmo": "\U0001f3a8", "cto": "\U0001f4bb", "clo": "\u2696\ufe0f", "cpeo": "\U0001f9e0", "cfo": "\U0001f4b0"}
+                        _cid_cs = getattr(chief, "chief_id", "coo")
+                        _answer = (
+                            _chief_emoji.get(_cid_cs, "\u2699\ufe0f") + " " + _cid_cs.upper()
+                            + "\n\nLa mia risposta sta richiedendo piu tempo del previsto. "
+                            + "Ho rilanciato la richiesta. Se non ricevi risposta entro 2 minuti, rimandami il messaggio."
+                        )
+                        logger.warning("[TIMEOUT_DOUBLE] csuite %s: %s", _cid_cs, _retry_err)
                 # v5.13: skip se CTO ha gia' inviato CODEACTION card
                 if "<<CODEACTION_SENT>>" not in str(_answer):
                     await update.message.reply_text(

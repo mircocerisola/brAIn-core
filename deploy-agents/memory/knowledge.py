@@ -81,7 +81,7 @@ def run_knowledge_keeper():
                 if "error" in p.get("pattern", "").lower() or "fail" in p.get("pattern", "").lower():
                     emit_event("knowledge_keeper", "error_pattern_detected", None,
                         {"pattern": p["pattern"]}, "high")
-                    notify_telegram(f"Pattern di errore rilevato: {p['pattern']}")
+                    notify_telegram(f"\U0001f4bb CTO\nPattern di errore rilevato: {p['pattern']}")
 
         return {"status": "completed", "saved": saved}
 

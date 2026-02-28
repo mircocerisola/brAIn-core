@@ -27,7 +27,7 @@ def run_action_queue_cleanup():
         deleted_count = len(r2.data or [])
         msg = f"Queue cleanup: {expired_count} scadute, {deleted_count} eliminate"
         logger.info(f"[QUEUE_CLEANUP] {msg}")
-        notify_telegram(f"🧹 {msg}", "info", "queue_cleanup")
+        notify_telegram(f"\u2699\ufe0f COO\n🧹 {msg}", "info", "queue_cleanup")
         return {"status": "ok", "expired": expired_count, "deleted": deleted_count}
     except Exception as e:
         logger.error(f"[QUEUE_CLEANUP] Error: {e}")
@@ -120,7 +120,7 @@ def run_weekly_threshold_update():
         f"{sep}\n"
         f"Vuoi modificare manualmente le soglie?"
     )
-    notify_telegram(msg, level="info", source="threshold_manager")
+    notify_telegram("\U0001f3af CSO\n" + msg, level="info", source="threshold_manager")
 
     log_to_supabase("threshold_manager", "weekly_update", 0,
         f"bos_rate={bos_approval_rate}% total={total}", reason, "none")

@@ -64,7 +64,7 @@ def run_capability_scout():
                         if disc.get("relevance") == "high" and disc.get("action") == "adopt":
                             emit_event("capability_scout", "high_impact_tool", None,
                                 {"tool": disc["tool_name"], "impact": disc.get("potential_impact", "")}, "high")
-                            notify_telegram(f"Tool consigliato: {disc['tool_name']}\n{disc.get('potential_impact', '')}")
+                            notify_telegram(f"\U0001f4bb CTO\nTool consigliato: {disc['tool_name']}\n{disc.get('potential_impact', '')}")
 
                         # Task 5: notifica i Chief rilevanti della nuova capability
                         try:

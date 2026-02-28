@@ -244,7 +244,7 @@ def run_feasibility_engine(solution_id=None, notify=True):
 
         if notify and bos_result and bos_result["verdict"] in ("AUTO-GO", "REVIEW"):
             card = format_bos_card(title, bos_result)
-            notify_telegram(card)
+            notify_telegram("\U0001f3af CSO\n" + card)
 
         time.sleep(1)
 
@@ -462,7 +462,7 @@ def run_bos_endpoint_logic(solution_id=None):
             sol_result = supabase.table("solutions").select("title").eq("id", solution_id).execute()
             title = sol_result.data[0]["title"] if sol_result.data else "?"
             card = format_bos_card(title, result)
-            notify_telegram(card)
+            notify_telegram("\U0001f3af CSO\n" + card)
             return {"status": "completed", "bos": result}
         return {"status": "error", "error": "calcolo fallito"}
 
@@ -479,7 +479,7 @@ def run_bos_endpoint_logic(solution_id=None):
             calculated += 1
             if result["verdict"] in ("AUTO-GO", "REVIEW"):
                 card = format_bos_card(sol["title"], result)
-                notify_telegram(card)
+                notify_telegram("\U0001f3af CSO\n" + card)
 
     return {"status": "completed", "calculated": calculated}
 
@@ -569,9 +569,9 @@ def enqueue_bos_action(problem_id, solution_id, problem_title, sol_title, sol_de
             )
         except Exception as e:
             logger.error(f"[BOS ACTION] sendMessage error: {e}")
-            notify_telegram(msg, level="critical", source="pipeline")
+            notify_telegram("\U0001f3af CSO\n" + msg, level="critical", source="pipeline")
     else:
-        notify_telegram(msg, level="critical", source="pipeline")
+        notify_telegram("\U0001f3af CSO\n" + msg, level="critical", source="pipeline")
 
     # Informa il Command Center di caricare questa azione come current_action
     if COMMAND_CENTER_URL and action_db_id:

@@ -50,7 +50,7 @@ def process_events():
                 # Notifica pura informativa — pipeline continua in autonomia
                 problem_ids = payload.get("problem_ids", [])
                 count = payload.get("count", len(problem_ids))
-                notify_telegram(f"Scanner: trovati {count} nuovi problemi sopra soglia. Pipeline in elaborazione automatica.")
+                notify_telegram(f"\U0001f3af CSO\nScanner: trovati {count} nuovi problemi sopra soglia. Pipeline in elaborazione automatica.")
                 mark_event_done(event["id"])
 
             elif event_type == "problem_approved":

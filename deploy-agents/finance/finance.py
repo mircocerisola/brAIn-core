@@ -639,12 +639,13 @@ def finance_morning_report():
             lines.append(f"ALERT: {a['message']}")
 
     report = "\n".join(lines)
-    notify_telegram(report, level="info", source="finance_agent")
+    notify_telegram("\U0001f4b0 CFO\n" + report, level="info", source="finance_agent")
 
     # Alert budget anticipato
     if rw["budget_pct"] > 80:
         days_to_budget = rw["days_remaining"]
         notify_telegram(
+            "\U0001f4b0 CFO\n"
             f"ALERT BUDGET: proiezione {rw['projected_month_eur']:.2f} EUR = {rw['budget_pct']:.1f}% del budget. "
             f"Runway: {days_to_budget} giorni.",
             level="warning" if rw["budget_pct"] < 95 else "critical",
@@ -749,7 +750,7 @@ def finance_weekly_report():
     ])
 
     report = "\n".join(lines)
-    notify_telegram(report, level="info", source="finance_agent")
+    notify_telegram("\U0001f4b0 CFO\n" + report, level="info", source="finance_agent")
 
     log_to_supabase("finance_agent", "weekly_report", 6,
         f"Weekly {week_start}/{week_end}", f"${tw_cost:.4f} vs ${pw_cost:.4f}",
@@ -853,7 +854,7 @@ def finance_monthly_report():
     ])
 
     report = "\n".join(lines)
-    notify_telegram(report, level="info", source="finance_agent")
+    notify_telegram("\U0001f4b0 CFO\n" + report, level="info", source="finance_agent")
 
     log_to_supabase("finance_agent", "monthly_report", 6,
         f"Monthly {month_name}", f"Total {prev_total_eur:.2f} EUR",
@@ -896,7 +897,8 @@ def run_finance_agent(target_date=None):
     # Alert budget anticipato (se proiezione > 80% budget)
     if rw["budget_pct"] > 80:
         notify_telegram(
-            f"ALERT CFO: proiezione mese {rw['projected_month_eur']:.2f} EUR = {rw['budget_pct']:.1f}% budget. "
+            "\U0001f4b0 CFO\n"
+            f"ALERT: proiezione mese {rw['projected_month_eur']:.2f} EUR = {rw['budget_pct']:.1f}% budget. "
             f"Runway: {rw['days_remaining']}gg.",
             level="warning" if rw["budget_pct"] < 95 else "critical",
             source="finance_agent",
@@ -904,7 +906,7 @@ def run_finance_agent(target_date=None):
 
     # Alert anomalie
     for a in anomalies:
-        notify_telegram(f"ANOMALIA CFO: {a['message']}", level=a["severity"], source="finance_agent")
+        notify_telegram(f"\U0001f4b0 CFO\nANOMALIA: {a['message']}", level=a["severity"], source="finance_agent")
 
     log_to_supabase("finance_agent", "full_analysis", 6,
         f"Analysis {date_str}", f"Budget {rw['budget_pct']:.1f}%, runway {rw['days_remaining']}d",
