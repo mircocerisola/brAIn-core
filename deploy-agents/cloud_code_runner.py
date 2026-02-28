@@ -56,6 +56,60 @@ def _is_interrupt_requested(task_id):
         return False
 
 
+def _build_enriched_prompt(prompt, task_id):
+    """Arricchisce il prompt con CLAUDE.md + architettura dal DB.
+    Il Code Agent deve conoscere il DNA di brAIn per lavorare bene.
+    """
+    context_parts = []
+
+    # 1. Leggi CLAUDE.md dal repo clonato
+    claude_md_path = os.path.join(WORKSPACE, "CLAUDE.md")
+    if os.path.exists(claude_md_path):
+        try:
+            with open(claude_md_path, "r", encoding="utf-8") as f:
+                claude_md = f.read()
+            # Limita a 4000 chars per non esplodere il contesto
+            if len(claude_md) > 4000:
+                claude_md = claude_md[:4000] + "\n[...troncato...]"
+            context_parts.append(
+                "CONTESTO ORGANIZZATIVO (da CLAUDE.md):\n" + claude_md
+            )
+        except Exception as e:
+            print(f"[WARN] Read CLAUDE.md: {e}")
+
+    # 2. Leggi architettura dal DB (cto_architecture_summary)
+    try:
+        r = supabase.table("cto_architecture_summary").select("summary") \
+            .order("created_at", desc=True).limit(1).execute()
+        if r.data and r.data[0].get("summary"):
+            arch = r.data[0]["summary"]
+            if len(arch) > 2000:
+                arch = arch[:2000] + "\n[...troncato...]"
+            context_parts.append(
+                "ARCHITETTURA CODEBASE (snapshot CTO):\n" + arch
+            )
+    except Exception:
+        pass
+
+    # 3. Regole operative
+    context_parts.append(
+        "REGOLE OPERATIVE:\n"
+        "- Codebase 100% Python sincrono. Cloud Run + Claude API + Supabase + Telegram.\n"
+        "- Directory principali: deploy-agents/ (agents-runner), deploy/ (command-center).\n"
+        "- NON usare formattazione Markdown nelle risposte a Mirco (no asterischi, grassetto).\n"
+        "- NON fare deploy (build/push) — il deploy viene gestito separatamente.\n"
+        "- Testa le modifiche se possibile (pytest). Se i test falliscono, non committare.\n"
+        "- Committa su main con messaggio chiaro. Push automatico."
+    )
+
+    if not context_parts:
+        return prompt
+
+    enriched = "\n\n".join(context_parts) + "\n\n---\n\nTASK DA ESEGUIRE:\n" + prompt
+    print(f"[JOB] Prompt arricchito: {len(enriched)} chars (original: {len(prompt)})")
+    return enriched
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -127,7 +181,7 @@ def main():
         print("[ERROR] Clone failed: " + err)
         return
 
-    _flush_log(task_id, ["[JOB] Repo clonato", "[JOB] Avvio Claude Code..."])
+    _flush_log(task_id, ["[JOB] Repo clonato", "[JOB] Preparazione contesto..."])
 
     # 5. Verifica claude CLI
     claude_check = subprocess.run(["claude", "--version"], capture_output=True, text=True)
@@ -139,6 +193,11 @@ def main():
             "completed_at": datetime.now(timezone.utc).isoformat(),
         })
         return
+
+    # 5b. Inietta contesto architettura nel prompt
+    prompt = _build_enriched_prompt(prompt, task_id)
+
+    _flush_log(task_id, ["[JOB] Repo clonato", "[JOB] Avvio Claude Code..."])
 
     # 6. Lancia Claude Code
     try:
