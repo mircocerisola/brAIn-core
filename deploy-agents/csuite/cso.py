@@ -439,14 +439,11 @@ class CSO(BaseChief):
             topic_id = int(topic_r.data[0]["value"])
             group_id = int(group_r.data[0]["value"])
 
-            sep = "\u2500" * 15
             text = (
-                "\U0001f680 RILANCIO SMOKE TEST\n"
-                + sep + "\n"
+                "\U0001f680 RILANCIO SMOKE TEST\n\n"
                 + "Progetto: " + project_name + "\n"
                 + "Pipeline: smoke_test_designing\n"
-                + "Azione: avvio processo completo di validazione mercato\n"
-                + sep
+                + "Azione: avvio processo completo di validazione mercato"
             )
             _requests.post(
                 "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",

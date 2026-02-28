@@ -212,7 +212,6 @@ class COO(BaseChief):
         ieri_dt = oggi_start - timedelta(days=1)
         ieri_inizio = ieri_dt.isoformat()
         ieri_fine = oggi_start.isoformat()
-        sep = "\u2500" * 15
 
         # Carica progetto
         try:
@@ -260,7 +259,7 @@ class COO(BaseChief):
 
         lines = [
             "\U0001f3d7 " + brand + " \u2014 " + header_date,
-            sep,
+            "",
             "\U0001f4cd Step: " + step,
             "\U0001f4ca " + self._progress_bar(len(done_tasks), len(tasks)),
         ]
@@ -299,7 +298,6 @@ class COO(BaseChief):
             lines.append("")
             lines.append("\U0001f3af PRIORITA' OGGI: " + priority_today.get("title", "?")[:40])
 
-        lines.append(sep)
         text = "\n".join(lines)
 
         # Invia nel topic del progetto
@@ -401,13 +399,10 @@ class COO(BaseChief):
         if not reminders:
             return {"project_id": project_id, "reminders": 0}
 
-        sep = "\u2500" * 15
         text = (
-            "\u23f0 REMINDER " + brand + "\n"
-            + sep + "\n"
+            "\u23f0 REMINDER " + brand + "\n\n"
             + self._progress_bar(len(done), len(tasks)) + "\n"
-            + "\n".join(reminders) + "\n"
-            + sep
+            + "\n".join(reminders)
         )
         if topic_id:
             self._send_to_topic(topic_id, text)

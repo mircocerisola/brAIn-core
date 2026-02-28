@@ -67,7 +67,6 @@ def coach_chiefs() -> Dict[str, Any]:
     Invia report al topic #people.
     """
     start = now_rome()
-    sep = "\u2501" * 15
     week_ago = (start - timedelta(days=7)).isoformat()
     logger.info("[CPeO] Avvio coach_chiefs")
 
@@ -215,11 +214,9 @@ def coach_chiefs() -> Dict[str, Any]:
         status_lines.append(f"{icon} {chief_id.upper()}{detail}")
 
     report = (
-        f"\U0001f393 Coaching settimanale Chief\n"
-        f"{sep}\n"
+        f"\U0001f393 Coaching settimanale Chief\n\n"
         + "\n".join(status_lines)
-        + f"\n{sep}\n"
-        f"Learning aggiunti: {learning_added}"
+        + f"\n\nLearning aggiunti: {learning_added}"
     )
 
     _send_people(report)

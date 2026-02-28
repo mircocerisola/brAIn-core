@@ -738,12 +738,11 @@ async def run_resend_spec_endpoint(request):
         spec_human = project.get("spec_human_md") or ""
         name = project.get("name", f"Progetto {project_id}")
         bos_score = float(project.get("bos_score") or 0)
-        sep = "\u2501" * 15
         if spec_human:
-            msg = f"{spec_human}\n{sep}"
+            msg = spec_human
         else:
             spec_excerpt = (project.get("spec_md") or "SPEC non disponibile")[:500]
-            msg = f"\U0001f4cb SPEC pronta \u2014 {name}\nBOS score: {bos_score:.2f}\n\n{spec_excerpt}\n{sep}"
+            msg = f"\U0001f4cb SPEC pronta \u2014 {name}\nBOS score: {bos_score:.2f}\n\n{spec_excerpt}"
         reply_markup = {
             "inline_keyboard": [[
                 {"text": "\u2705 Valida", "callback_data": f"spec_validate:{project_id}"},

@@ -256,8 +256,7 @@ class CTO(BaseChief):
 
     @staticmethod
     def build_update_message(elapsed, output_log):
-        """Costruisce messaggio aggiornamento: esattamente 4 righe."""
-        sep = "\u2500" * 15
+        """Costruisce messaggio aggiornamento."""
         lines = output_log.split("\n") if output_log else []
         clean = [l.strip() for l in lines
                  if l.strip() and "--dangerously-skip-permissions" not in l]
@@ -265,10 +264,8 @@ class CTO(BaseChief):
         if len(last_line) > 200:
             last_line = last_line[:197] + "..."
         return (
-            "\u23f3 Aggiornamento \u2014 " + str(elapsed) + " min\n"
-            + sep + "\n"
-            + last_line + "\n"
-            + sep
+            "\u23f3 Aggiornamento \u2014 " + str(elapsed) + " min\n\n"
+            + last_line
         )
 
     # ============================================================
@@ -303,24 +300,19 @@ class CTO(BaseChief):
 
         # 4. Conferma a Mirco
         ora = format_time_rome()
-        sep = "\u2500" * 15
         if job_ok:
             self._send_telegram(chat_id, thread_id,
-                "\u2699\ufe0f Claude Code avviato in cloud\n"
-                + sep + "\n"
+                "\u2699\ufe0f Claude Code avviato in cloud\n\n"
                 "\U0001f4cb Task: " + titolo + "\n"
                 "\U0001f504 Avviato alle " + ora + "\n"
                 "\u2601\ufe0f Esecuzione: Cloud Run Job\n"
-                "\u23f3 Aggiornamento ogni 5 minuti\n"
-                + sep)
+                "\u23f3 Aggiornamento ogni 5 minuti")
         else:
             self._send_telegram(chat_id, thread_id,
-                "\u26a0\ufe0f Task #" + str(task_id) + " in coda (ready)\n"
-                + sep + "\n"
+                "\u26a0\ufe0f Task #" + str(task_id) + " in coda (ready)\n\n"
                 "\U0001f4cb " + titolo + "\n"
                 "Job trigger fallito \u2014 il task rimane in stato 'ready'.\n"
-                "Verra' eseguito al prossimo run del job.\n"
-                + sep)
+                "Verra' eseguito al prossimo run del job.")
 
         # 5. Monitor loop in background — legge output_log da DB
         _tid = task_id
@@ -330,8 +322,6 @@ class CTO(BaseChief):
 
         def _monitor():
             _elapsed = 0
-            sep = "\u2500" * 15
-
             while True:
                 time.sleep(300)  # 5 minuti
                 _elapsed += 5
@@ -359,10 +349,8 @@ class CTO(BaseChief):
                     label = labels.get(status, "Completato")
 
                     completion_text = (
-                        icon + " " + label + "\n"
-                        + sep + "\n"
-                        + "\U0001f4cb " + _ttl + " \u00b7 " + str(_elapsed) + " min\n"
-                        + sep
+                        icon + " " + label + "\n\n"
+                        + "\U0001f4cb " + _ttl + " \u00b7 " + str(_elapsed) + " min"
                     )
                     completion_markup = {"inline_keyboard": [[
                         {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
@@ -396,7 +384,6 @@ class CTO(BaseChief):
 
         logger.info("[CTO] interrupt_task #%d -> interrupt_requested", task_id)
 
-        sep = "\u2500" * 15
         titolo = ""
         try:
             r = supabase.table("code_tasks").select("title").eq("id", task_id).execute()
@@ -406,11 +393,9 @@ class CTO(BaseChief):
             pass
 
         self._send_telegram(chat_id, thread_id,
-            "\U0001f6d1 Interruzione richiesta\n"
-            + sep + "\n"
+            "\U0001f6d1 Interruzione richiesta\n\n"
             "\U0001f4cb " + titolo + "\n"
-            "Il job terminera' il processo.\n"
-            + sep)
+            "Il job terminera' il processo.")
 
     # ---- CLOUD RUN JOB TRIGGER ----
 
@@ -475,6 +460,145 @@ class CTO(BaseChief):
             )
         except Exception as e:
             logger.warning("[CTO] telegram send error: %s", e)
+
+    # ============================================================
+    # FIX 3: CONTESTO LIMITATO AL PROGETTO
+    # ============================================================
+
+    def project_context_builder(self, project_id):
+        """Costruisce contesto compatto (max 20 righe) per prompt Claude Code su progetto specifico."""
+        ctx = {}
+        try:
+            r = supabase.table("projects").select(
+                "name,slug,brand_name,pipeline_step,status,smoke_test_url"
+            ).eq("id", project_id).execute()
+            if r.data:
+                p = r.data[0]
+                ctx["project"] = {
+                    "name": p.get("name", ""),
+                    "slug": p.get("slug", ""),
+                    "brand_name": p.get("brand_name", ""),
+                    "pipeline_step": p.get("pipeline_step", ""),
+                    "status": p.get("status", ""),
+                }
+        except Exception as e:
+            logger.warning("[CTO] project_context_builder project: %s", e)
+
+        try:
+            r = supabase.table("project_tasks").select(
+                "title,assigned_to,status"
+            ).eq("project_id", project_id).eq("assigned_to", "cto").execute()
+            ctx["cto_tasks"] = r.data or []
+        except Exception as e:
+            logger.warning("[CTO] project_context_builder tasks: %s", e)
+            ctx["cto_tasks"] = []
+
+        try:
+            r = supabase.table("smoke_test_prospects").select("id").eq("project_id", project_id).execute()
+            ctx["prospect_count"] = len(r.data or [])
+        except Exception:
+            ctx["prospect_count"] = 0
+
+        # Formatta compatto (max 20 righe)
+        lines = []
+        p = ctx.get("project", {})
+        lines.append("PROGETTO: " + (p.get("brand_name") or p.get("name", "?")))
+        lines.append("Slug: " + p.get("slug", "?"))
+        lines.append("Step: " + p.get("pipeline_step", "?"))
+        lines.append("Status: " + p.get("status", "?"))
+        lines.append("Prospect: " + str(ctx.get("prospect_count", 0)))
+        if ctx.get("cto_tasks"):
+            lines.append("")
+            lines.append("TASK CTO:")
+            for t in ctx["cto_tasks"]:
+                lines.append("  [" + t.get("status", "?") + "] " + t.get("title", "?")[:50])
+        return {"context_text": "\n".join(lines), "raw": ctx}
+
+    # ============================================================
+    # FIX 4: CARD ANTEPRIMA CON BOTTONE ANNULLA
+    # ============================================================
+
+    def send_preview_card(self, task_id, project_id=None):
+        """Invia card anteprima con [Avvia] e [Annulla] prima di eseguire Claude Code."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+
+        # Leggi task info
+        title = "Azione codice"
+        try:
+            r = supabase.table("code_tasks").select("title,prompt").eq("id", task_id).execute()
+            if r.data:
+                title = (r.data[0].get("title") or "Azione codice")[:60]
+                prompt = r.data[0].get("prompt") or ""
+        except Exception:
+            prompt = ""
+
+        meta = self._extract_prompt_meta(prompt) if prompt else {"main_file": "da determinare", "time_minutes": 5}
+
+        card_text = (
+            "\u2699\ufe0f CTO \u2014 Prossima azione\n\n"
+            "\U0001f4cb Task: " + title + "\n"
+            "\U0001f3af File coinvolti: " + meta.get("main_file", "da determinare") + "\n"
+            "\u23f1\ufe0f Stima: " + str(meta.get("time_minutes", 5)) + " min"
+        )
+        markup = {"inline_keyboard": [[
+            {"text": "\u25b6\ufe0f Avvia", "callback_data": "code_approve:" + str(task_id)},
+            {"text": "\u274c Annulla", "callback_data": "code_cancel_preview:" + str(task_id)},
+        ]]}
+
+        # Invia nel topic cantiere se progetto, altrimenti topic CTO
+        topic_id = None
+        group_id = None
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if group_r.data:
+                group_id = int(group_r.data[0]["value"])
+
+            if project_id:
+                proj_r = supabase.table("projects").select("topic_id").eq("id", project_id).execute()
+                if proj_r.data and proj_r.data[0].get("topic_id"):
+                    topic_id = proj_r.data[0]["topic_id"]
+
+            if not topic_id:
+                topic_r = supabase.table("org_config").select("value").eq("key", "chief_topic_cto").execute()
+                if topic_r.data:
+                    topic_id = int(topic_r.data[0]["value"])
+        except Exception as e:
+            logger.warning("[CTO] send_preview_card topic lookup: %s", e)
+
+        if group_id and topic_id:
+            try:
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                    json={"chat_id": group_id, "message_thread_id": topic_id, "text": card_text, "reply_markup": markup},
+                    timeout=10,
+                )
+                logger.info("[CTO] Preview card inviata task #%d", task_id)
+            except Exception as e:
+                logger.warning("[CTO] send_preview_card: %s", e)
+
+    def handle_cancel_preview(self, task_id):
+        """Gestisce click su Annulla: task torna pending, notifica COO."""
+        try:
+            supabase.table("code_tasks").update({"status": "pending"}).eq("id", task_id).execute()
+        except Exception as e:
+            logger.warning("[CTO] handle_cancel_preview update: %s", e)
+            return {"error": str(e)}
+
+        # Notifica COO via agent_events
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "task_cancelled",
+                "agent_from": "cto",
+                "agent_to": "coo",
+                "payload": json.dumps({"task_id": task_id, "motivo": "annullato da Mirco"}),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CTO] handle_cancel_preview event: %s", e)
+
+        logger.info("[CTO] Task #%d annullato da Mirco, COO notificato", task_id)
+        return {"status": "cancelled", "task_id": task_id}
 
     # ============================================================
     # GENERA PROMPT TECNICI PER ALTRI CHIEF

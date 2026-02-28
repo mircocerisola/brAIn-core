@@ -25,13 +25,11 @@ def format_date_rome():
 
 # ── SMOKE TEST CARD ─────────────────────────────────────────────────────────
 SMOKE_TEST_CARD_TEMPLATE = (
-    "\U0001f52c SMOKE TEST \u2014 {brand_name}\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\U0001f52c SMOKE TEST \u2014 {brand_name}\n\n"
     "\U0001f4cb {obiettivo_1_riga}\n"
     "\U0001f465 {n_prospect} prospect | \u23f1\ufe0f {durata} giorni | \U0001f4b6 {budget}\n"
     "\U0001f3af KPI: {kpi_successo}\n"
     "{blockers_line}"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
 )
 
 
@@ -77,48 +75,38 @@ def format_smoke_test_card(brand_name, obiettivo, n_prospect, durata,
 
 # ── CODEACTION CARD ─────────────────────────────────────────────────────────
 CODEACTION_CARD_TEMPLATE = (
-    "\u26a1 CODEACTION \u2014 CTO\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\u26a1 CODEACTION \u2014 CTO\n\n"
     "\U0001f4cb {title}\n"
     "\U0001f4c1 File: {main_file}\n"
-    "\u23f1\ufe0f Stima: {time_minutes} min\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    "\u23f1\ufe0f Stima: {time_minutes} min"
 )
 
 
 # ── PROMPT EXECUTION STATUS ─────────────────────────────────────────────────
 PROMPT_RUNNING_TEMPLATE = (
-    "\u2699\ufe0f Prompt in esecuzione\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\u2699\ufe0f Prompt in esecuzione\n\n"
     "\U0001f504 Avviato alle {ora}\n"
     "\U0001f4cb Task: {titolo}\n"
-    "\u23f3 Aggiornamento ogni 5 minuti\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    "\u23f3 Aggiornamento ogni 5 minuti"
 )
 
 PROMPT_PROGRESS_TEMPLATE = (
-    "\u23f3 Aggiornamento \u2014 {elapsed} min\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\u23f3 Aggiornamento \u2014 {elapsed} min\n\n"
     "\U0001f504 Prompt ancora in esecuzione\n"
     "\U0001f4cb Task: {titolo}\n"
-    "\U0001f550 Avviato alle {ora_avvio}\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    "\U0001f550 Avviato alle {ora_avvio}"
 )
 
 PROMPT_DONE_TEMPLATE = (
-    "\u2705 Prompt completato\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\u2705 Prompt completato\n\n"
     "\U0001f4cb Task: {titolo}\n"
     "\u23f1\ufe0f Durata: {durata_minuti} min\n"
     "{output_section}"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
 )
 
 PROMPT_ERROR_TEMPLATE = (
-    "\u274c Prompt fallito\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+    "\u274c Prompt fallito\n\n"
     "\U0001f4cb Task: {titolo}\n"
     "\u23f1\ufe0f Durata: {durata_minuti} min\n"
-    "\u26a0\ufe0f Errore: {errore}\n"
-    "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"
+    "\u26a0\ufe0f Errore: {errore}"
 )

@@ -567,11 +567,9 @@ class BaseChief(BaseAgent):
 
         # Formatta card routing e invia a Mirco
         card = (
-            f"\U0001f4e8 {self.name} \u2192 {dest_chief.name}\n"
-            f"{sep}\n"
+            f"\U0001f4e8 {self.name} \u2192 {dest_chief.name}\n\n"
             f"Hai chiesto: \"{question[:100]}\"\n"
-            f"Competenza: {dest_chief.name}\n"
-            f"{sep}\n"
+            f"Competenza: {dest_chief.name}\n\n"
             f"\u2193 Risposta:\n{dest_answer[:600]}"
         )
         chat_id = _get_telegram_chat_id_sync()
@@ -693,12 +691,10 @@ class BaseChief(BaseAgent):
             _time_est = _meta.get("time_estimate", "da valutare")
 
             card_text = (
-                f"\u26a1 AZIONE CODICE \u2014 {self.name} vuole agire\n"
-                f"{sep}\n"
+                f"\u26a1 AZIONE CODICE \u2014 {self.name} vuole agire\n\n"
                 f"{_desc[:300]}\n"
                 f"\U0001f4c1 File: {_files_str}\n"
-                f"\u23f1\ufe0f Stima: {_time_est}\n"
-                f"{sep}"
+                f"\u23f1\ufe0f Stima: {_time_est}"
             )
             approval_markup = {
                 "inline_keyboard": [[
@@ -722,12 +718,10 @@ class BaseChief(BaseAgent):
             ut_str = ", ".join(unauthorized_tables) if unauthorized_tables else "nessuna"
 
             alert_text = (
-                f"\U0001f6a8 Prompt bloccato \u2014 {self.name}\n"
-                f"{sep}\n"
+                f"\U0001f6a8 Prompt bloccato \u2014 {self.name}\n\n"
                 f"\u26a0\ufe0f Tocca aree fuori perimetro\n"
                 f"\U0001f4c1 File non autorizzati: {uf_str}\n"
-                f"\U0001f5c4\ufe0f Tabelle non autorizzate: {ut_str}\n"
-                f"{sep}"
+                f"\U0001f5c4\ufe0f Tabelle non autorizzate: {ut_str}"
             )
             # Salva in code_tasks come BLOCKED (solo per audit) con sandbox_passed=False
             task_id = None
@@ -839,12 +833,12 @@ class BaseChief(BaseAgent):
 
         lines = [
             f"{self._daily_report_emoji()} {self.name} \u2014 {header}",
-            sep,
+            "",
         ]
         for section in sections:
             lines.append(section)
         lines.extend([
-            sep,
+            "",
             f"\U0001f4b6 IERI: \u20ac{cost_ieri_eur:.2f} / \u20ac{budget_giornaliero_eur:.0f} budget ({budget_pct}%)",
         ])
 
@@ -936,11 +930,10 @@ class BaseChief(BaseAgent):
             f"Dati disponibili:\n{ctx}\n\n"
             "FORMATO OBBLIGATORIO (Telegram, NO Markdown):\n"
             f"- Prima riga: emoji + {self.name} + ' · ' + data (es: 📊 CFO · 26 feb)\n"
-            "- Separatore: ───────────  (ESATTAMENTE questo, 10 trattini Unicode)\n"
+            "- Separa le sezioni con una riga vuota, NIENTE righe orizzontali o trattini\n"
             "- Sezioni: emoji + TITOLO MAIUSCOLO (es: 💰 COSTI)\n"
             "- Dati concreti su righe separate con numeri reali\n"
-            "- Chiudi con lo stesso separatore ───────────\n"
-            "- VIETATO: ** grassetto **, ## titoli, ---- trattini ASCII, parole inglesi (tranne termini tecnici)\n"
+            "- VIETATO: ** grassetto **, ## titoli, ---- trattini, ─── separatori, parole inglesi (tranne termini tecnici)\n"
             "- Tutto in italiano. Zero fuffa. Vai al punto.\n"
             "Se non ci sono novita, comunica lo stato attuale del dominio."
         )
@@ -1193,12 +1186,10 @@ def send_system_health_check() -> Dict[str, Any]:
     detail_text = ("\n" + "\n".join(details)) if details else ""
 
     msg = (
-        f"\U0001f50d *Health Check brAIn*\n"
-        f"{sep}\n"
+        f"\U0001f50d Health Check brAIn\n\n"
         f"{checks_lines}"
-        f"{detail_text}\n"
-        f"{sep}\n"
-        f"_{now_str}_"
+        f"{detail_text}\n\n"
+        f"{now_str}"
     )
 
     # Invia a #technology (chief_topic_cto)

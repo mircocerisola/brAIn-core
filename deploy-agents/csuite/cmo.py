@@ -6,6 +6,12 @@ from core.base_chief import BaseChief
 from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
 
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _HAS_PILLOW = True
+except ImportError:
+    _HAS_PILLOW = False
+
 
 class CMO(BaseChief):
     name = "CMO"
@@ -112,11 +118,10 @@ class CMO(BaseChief):
             "Dati disponibili:\n" + ctx + "\n\n"
             "FORMATO OBBLIGATORIO (Telegram, NO Markdown):\n"
             "- Prima riga: emoji + CMO + ' · ' + data\n"
-            "- Separatore: ───────────\n"
+            "- Separa le sezioni con una riga vuota, NIENTE righe orizzontali o trattini\n"
             "- Sezioni: emoji + TITOLO MAIUSCOLO\n"
             "- Dati concreti su righe separate con numeri reali\n"
-            "- Chiudi con separatore ───────────\n"
-            "- VIETATO: ** grassetto **, ## titoli\n"
+            "- VIETATO: ** grassetto **, ## titoli, ─── separatori, ---- trattini\n"
             "- Se c'e' uno smoke test attivo, e' la sezione PRINCIPALE.\n"
             "- Mostra SOLO sezioni con dati reali. Zero fuffa."
         )
@@ -259,6 +264,155 @@ class CMO(BaseChief):
 
         logger.info("[CMO] Landing HTML generata per project #%d (%d chars)", project_id, len(html or ""))
         return {"status": "ok", "project_id": project_id, "html_length": len(html or "")}
+
+    # ============================================================
+    # FIX 2A: BOZZA VISIVA RAPIDA (Pillow PNG, zero HTML)
+    # ============================================================
+
+    def generate_bozza_visiva(self, project_id, variant=1):
+        """Genera bozza visiva PNG per landing page. Zero HTML, solo immagine."""
+        if not _HAS_PILLOW:
+            logger.warning("[CMO] Pillow non installato, skip bozza visiva")
+            return {"error": "pillow non installato"}
+
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,brand_email"
+            ).eq("id", project_id).execute()
+            if not r.data:
+                return {"error": "progetto non trovato"}
+            project = r.data[0]
+        except Exception as e:
+            return {"error": str(e)}
+
+        brand = project.get("brand_name") or project.get("name", "Progetto")
+        email = project.get("brand_email") or ""
+
+        # Palette varianti
+        palettes = [
+            {"bg": "#0f1923", "accent": "#25D366", "text": "#ffffff", "section": "#1a2634"},
+            {"bg": "#1a1a2e", "accent": "#e94560", "text": "#ffffff", "section": "#16213e"},
+            {"bg": "#f8fafc", "accent": "#2563eb", "text": "#0f172a", "section": "#e2e8f0"},
+        ]
+        pal = palettes[(variant - 1) % len(palettes)]
+
+        W, H = 800, 1200
+        img = Image.new("RGB", (W, H), pal["bg"])
+        draw = ImageDraw.Draw(img)
+
+        # Font (fallback a default)
+        try:
+            font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 48)
+            font_med = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+            font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        except Exception:
+            font_big = ImageFont.load_default()
+            font_med = font_big
+            font_sm = font_big
+
+        y = 60
+        # Header: brand name
+        draw.text((W // 2, y), brand, fill=pal["accent"], font=font_big, anchor="mt")
+        y += 80
+        # Tagline
+        draw.text((W // 2, y), "Il tuo assistente intelligente", fill=pal["text"], font=font_med, anchor="mt")
+        y += 60
+
+        # 3 sezioni
+        sections_data = [
+            ("IL PROBLEMA", "Gestire prenotazioni costa\ntempo e genera errori"),
+            ("LA SOLUZIONE", "AI su WhatsApp che gestisce\nprenotazioni 24/7"),
+            ("INIZIA ORA", "Richiedi una demo gratuita\n" + email),
+        ]
+        for title, body in sections_data:
+            y += 30
+            # Box sezione
+            draw.rounded_rectangle(
+                [(60, y), (W - 60, y + 200)],
+                radius=16, fill=pal["section"]
+            )
+            draw.text((W // 2, y + 30), title, fill=pal["accent"], font=font_med, anchor="mt")
+            draw.text((W // 2, y + 80), body, fill=pal["text"], font=font_sm, anchor="mt")
+            y += 210
+
+        # CTA button
+        y += 30
+        draw.rounded_rectangle(
+            [(200, y), (600, y + 60)],
+            radius=30, fill=pal["accent"]
+        )
+        draw.text((W // 2, y + 30), "RICHIEDI DEMO", fill="#ffffff", font=font_med, anchor="mm")
+
+        # Footer
+        draw.text((W // 2, H - 40), "Bozza visiva CMO v" + str(variant), fill="#666666", font=font_sm, anchor="mt")
+
+        # Salva PNG
+        ts = now_rome().strftime("%Y%m%d_%H%M%S")
+        path = "/tmp/bozza_" + str(project_id) + "_" + ts + ".png"
+        img.save(path, "PNG")
+        logger.info("[CMO] Bozza visiva generata: %s", path)
+
+        # Invia come foto Telegram
+        self._send_bozza_photo(project_id, brand, path)
+
+        return {"status": "ok", "path": path, "variant": variant}
+
+    def _send_bozza_photo(self, project_id, brand, path):
+        """Invia bozza come foto nel topic cantiere."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            proj_r = supabase.table("projects").select("topic_id").eq("id", project_id).execute()
+            if not group_r.data or not proj_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+            topic_id = proj_r.data[0].get("topic_id")
+            if not topic_id:
+                return
+
+            with open(path, "rb") as f:
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendPhoto",
+                    data={
+                        "chat_id": group_id,
+                        "message_thread_id": topic_id,
+                        "caption": "\U0001f464 CMO \u2014 Bozza landing " + brand,
+                    },
+                    files={"photo": f},
+                    timeout=15,
+                )
+            logger.info("[CMO] Bozza foto inviata project #%d", project_id)
+        except Exception as e:
+            logger.warning("[CMO] send_bozza_photo: %s", e)
+
+    # ============================================================
+    # FIX 2B: BRIEF TECNICO PER CTO (dopo approvazione Mirco)
+    # ============================================================
+
+    def publish_landing_brief_for_cto(self, project_id, palette, fonts, sections_copy, style_notes="", bozza_path=""):
+        """Pubblica evento landing_brief_ready per il CTO via agent_events."""
+        payload = {
+            "project_id": project_id,
+            "palette": palette,
+            "fonts": fonts,
+            "sections": sections_copy,
+            "style_notes": style_notes,
+            "bozza_path": bozza_path,
+        }
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "landing_brief_ready",
+                "agent_from": "cmo",
+                "agent_to": "cto",
+                "payload": json.dumps(payload),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+            logger.info("[CMO] landing_brief_ready pubblicato per project #%d", project_id)
+            return {"status": "ok", "event_type": "landing_brief_ready"}
+        except Exception as e:
+            logger.warning("[CMO] publish_landing_brief: %s", e)
+            return {"error": str(e)}
 
     def _send_report_to_topic(self, text):
         """Invia report al Forum Topic #marketing."""
