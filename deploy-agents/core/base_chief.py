@@ -88,37 +88,7 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-# ============================================================
-# ROUTING KEYWORDS — mappa keyword → chief_id
-# ============================================================
-
-ROUTING_KEYWORDS: Dict[str, str] = {
-    # CMO
-    "logo": "cmo", "immagine": "cmo", "design": "cmo", "avatar": "cmo",
-    "brand identity": "cmo", "grafica": "cmo", "visual": "cmo",
-    # CFO
-    "costi": "cfo", "budget": "cfo", "spese": "cfo", "fatturato": "cfo",
-    "burn rate": "cfo", "marginalità": "cfo", "revenue share": "cfo",
-    # CLO
-    "contratto": "clo", "gdpr": "clo", "privacy policy": "clo", "compliance": "clo",
-    "legale": "clo", "rischio legale": "clo", "termini": "clo",
-    # CTO
-    "sicurezza": "cto", "vulnerabilità": "cto", "infrastruttura": "cto",
-    "deploy": "cto", "codice": "cto", "architettura": "cto", "bug": "cto",
-    # CPeO
-    "manager": "cpeo", "onboarding": "cpeo", "formazione": "cpeo",
-    "persone": "cpeo", "collaboratori": "cpeo", "team building": "cpeo",
-    # COO (ex-CPO)
-    "cantieri": "coo", "build": "coo", "spec": "coo", "lancio": "coo",
-    "mvp": "coo", "roadmap": "coo", "feature": "coo",
-    # CSO
-    "pipeline": "cso", "opportunità": "cso", "mercato": "cso",
-    "bos": "cso", "problemi globali": "cso", "competizione": "cso", "pivot": "cso",
-    "smoke test": "cso", "validazione mercato": "cso", "prospect": "cso",
-    # COO
-    "processi": "coo", "operazioni": "coo", "efficienza": "coo",
-    "coda": "coo", "bottleneck": "coo", "flusso": "coo",
-}
+# v5.36: ROUTING_KEYWORDS rimosso — unificato in csuite/__init__.py come ROUTING_MAP
 
 
 def _get_telegram_chat_id_sync() -> Optional[str]:
@@ -152,6 +122,7 @@ class BaseChief(BaseAgent):
     domain: str = "general"          # es. "finance", "strategy", "marketing"
     chief_id: str = ""               # es. "cso", "cfo", "cmo"
     default_model: str = "claude-sonnet-4-6"
+    default_temperature: Optional[float] = None  # v5.36: override per Chief
     briefing_prompt_template: str = ""  # Override nelle sottoclassi
 
     # FIX 5 — model routing
@@ -255,27 +226,22 @@ class BaseChief(BaseAgent):
             logger.warning("[%s] _update_topic_summary error: %s", self.name, e)
 
     def _select_model(self, question: str) -> str:
-        """FIX 5: Seleziona modello ottimale.
+        """v5.36: Seleziona modello ottimale con keyword heuristic (zero chiamate Haiku).
         CSO/CMO/CPeO/CTO → sempre Sonnet (dominio creativo/strategico).
-        CFO/CLO/COO → Haiku se query semplice, Sonnet se complessa.
+        CFO/CLO/COO → Haiku se query breve e semplice, Sonnet se keyword complesse.
         """
         chief_id = self.chief_id or ""
         if chief_id in self._ALWAYS_SONNET:
             return "claude-sonnet-4-6"
         if chief_id in self._ADAPTIVE_MODEL:
-            classify_prompt = (
-                f"Classifica questa domanda per il {self.name}:\n\"{question[:200]}\"\n\n"
-                "Risposta: SOLO una parola: simple (lookup/calcolo/status/dato diretto) "
-                "oppure complex (analisi/raccomandazione/strategia/pianificazione)"
-            )
-            try:
-                raw = self.call_claude(
-                    classify_prompt, model="claude-haiku-4-5-20251001", max_tokens=10
-                )
-                if "simple" in raw.lower():
-                    return "claude-haiku-4-5-20251001"
-            except Exception:
-                pass
+            q_lower = question.lower()
+            # Se contiene keyword complesse → Sonnet
+            for kw in self._FULL_KEYWORDS:
+                if kw in q_lower:
+                    return "claude-sonnet-4-6"
+            # Se corto e semplice → Haiku
+            if len(q_lower) < 80:
+                return "claude-haiku-4-5-20251001"
         return "claude-sonnet-4-6"
 
     def _send_to_chief_topic(self, text: str) -> None:
@@ -498,7 +464,9 @@ class BaseChief(BaseAgent):
         v5.34: 3-level context (light/medium/full) + topic summary incrementale.
         """
         if self.is_circuit_open():
-            return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
+            from csuite.utils import fmt
+            return fmt(self.chief_id, "Problema tecnico temporaneo",
+                       "Ho un sovraccarico di richieste. Mi riprendo tra un minuto.")
 
         # v5.34: detect context level
         ctx_level = self.detect_context_level(question)
@@ -589,17 +557,30 @@ class BaseChief(BaseAgent):
         # FIX 5: seleziona modello ottimale
         model = self._select_model(question)
 
+        # v5.36 FIX 13: Se full context con episodic, non duplicare prior_messages
+        effective_prior = recent_messages
+        if topic_scope_id and ctx_level == "full":
+            effective_prior = None  # episodic gia nel system prompt
+
         try:
             response = self.call_claude(
                 question,
                 system=system,
                 max_tokens=1500,
                 model=model,
-                prior_messages=recent_messages,
+                temperature=getattr(self, "default_temperature", None),
+                prior_messages=effective_prior,
             )
         except Exception as e:
             logger.error(f"[{self.name}] answer_question error: {e}")
-            return f"[{self.name}] Errore nella risposta: {e}"
+            # v5.36: MAI mostrare errori raw a Mirco
+            from csuite.utils import fmt
+            self.notify_mirco(
+                f"[CTO TICKET] {self.name} errore: {e}\nQuery: {question[:200]}",
+                level="critical",
+            )
+            return fmt(self.chief_id, "Problema tecnico",
+                       "Ho un problema tecnico interno. Ho segnalato il bug al CTO. Riprovo tra 60 secondi.")
 
         # FIX 3 v5.11: Detect CODE_ACTION marker in response
         import re as _re
@@ -725,10 +706,12 @@ class BaseChief(BaseAgent):
         """
         chief_id = self.chief_id or self.name.lower()
 
+        # v5.36: import ROUTING_MAP unificato da csuite
+        from csuite import ROUTING_MAP
         # Fast keyword pre-check: se match univoco a un altro chief → skip Claude
         question_lower = question.lower()
         keyword_target = None
-        for kw, target_id in ROUTING_KEYWORDS.items():
+        for kw, target_id in ROUTING_MAP.items():
             if kw in question_lower and target_id != chief_id:
                 keyword_target = target_id
                 break

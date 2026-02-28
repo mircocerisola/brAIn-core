@@ -71,6 +71,7 @@ class COO(BaseChief):
     domain = "ops"
     chief_id = "coo"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.5  # v5.36: bilanciato
     MY_DOMAIN = ["operazioni", "cantieri", "pipeline", "prodotto", "revenue",
                  "coordinamento", "task", "dominio", "accelerazione", "report"]
     MY_REFUSE_DOMAINS = []  # COO coordina tutto, non rifiuta nulla
@@ -84,70 +85,71 @@ class COO(BaseChief):
     )
 
     def get_domain_context(self):
+        """v5.36: 8 query DB in parallelo con ThreadPoolExecutor (1600ms → ~300ms)."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
         ctx = super().get_domain_context()
-        # Cantieri attivi — FULL data (v5.11)
-        try:
+
+        def _q_projects():
             r = supabase.table("projects").select(
                 "id,name,status,build_phase,pipeline_step,pipeline_territory,"
                 "pipeline_locked,topic_id,smoke_test_url,created_at,updated_at"
             ).neq("status", "archived").execute()
-            ctx["active_projects"] = r.data or []
-        except Exception as e:
-            ctx["active_projects"] = f"errore lettura DB: {e}"
-        # Action queue pending — FULL details (v5.11)
-        try:
+            return ("active_projects", r.data or [])
+
+        def _q_actions():
             r = supabase.table("action_queue").select(
                 "id,action_type,title,description,project_id,status,created_at"
             ).eq("status", "pending").order("created_at", desc=True).execute()
-            ctx["pending_actions"] = r.data or []
-        except Exception as e:
-            ctx["pending_actions"] = f"errore lettura DB: {e}"
-        # Prodotti live (ex-CPO)
-        try:
+            return ("pending_actions", r.data or [])
+
+        def _q_products():
             r = supabase.table("projects").select("id,name,status,build_phase") \
                 .in_("status", ["build_complete", "launch_approved", "live"]).execute()
-            ctx["products_live"] = r.data or []
-        except Exception as e:
-            ctx["products_live"] = f"errore lettura DB: {e}"
-        # KPI recenti (ex-CPO)
-        try:
+            return ("products_live", r.data or [])
+
+        def _q_kpis():
             r = supabase.table("kpi_daily").select("project_id,metric_name,value,recorded_at") \
                 .order("recorded_at", desc=True).limit(20).execute()
-            ctx["recent_kpis"] = r.data or []
-        except Exception as e:
-            ctx["recent_kpis"] = f"errore lettura DB: {e}"
-        # Agent logs recenti (v5.11) — ultimi 20
-        try:
+            return ("recent_kpis", r.data or [])
+
+        def _q_logs():
             r = supabase.table("agent_logs").select(
                 "agent_id,action,status,cost_usd,created_at"
             ).order("created_at", desc=True).limit(20).execute()
-            ctx["recent_logs"] = r.data or []
-        except Exception as e:
-            ctx["recent_logs"] = f"errore lettura DB: {e}"
-        # Project tasks per cantieri attivi
-        try:
+            return ("recent_logs", r.data or [])
+
+        def _q_tasks():
             r = supabase.table("project_tasks").select(
                 "id,project_id,title,status,assigned_to,priority"
             ).order("project_id").order("id").execute()
-            ctx["project_tasks"] = r.data or []
-        except Exception as e:
-            ctx["project_tasks"] = f"errore lettura DB: {e}"
-        # v5.35: TODO list COO
-        try:
+            return ("project_tasks", r.data or [])
+
+        def _q_todo():
             r = supabase.table("coo_project_tasks").select(
                 "id,project_slug,task_description,priority,owner_chief,status,blocked_by"
             ).neq("status", "fatto").order("priority").execute()
-            ctx["todo_list"] = r.data or []
-        except Exception as e:
-            ctx["todo_list"] = f"errore lettura DB: {e}"
-        # v5.35: task pendenti di tutti i Chief
-        try:
+            return ("todo_list", r.data or [])
+
+        def _q_pending():
             r = supabase.table("chief_pending_tasks").select(
                 "id,chief_id,task_description,status,created_at"
             ).eq("status", "pending").order("created_at").limit(20).execute()
-            ctx["chief_pending_tasks"] = r.data or []
-        except Exception as e:
-            ctx["chief_pending_tasks"] = f"errore lettura DB: {e}"
+            return ("chief_pending_tasks", r.data or [])
+
+        queries = [_q_projects, _q_actions, _q_products, _q_kpis,
+                   _q_logs, _q_tasks, _q_todo, _q_pending]
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(fn): fn for fn in queries}
+            for future in as_completed(futures):
+                try:
+                    key, data = future.result(timeout=10)
+                    ctx[key] = data
+                except Exception as e:
+                    fn_name = futures[future].__name__
+                    ctx[fn_name.replace("_q_", "")] = f"errore: {e}"
+
         return ctx
 
 
@@ -1338,27 +1340,19 @@ class COO(BaseChief):
             recent_messages=recent_messages,
         )
 
-        # 6. Post-processing: controlla frasi vietate
-        if self._contains_forbidden(response):
-            logger.info("[COO] Forbidden phrase detected, gathering data...")
-            gathered = self._gather_data_proactively(question, thread_id, project)
-            if gathered:
-                enriched_context += "\n\nDATI RACCOLTI ORA DAL DATABASE:\n" + gathered
-                response = super().answer_question(
-                    question, user_context=enriched_context,
-                    project_context=project_context,
-                    topic_scope_id=topic_scope_id,
-                    project_scope_id=project_scope_id,
-                    recent_messages=recent_messages,
-                )
-
-        # v5.35: controlla frasi vietate task-specific
-        if self._contains_task_forbidden(response):
-            logger.info("[COO] Task forbidden phrase detected, regenerating...")
+        # v5.36 FIX 10: check forbidden unificato — max 1 rigenerazione (non 2)
+        has_generic_forbidden = self._contains_forbidden(response)
+        has_task_forbidden = self._contains_task_forbidden(response)
+        if has_generic_forbidden or has_task_forbidden:
+            logger.info("[COO] Forbidden phrase detected (generic=%s, task=%s), regenerating once...",
+                       has_generic_forbidden, has_task_forbidden)
+            if has_generic_forbidden:
+                gathered = self._gather_data_proactively(question, thread_id, project)
+                if gathered:
+                    enriched_context += "\n\nDATI RACCOLTI ORA DAL DATABASE:\n" + gathered
             enriched_context += (
-                "\n\nATTENZIONE: La tua risposta conteneva frasi vietate come "
-                "'sto lavorando', 'ci lavoro', 'ti aggiorno'. "
-                "RISCRIVI producendo output concreto ORA. Se non puoi, scrivi BLOCCATO con motivo."
+                "\n\nATTENZIONE: riscrivi senza frasi vaghe. "
+                "Output concreto ORA. Se bloccato, scrivi BLOCCATO con motivo."
             )
             response = super().answer_question(
                 question, user_context=enriched_context,
@@ -1367,6 +1361,7 @@ class COO(BaseChief):
                 project_scope_id=project_scope_id,
                 recent_messages=recent_messages,
             )
+            # NON rigenerare una seconda volta
 
         # 7. Update project state se in un cantiere
         if project:

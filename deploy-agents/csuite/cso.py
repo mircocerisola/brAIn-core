@@ -70,6 +70,7 @@ class CSO(BaseChief):
     chief_id = "cso"
     domain = "strategy"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.7  # v5.36: creativo, strategico
     MY_DOMAIN = ["strategia", "mercato", "competizione", "opportunita", "smoke test",
                  "pipeline", "problemi", "soluzioni", "bos", "trend"]
     MY_REFUSE_DOMAINS = ["codice", "finanza", "legale", "hr", "dns", "deploy", "marketing"]

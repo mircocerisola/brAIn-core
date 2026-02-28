@@ -1,8 +1,10 @@
 """
 brAIn BaseAgent — classe base per tutti gli agenti.
 Fornisce: run_with_logging, call_claude, notify_mirco, emit_event, retry, circuit breaker.
+v5.36: prompt caching, temperature, jitter, circuit breaker alert.
 """
 from __future__ import annotations
+import random
 import time
 import logging
 from datetime import datetime, timezone
@@ -33,7 +35,7 @@ class BaseAgent:
     _circuit_open: bool = False
     _circuit_open_until: float = 0.0
     CIRCUIT_THRESHOLD: int = 5
-    CIRCUIT_RESET_SECONDS: int = 300
+    CIRCUIT_RESET_SECONDS: int = 60  # v5.36: ridotto da 300 a 60 (half-open piu veloce)
 
     def run_with_logging(self, action: str, fn, *args, **kwargs) -> Dict[str, Any]:
         """Esegue fn con logging automatico su agent_logs e gestione errori."""
@@ -52,6 +54,16 @@ class BaseAgent:
                 self._circuit_open = True
                 self._circuit_open_until = time.time() + self.CIRCUIT_RESET_SECONDS
                 logger.warning(f"[{self.name}] Circuit breaker OPEN for {self.CIRCUIT_RESET_SECONDS}s")
+                # v5.36: alert Mirco quando circuit apre
+                try:
+                    from core.utils import notify_telegram
+                    notify_telegram(
+                        f"[{self.name}] Circuit breaker aperto — {self.CIRCUIT_THRESHOLD} errori consecutivi. "
+                        f"Reset in {self.CIRCUIT_RESET_SECONDS}s.",
+                        level="critical",
+                    )
+                except Exception:
+                    pass
             raise
 
     def call_claude(
@@ -61,9 +73,11 @@ class BaseAgent:
         model: Optional[str] = None,
         max_tokens: int = 2000,
         prior_messages: Optional[list] = None,
+        temperature: Optional[float] = None,
     ) -> str:
         """Chiama Claude API con retry automatico.
         prior_messages: lista di {role, text} — passata come turns reali ad Anthropic.
+        v5.36: prompt caching (cache_control), temperature, jitter nel retry.
         """
         mdl = model or self.default_model
         messages: list = []
@@ -81,7 +95,12 @@ class BaseAgent:
         messages.append({"role": "user", "content": prompt})
         kwargs: Dict[str, Any] = {"model": mdl, "max_tokens": max_tokens, "messages": messages}
         if system:
-            kwargs["system"] = system
+            # v5.36: prompt caching — cache_control ephemeral sul system prompt
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+        if temperature is not None:
+            kwargs["temperature"] = temperature
 
         for attempt in range(self.max_retries):
             try:
@@ -91,7 +110,9 @@ class BaseAgent:
                 return text
             except Exception as e:
                 if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay * (attempt + 1))
+                    # v5.36: jitter nel retry backoff
+                    wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(wait)
                 else:
                     raise
         return ""

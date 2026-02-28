@@ -33,6 +33,7 @@ class CMO(BaseChief):
     chief_id = "cmo"
     domain = "marketing"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.7  # v5.36: creativo
     MY_DOMAIN = ["marketing", "brand", "landing", "growth", "copy",
                  "bozza", "visual", "logo", "contenuti", "ads"]
     MY_REFUSE_DOMAINS = ["codice", "finanza", "legale", "hr", "dns", "deploy", "infrastruttura"]
@@ -318,13 +319,14 @@ class CMO(BaseChief):
 
         try:
             r = supabase.table("projects").select(
-                "id,name,brand_name,brand_email,brand_domain,smoke_test_method,topic_id,description"
+                "id,name,brand_name,brand_email,brand_domain,smoke_test_method,topic_id,description,spec_md"
             ).eq("id", project_id).execute()
             if not r.data:
                 return {"error": "progetto non trovato"}
             project = r.data[0]
         except Exception as e:
-            return {"error": str(e)}
+            logger.error("[CMO] design_landing_concept DB error: %s", e)
+            return {"error": "Problema tecnico nella lettura del progetto. Segnalato al CTO."}
 
         brand = project.get("brand_name") or project.get("name", "")
         email = project.get("brand_email") or ""
@@ -377,7 +379,7 @@ class CMO(BaseChief):
             brief_raw = self.call_claude(brief_prompt, model="claude-sonnet-4-6", max_tokens=2000)
         except Exception as e:
             logger.warning("[CMO] design_landing_concept brief error: %s", e)
-            return {"error": str(e)}
+            return {"status": "error", "message": "Problema tecnico nella generazione del brief. Ho segnalato il bug al CTO."}
 
         # Parsa il brief JSON
         brief = self._parse_brief_json(brief_raw)
@@ -793,7 +795,7 @@ class CMO(BaseChief):
             return {"status": "ok", "event_type": "landing_brief_ready"}
         except Exception as e:
             logger.warning("[CMO] publish_landing_brief: %s", e)
-            return {"error": str(e)}
+            return {"status": "error", "message": "Problema tecnico nella pubblicazione del brief. Ho segnalato il bug al CTO."}
 
     #
     # TELEGRAM HELPERS
@@ -898,13 +900,14 @@ class CMO(BaseChief):
         # Load progetto
         try:
             r = supabase.table("projects") \
-                .select("id,name,brand_name,description,status") \
+                .select("id,name,brand_name,description,status,spec_md") \
                 .eq("id", project_id).execute()
             if not r.data:
                 return {"status": "error", "error": "Progetto non trovato"}
             project = r.data[0]
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            logger.error("[CMO] plan_paid_ads DB error: %s", e)
+            return {"status": "error", "error": "Problema tecnico nella lettura del progetto. Segnalato al CTO."}
 
         brand = project.get("brand_name") or project.get("name") or "Progetto"
 

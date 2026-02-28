@@ -84,20 +84,20 @@ def get_episodes(scope_type: str, scope_id: str, limit: int = 5) -> List[str]:
         ids = [row["id"] for row in r.data]
         summaries = [row["summary"] for row in r.data]
 
-        # Aggiorna access_count e last_accessed_at in background
+        # v5.36: batch UPDATE access count — RPC singola invece di 15 query
         try:
-            now = now_rome().isoformat()
-            for eid in ids:
-                supabase.table("episodic_memory").update({
-                    "last_accessed_at": now,
-                    "access_count": supabase.table("episodic_memory")
-                        .select("access_count").eq("id", eid)
-                        .execute().data[0]["access_count"] + 1
-                        if supabase.table("episodic_memory").select("access_count").eq("id", eid).execute().data
-                        else 1,
-                }).eq("id", eid).execute()
+            supabase.rpc("increment_episode_access", {"episode_ids": ids}).execute()
         except Exception as e:
-            logger.debug(f"[MEMORY] access_count update error: {e}")
+            # Fallback: UPDATE singoli senza SELECT (1 query per ID, non 3)
+            logger.debug(f"[MEMORY] RPC increment_episode_access fallback: {e}")
+            try:
+                now = now_rome().isoformat()
+                for eid in ids:
+                    supabase.table("episodic_memory").update({
+                        "last_accessed_at": now,
+                    }).eq("id", eid).execute()
+            except Exception as e2:
+                logger.debug(f"[MEMORY] access_count fallback error: {e2}")
 
         return summaries
     except Exception as e:
@@ -388,7 +388,7 @@ def cleanup_memory() -> Dict[str, Any]:
     deleted_messages = 0
     merged_episodes = 0
 
-    # 1. Elimina episodi poco rilevanti
+    # 1. Elimina episodi poco rilevanti — v5.36: batch delete (no N+1)
     try:
         cutoff_14 = (now - timedelta(days=14)).isoformat()
         r = supabase.table("episodic_memory") \
@@ -407,21 +407,14 @@ def cleanup_memory() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"[MEMORY CLEANUP] episodic delete error: {e}")
 
-    # 2. Elimina messaggi topic > 7gg
+    # 2. Elimina messaggi topic > 7gg — v5.36: batch delete diretto senza SELECT
     try:
         cutoff_7 = (now - timedelta(days=7)).isoformat()
         r = supabase.table("topic_conversation_history") \
-            .select("id") \
+            .delete() \
             .lt("created_at", cutoff_7) \
             .execute()
-        if r.data:
-            ids_to_delete = [row["id"] for row in r.data]
-            for mid in ids_to_delete:
-                try:
-                    supabase.table("topic_conversation_history").delete().eq("id", mid).execute()
-                    deleted_messages += 1
-                except Exception:
-                    pass
+        deleted_messages = len(r.data) if r.data else 0
     except Exception as e:
         logger.warning(f"[MEMORY CLEANUP] messages delete error: {e}")
 

@@ -135,6 +135,19 @@ def extract_json(text):
 
 
 def search_perplexity(query, max_tokens=600):
+    """v5.36: rate limit 15/giorno + logging costo in agent_logs."""
+    # Rate limit: max 15 ricerche/giorno
+    try:
+        today = now_rome().date().isoformat()
+        r = supabase.table("agent_logs").select("id", count="exact") \
+            .eq("action", "perplexity_search") \
+            .gte("created_at", today + "T00:00:00").execute()
+        if r.count and r.count >= 15:
+            logger.warning("[PERPLEXITY] Rate limit: 15/giorno raggiunto")
+            return "Limite ricerche giornaliero raggiunto. Riprova domani."
+    except Exception:
+        pass
+
     try:
         response = requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -151,7 +164,20 @@ def search_perplexity(query, max_tokens=600):
         )
         if response.status_code == 200:
             data = response.json()
-            return data["choices"][0]["message"]["content"]
+            result = data["choices"][0]["message"]["content"]
+            # v5.36: log costo Perplexity
+            try:
+                supabase.table("agent_logs").insert({
+                    "agent_id": "perplexity",
+                    "action": "perplexity_search",
+                    "model_used": "sonar",
+                    "cost_usd": 0.005,
+                    "status": "success",
+                    "created_at": now_rome().isoformat(),
+                }).execute()
+            except Exception:
+                pass
+            return result
         logger.warning("[PERPLEXITY] status=%d body=%s", response.status_code, response.text[:200])
         return None
     except Exception as e:

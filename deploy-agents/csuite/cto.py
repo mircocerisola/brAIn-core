@@ -48,6 +48,7 @@ class CTO(BaseChief):
     chief_id = "cto"
     domain = "tech"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.4  # v5.36: preciso ma flessibile
     MY_DOMAIN = ["codice", "infrastruttura", "deploy", "sicurezza", "architettura",
                  "bug", "cloud run", "docker", "github", "api tecnica"]
     MY_REFUSE_DOMAINS = ["marketing", "finanza", "legale", "hr", "vendite"]

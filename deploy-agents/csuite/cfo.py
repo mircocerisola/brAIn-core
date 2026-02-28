@@ -22,6 +22,7 @@ class CFO(BaseChief):
     chief_id = "cfo"
     domain = "finance"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.3  # v5.36: analitico, consistente
     MY_DOMAIN = ["finanza", "costi", "budget", "revenue", "kpi finanziari",
                  "burn rate", "cash flow", "pricing", "marginalita", "fatturato"]
     MY_REFUSE_DOMAINS = ["codice", "vendite", "strategia", "marketing", "legale", "hr", "dns"]

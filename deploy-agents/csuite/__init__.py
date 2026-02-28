@@ -21,25 +21,52 @@ _chiefs = {
     "people": CPeO(),
 }
 
-# Keyword mapping per routing da testo
-KEYWORD_ROUTING = {
-    "cso": "strategy", "strategia": "strategy", "mercato": "strategy",
-    "competizione": "strategy", "opportunità": "strategy", "pivot": "strategy",
-    "cfo": "finance", "costi": "finance", "budget": "finance", "revenue": "finance",
-    "finanza": "finance", "burn rate": "finance", "marginalità": "finance",
-    "cmo": "marketing", "marketing": "marketing", "brand": "marketing",
-    "growth": "marketing", "conversione": "marketing", "ads": "marketing",
-    "cto": "tech", "infrastruttura": "tech", "deploy": "tech", "codice": "tech",
-    "architettura": "tech", "sicurezza tecnica": "tech",
-    "coo": "ops", "operazioni": "ops", "cantiere": "ops", "pipeline": "ops",
-    "blocco": "ops", "collo di bottiglia": "ops",
-    "cpo": "ops", "prodotto": "ops", "ux": "ops", "roadmap": "ops",
-    "feedback utenti": "ops", "mvp": "ops",
-    "clo": "legal", "legale": "legal", "compliance": "legal", "gdpr": "legal",
-    "contratto": "legal", "rischio legale": "legal",
-    "cpeo": "people", "team": "people", "manager": "people",
-    "collaboratori": "people", "revenue share": "people",
+# v5.36: ROUTING_MAP unificato — keyword → chief_id (sostituisce KEYWORD_ROUTING e ROUTING_KEYWORDS)
+ROUTING_MAP = {
+    # CSO
+    "cso": "cso", "strategia": "cso", "mercato": "cso",
+    "competizione": "cso", "opportunità": "cso", "pivot": "cso",
+    "pipeline": "cso", "bos": "cso", "problemi globali": "cso",
+    "smoke test": "cso", "validazione mercato": "cso", "prospect": "cso",
+    # CFO
+    "cfo": "cfo", "costi": "cfo", "budget": "cfo", "revenue": "cfo",
+    "finanza": "cfo", "burn rate": "cfo", "marginalità": "cfo",
+    "spese": "cfo", "fatturato": "cfo", "revenue share": "cfo",
+    # CMO
+    "cmo": "cmo", "marketing": "cmo", "brand": "cmo",
+    "growth": "cmo", "conversione": "cmo", "ads": "cmo",
+    "logo": "cmo", "immagine": "cmo", "design": "cmo", "avatar": "cmo",
+    "brand identity": "cmo", "grafica": "cmo", "visual": "cmo",
+    # CTO
+    "cto": "cto", "infrastruttura": "cto", "deploy": "cto", "codice": "cto",
+    "architettura": "cto", "sicurezza tecnica": "cto", "sicurezza": "cto",
+    "vulnerabilità": "cto", "bug": "cto",
+    # COO
+    "coo": "coo", "operazioni": "coo", "cantiere": "coo", "cantieri": "coo",
+    "blocco": "coo", "collo di bottiglia": "coo",
+    "cpo": "coo", "prodotto": "coo", "ux": "coo", "roadmap": "coo",
+    "feedback utenti": "coo", "mvp": "coo", "build": "coo", "spec": "coo",
+    "lancio": "coo", "feature": "coo",
+    "processi": "coo", "efficienza": "coo", "coda": "coo",
+    "bottleneck": "coo", "flusso": "coo",
+    # CLO
+    "clo": "clo", "legale": "clo", "compliance": "clo", "gdpr": "clo",
+    "contratto": "clo", "rischio legale": "clo", "termini": "clo",
+    "privacy policy": "clo",
+    # CPeO
+    "cpeo": "cpeo", "team": "cpeo", "manager": "cpeo",
+    "collaboratori": "cpeo", "onboarding": "cpeo", "formazione": "cpeo",
+    "persone": "cpeo", "team building": "cpeo",
 }
+
+# Mappa chief_id → domain per compatibilita con _chiefs
+_CHIEF_ID_TO_DOMAIN = {
+    "cso": "strategy", "cfo": "finance", "cmo": "marketing",
+    "cto": "tech", "coo": "ops", "clo": "legal", "cpeo": "people",
+}
+
+# Legacy alias per compatibilita
+KEYWORD_ROUTING = {k: _CHIEF_ID_TO_DOMAIN.get(v, v) for k, v in ROUTING_MAP.items()}
 
 
 def get_chief(domain: str):

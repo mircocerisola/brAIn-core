@@ -19,6 +19,7 @@ class CLO(BaseChief):
     chief_id = "clo"
     domain = "legal"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.3  # v5.36: prudente, consistente
     MY_DOMAIN = ["legale", "compliance", "contratti", "gdpr", "privacy",
                  "rischio legale", "normativa", "ai act", "termini"]
     MY_REFUSE_DOMAINS = ["codice", "marketing", "finanza", "vendite", "hr", "dns", "deploy"]
@@ -155,7 +156,7 @@ class CLO(BaseChief):
                     found.add(row["asset_type"])
         except Exception as e:
             logger.warning("[CLO] legal_gate_check DB: %s", e)
-            return {"approved": False, "missing": list(REQUIRED_LEGAL_DOCS), "error": str(e)}
+            return {"approved": False, "missing": list(REQUIRED_LEGAL_DOCS), "message": "Problema tecnico nella verifica legale."}
 
         missing = [doc for doc in REQUIRED_LEGAL_DOCS if doc not in found]
         approved = len(missing) == 0
@@ -190,18 +191,19 @@ class CLO(BaseChief):
         topic_id = thread_id
         try:
             r = supabase.table("projects").select(
-                "brand_name,name,brand_email,brand_domain,topic_id,description"
+                "brand_name,name,brand_email,brand_domain,topic_id,description,spec_md"
             ).eq("id", project_id).execute()
             if r.data:
                 p = r.data[0]
                 brand = p.get("brand_name") or p.get("name", "Progetto")
                 email = p.get("brand_email") or ""
                 domain_name = p.get("brand_domain") or ""
-                description = p.get("description") or ""
+                description = p.get("description") or p.get("spec_md") or ""
                 if not topic_id:
                     topic_id = p.get("topic_id")
         except Exception as e:
-            return {"error": str(e)}
+            logger.error("[CLO] generate_legal_documents DB error: %s", e)
+            return {"error": "Problema tecnico nella lettura del progetto. Segnalato al CTO."}
 
         if not brand:
             return {"error": "brand non trovato per project #" + str(project_id)}
@@ -334,7 +336,7 @@ class CLO(BaseChief):
             }).eq("id", project_id).execute()
         except Exception as e:
             logger.warning("[CLO] legal_status update: %s", e)
-            return {"error": str(e)}
+            return {"status": "error", "message": "Problema tecnico nell'aggiornamento legal status."}
 
         # Crea agent_event per COO
         try:
@@ -371,7 +373,8 @@ class CLO(BaseChief):
 
             return {"status": "ok", "docs_count": len(r.data)}
         except Exception as e:
-            return {"error": str(e)}
+            logger.warning("[CLO] view_legal_docs: %s", e)
+            return {"status": "error", "message": "Problema tecnico nel recupero documenti legali."}
 
     def _send_to_topic(self, topic_id, text):
         """Invia messaggio a topic specifico."""

@@ -5,7 +5,7 @@ Importare da qui: supabase, claude, TELEGRAM_BOT_TOKEN, logger, ecc.
 import os
 import logging
 from dotenv import load_dotenv
-from supabase import create_client
+from supabase import create_client, ClientOptions
 import anthropic
 import requests as _requests
 
@@ -15,7 +15,12 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("brain")
 
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
+# v5.36: timeout 10s su PostgREST per evitare hang indefiniti
+supabase = create_client(
+    os.getenv("SUPABASE_URL"),
+    os.getenv("SUPABASE_KEY"),
+    options=ClientOptions(postgrest_client_timeout=10),
+)
 
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

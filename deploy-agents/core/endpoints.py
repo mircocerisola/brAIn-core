@@ -35,7 +35,13 @@ from marketing.agents import run_marketing, generate_marketing_report
 
 
 async def health_check(request):
-    return web.Response(text="OK", status=200)
+    """v5.36: health check con verifica DB — Cloud Run riavvia se degraded."""
+    try:
+        supabase.table("org_config").select("key").limit(1).execute()
+        return web.json_response({"status": "ok", "db": "connected"})
+    except Exception as e:
+        logger.warning("[HEALTH] DB check failed: %s", e)
+        return web.json_response({"status": "degraded", "db": str(e)}, status=503)
 
 async def run_scanner_endpoint(request):
     result = run_world_scanner()

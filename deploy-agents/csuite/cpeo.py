@@ -34,6 +34,7 @@ class CPeO(BaseChief):
     domain = "people"
     chief_id = "cpeo"
     default_model = "claude-sonnet-4-6"
+    default_temperature = 0.6  # v5.36: formativo
     MY_DOMAIN = ["team", "coaching", "training", "competenze", "gap analysis",
                  "performance", "onboarding", "knowledge", "hr"]
     MY_REFUSE_DOMAINS = ["codice", "marketing", "finanza", "vendite", "legale", "dns", "deploy"]

@@ -54,9 +54,26 @@ WEB_SEARCH_TRIGGERS = [
 
 
 def web_search(query, chief_name="agent"):
-    """Ricerca web via Perplexity API. Sync. Usata da tutti i Chief quando serve."""
+    """Ricerca web via Perplexity API. Sync. Usata da tutti i Chief quando serve.
+    v5.36: rate limit 15/giorno + logging costo in agent_logs.
+    """
     if not PERPLEXITY_API_KEY:
         return "Perplexity API key non configurata. Impossibile cercare online."
+
+    # v5.36: rate limit
+    try:
+        from core.config import supabase
+        from core.templates import now_rome
+        today = now_rome().date().isoformat()
+        r = supabase.table("agent_logs").select("id", count="exact") \
+            .eq("action", "perplexity_search") \
+            .gte("created_at", today + "T00:00:00").execute()
+        if r.count and r.count >= 15:
+            logger.warning("[%s] web_search rate limit 15/giorno raggiunto", chief_name)
+            return "Limite ricerche giornaliero raggiunto. Riprova domani."
+    except Exception:
+        pass
+
     try:
         response = _requests.post(
             "https://api.perplexity.ai/chat/completions",
@@ -85,6 +102,20 @@ def web_search(query, chief_name="agent"):
             data = response.json()
             result = data["choices"][0]["message"]["content"]
             logger.info("[%s] web_search OK: %d chars", chief_name, len(result))
+            # v5.36: log costo Perplexity
+            try:
+                from core.config import supabase
+                from core.templates import now_rome
+                supabase.table("agent_logs").insert({
+                    "agent_id": chief_name,
+                    "action": "perplexity_search",
+                    "model_used": "sonar",
+                    "cost_usd": 0.005,
+                    "status": "success",
+                    "created_at": now_rome().isoformat(),
+                }).execute()
+            except Exception:
+                pass
             return result
         else:
             logger.warning("[%s] web_search status %d", chief_name, response.status_code)
