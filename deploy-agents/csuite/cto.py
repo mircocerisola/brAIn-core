@@ -634,10 +634,25 @@ class CTO(BaseChief):
             logger.warning("[CTO] project_context_builder project: %s", e)
 
         try:
+            # FIX-FLOW 8: leggi da entrambe le tabelle task
+            cto_tasks = []
             r = supabase.table("project_tasks").select(
                 "title,assigned_to,status"
             ).eq("project_id", project_id).eq("assigned_to", "cto").execute()
-            ctx["cto_tasks"] = r.data or []
+            cto_tasks.extend(r.data or [])
+            # Also check coo_project_tasks
+            slug = ctx.get("project", {}).get("slug", "")
+            if slug:
+                r2 = supabase.table("coo_project_tasks").select(
+                    "task_description,owner_chief,status"
+                ).eq("project_slug", slug).eq("owner_chief", "cto").execute()
+                for t in (r2.data or []):
+                    cto_tasks.append({
+                        "title": t.get("task_description", ""),
+                        "assigned_to": "cto",
+                        "status": t.get("status", ""),
+                    })
+            ctx["cto_tasks"] = cto_tasks
         except Exception as e:
             logger.warning("[CTO] project_context_builder tasks: %s", e)
             ctx["cto_tasks"] = []

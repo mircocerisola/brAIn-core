@@ -80,7 +80,7 @@ class COO(BaseChief):
         "Genera un briefing operativo settimanale PRECISO basato sui dati reali del contesto. "
         "NON inventare informazioni. Se un dato manca, scrivi 'dato mancante'. "
         "Per ogni cantiere attivo elenca le azioni con stato reale: "
-        "completata, in corso, bloccata, in attesa Mirco. "
+        "DA FARE, FATTO, BLOCCATO DA [chi/cosa]. "
         "Indica CHI deve fare COSA per ogni azione."
     )
 
@@ -273,14 +273,38 @@ class COO(BaseChief):
     #
 
     def _get_project_tasks(self, project_id):
-        """Carica tutti i task di un progetto."""
+        """Carica task progetto da ENTRAMBE le tabelle (legacy + coo_project_tasks)."""
+        tasks = []
+        # Legacy project_tasks
         try:
             r = supabase.table("project_tasks").select("*") \
                 .eq("project_id", project_id).order("priority").execute()
-            return r.data or []
+            tasks.extend(r.data or [])
         except Exception as e:
-            logger.warning("[COO] _get_project_tasks: %s", e)
-            return []
+            logger.warning("[COO] _get_project_tasks legacy: %s", e)
+        # New coo_project_tasks (via slug)
+        try:
+            pr = supabase.table("projects").select("slug").eq("id", project_id).execute()
+            slug = pr.data[0].get("slug") if pr.data else None
+            if slug:
+                r = supabase.table("coo_project_tasks").select("*") \
+                    .eq("project_slug", slug).order("priority").execute()
+                _status_map = {"da_fare": "pending", "fatto": "completed", "bloccato": "blocked"}
+                for t in (r.data or []):
+                    tasks.append({
+                        "id": t.get("id"),
+                        "project_id": project_id,
+                        "title": t.get("task_description", ""),
+                        "status": _status_map.get(t.get("status", ""), t.get("status", "")),
+                        "assigned_to": t.get("owner_chief", "coo"),
+                        "priority": t.get("priority", "P1"),
+                        "created_at": t.get("created_at"),
+                        "updated_at": t.get("created_at"),
+                        "_source": "coo_project_tasks",
+                    })
+        except Exception as e:
+            logger.warning("[COO] _get_project_tasks new: %s", e)
+        return tasks
 
     def _progress_bar(self, done, total):
         """Genera barra progresso: [████░░░░] 3/6"""
@@ -327,9 +351,9 @@ class COO(BaseChief):
         # Carica task del progetto
         tasks = self._get_project_tasks(project_id)
         done_tasks = [t for t in tasks if t.get("status") == "completed"]
-        progress_tasks = [t for t in tasks if t.get("status") == "in_progress"]
+        # FIX-FLOW 4: in_progress → pending (DA FARE). Solo 3 stati: DA FARE/FATTO/BLOCCATO
+        todo_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress") and t.get("assigned_to") != "mirco"]
         mirco_tasks = [t for t in tasks if t.get("assigned_to") == "mirco" and t.get("status") != "completed"]
-        pending_tasks = [t for t in tasks if t.get("status") == "pending" and t.get("assigned_to") != "mirco"]
 
         # Completati ieri
         done_ieri = []
@@ -356,10 +380,10 @@ class COO(BaseChief):
             for t in done_ieri:
                 lines.append("  " + t.get("title", "?")[:50])
 
-        if progress_tasks:
+        if todo_tasks:
             lines.append("")
-            lines.append("\U0001f7e1 IN CORSO:")
-            for t in progress_tasks:
+            lines.append("\U0001f7e1 DA FARE:")
+            for t in todo_tasks:
                 lines.append("  " + t.get("assigned_to", "?").upper() + ": " + t.get("title", "?")[:45])
 
         if mirco_tasks:
@@ -367,12 +391,6 @@ class COO(BaseChief):
             lines.append("\U0001f534 ATTESA MIRCO:")
             for t in mirco_tasks:
                 lines.append("  " + t.get("title", "?")[:50])
-
-        if pending_tasks:
-            lines.append("")
-            lines.append("\u26AA PROSSIMI:")
-            for t in pending_tasks[:2]:
-                lines.append("  " + t.get("assigned_to", "?").upper() + ": " + t.get("title", "?")[:45])
 
         # Priorita' oggi
         priority_today = None
@@ -453,14 +471,14 @@ class COO(BaseChief):
             return None
 
         done = [t for t in tasks if t.get("status") == "completed"]
-        in_progress = [t for t in tasks if t.get("status") == "in_progress"]
-        pending = [t for t in tasks if t.get("status") == "pending"]
+        # FIX-FLOW 4: merge in_progress + pending as todo (DA FARE)
+        todo = [t for t in tasks if t.get("status") in ("pending", "in_progress")]
 
         reminders = []
         now = now_rome()
 
-        for t in in_progress:
-            # Se in_progress da piu' di 24h senza update
+        for t in todo:
+            # Se task fermo da piu' di 24h senza update
             updated = t.get("updated_at") or t.get("created_at") or ""
             if updated:
                 try:
@@ -475,8 +493,8 @@ class COO(BaseChief):
                 except Exception:
                     pass
 
-        # Mirco task pending → reminder speciale
-        mirco_pending = [t for t in pending if t.get("assigned_to") == "mirco"]
+        # Mirco task DA FARE → reminder speciale
+        mirco_pending = [t for t in todo if t.get("assigned_to") == "mirco"]
         for t in mirco_pending:
             reminders.append(
                 "\U0001f534 MIRCO: " + t.get("title", "?")[:40] + " [da fare]"
@@ -629,15 +647,27 @@ class COO(BaseChief):
             lines.append("Progetti: errore " + str(e)[:50])
             lines.append("")
 
-        # Task per progetto
+        # Task per progetto (entrambe le tabelle)
         try:
+            all_tasks = []
             r = supabase.table("project_tasks").select(
                 "id,project_id,title,status,assigned_to"
             ).execute()
-            if r.data:
+            all_tasks.extend(r.data or [])
+            r2 = supabase.table("coo_project_tasks").select(
+                "id,project_slug,task_description,status,owner_chief"
+            ).neq("status", "fatto").execute()
+            for t in (r2.data or []):
+                all_tasks.append({
+                    "title": t.get("task_description", ""),
+                    "status": t.get("status", ""),
+                    "assigned_to": t.get("owner_chief", "?"),
+                    "project_id": t.get("project_slug", "?"),
+                })
+            if all_tasks:
                 lines.append("## Task Progetti")
                 lines.append("")
-                for t in (r.data or []):
+                for t in all_tasks:
                     lines.append(
                         "- [" + (t.get("status") or "?") + "] "
                         + (t.get("assigned_to") or "?").upper() + ": "
@@ -703,13 +733,19 @@ class COO(BaseChief):
         ieri = (now - timedelta(hours=24)).isoformat()
         lines = []
 
-        # Task completati
+        # Task completati (da entrambe le tabelle)
         try:
-            r = supabase.table("project_tasks").select("title,project_id") \
+            completed = []
+            r = supabase.table("project_tasks").select("title") \
                 .eq("status", "completed").gte("updated_at", ieri).execute()
-            if r.data:
-                lines.append("Task completati: " + str(len(r.data)))
-                for t in (r.data or [])[:3]:
+            completed.extend(r.data or [])
+            r2 = supabase.table("coo_project_tasks").select("task_description") \
+                .eq("status", "fatto").gte("created_at", ieri).execute()
+            for t in (r2.data or []):
+                completed.append({"title": t.get("task_description", "")})
+            if completed:
+                lines.append("Task completati: " + str(len(completed)))
+                for t in completed[:3]:
                     lines.append("  - " + (t.get("title") or "?")[:50])
         except Exception:
             pass
@@ -1329,7 +1365,9 @@ class COO(BaseChief):
             "- Ogni task deve avere: stato (DA FARE/FATTO/BLOCCATO), proprietario, priorita\n"
             "- Non esistono task 'in corso'. Un task e DA FARE o FATTO o BLOCCATO\n"
             "- Se un Chief non produce output concreto, scala a Mirco\n"
-            "- Formato risposta: TODO list + delta (cosa e cambiato) + bottleneck + prossima azione"
+            "- Formato risposta: TODO list + delta (cosa e cambiato) + bottleneck + prossima azione\n"
+            "- REGOLA MIRCO: assegna task a Mirco SOLO per approvazioni, decisioni e azioni umane "
+            "(pagamenti, registrazioni, firme, scelte strategiche). Tutto il resto va ai Chief."
         )
 
         # 5. Chiama parent answer_question con contesto arricchito
@@ -1500,18 +1538,18 @@ class COO(BaseChief):
             total = len(tasks)
             lines.append("Task: " + str(done) + "/" + str(total) + " completati")
 
-            in_progress = [t for t in tasks if t.get("status") == "in_progress"]
-            for t in in_progress:
-                lines.append("  IN CORSO: " + (t.get("assigned_to") or "?").upper()
+            # FIX-FLOW 4: solo 3 stati (DA FARE/FATTO/BLOCCATO)
+            todo_t = [t for t in tasks if t.get("status") in ("pending", "in_progress")]
+            for t in todo_t:
+                lines.append("  DA FARE: " + (t.get("assigned_to") or "?").upper()
                            + " - " + (t.get("title") or "?")[:40])
 
             blocked = [t for t in tasks if t.get("status") == "blocked"]
             for t in blocked:
                 lines.append("  BLOCCATO: " + (t.get("title") or "?")[:40])
 
-            pending_t = [t for t in tasks if t.get("status") == "pending"]
-            if pending_t:
-                next_t = pending_t[0]
+            if todo_t:
+                next_t = todo_t[0]
                 lines.append("Prossima azione: " + (next_t.get("title") or "?")[:40]
                            + " (" + (next_t.get("assigned_to") or "?").upper() + ")")
 

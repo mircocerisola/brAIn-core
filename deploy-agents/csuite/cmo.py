@@ -19,8 +19,12 @@ try:
 except ImportError:
     _HAS_PILLOW = False
 
-# Keyword che triggerano design_landing_concept
-_BOZZA_KEYWORDS = ["bozza", "landing", "visiva", "design", "mockup", "wireframe", "pagina"]
+# Keyword che triggerano design_landing_concept / bozza visiva
+_BOZZA_KEYWORDS = [
+    "bozza", "landing", "visiva", "design", "mockup", "wireframe", "pagina",
+    "immagine", "preview", "visual", "genera immagine", "genera logo",
+    "crea immagine", "crea logo", "grafica",
+]
 
 
 def format_cmo_message(titolo, contenuto=""):

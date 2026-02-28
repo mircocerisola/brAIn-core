@@ -562,6 +562,22 @@ class BaseChief(BaseAgent):
         if topic_scope_id and ctx_level == "full":
             effective_prior = None  # episodic gia nel system prompt
 
+        # v5.36 FIX-FLOW 1: traccia task ricevuto (solo se non greeting)
+        _task_id = None
+        if ctx_level != "light":
+            try:
+                _topic_id = None
+                if topic_scope_id and ":" in topic_scope_id:
+                    _tid = topic_scope_id.split(":")[-1]
+                    _topic_id = int(_tid) if _tid.isdigit() else None
+                _task_id = self._save_task(
+                    question[:500], topic_id=_topic_id,
+                    project_slug=project_scope_id or "",
+                    source="mirco",
+                )
+            except Exception:
+                pass
+
         try:
             response = self.call_claude(
                 question,
@@ -573,6 +589,12 @@ class BaseChief(BaseAgent):
             )
         except Exception as e:
             logger.error(f"[{self.name}] answer_question error: {e}")
+            # v5.36 FIX-FLOW 1: blocca task se Claude fallisce
+            if _task_id:
+                try:
+                    self._block_task(_task_id, f"Claude error: {str(e)[:200]}", blocked_by="sistema")
+                except Exception:
+                    pass
             # v5.36: MAI mostrare errori raw a Mirco
             from csuite.utils import fmt
             self.notify_mirco(
@@ -603,6 +625,13 @@ class BaseChief(BaseAgent):
             response = _re.sub(
                 r'<<CODE_ACTION>>.*?<<END_CODE_ACTION>>', '', response, flags=_re.DOTALL
             ).strip()
+
+        # v5.36 FIX-FLOW 1: completa task dopo risposta
+        if _task_id:
+            try:
+                self._complete_task(_task_id, response[:500])
+            except Exception:
+                pass
 
         # v5.34: aggiorna topic summary (fire-and-forget, non blocca)
         if topic_scope_id and ctx_level != "light":
