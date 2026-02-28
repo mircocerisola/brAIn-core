@@ -36,6 +36,13 @@ _PROMPT_PATTERN = re.compile(
 )
 
 
+def format_cto_message(titolo, contenuto=""):
+    """Helper formato CTO: icona + nome + titolo + contenuto. Zero separatori."""
+    if contenuto:
+        return "\U0001f527 CTO\n" + titolo + "\n\n" + contenuto
+    return "\U0001f527 CTO\n" + titolo
+
+
 class CTO(BaseChief):
     name = "CTO"
     chief_id = "cto"
@@ -263,10 +270,9 @@ class CTO(BaseChief):
         last_line = clean[-1] if clean else "In esecuzione \u2014 nessun output ancora"
         if len(last_line) > 200:
             last_line = last_line[:197] + "..."
-        return (
-            "\U0001f527 CTO\n"
-            "Aggiornamento " + str(elapsed) + " min\n\n"
-            + last_line
+        return format_cto_message(
+            "Aggiornamento " + str(elapsed) + " min",
+            last_line
         )
 
     # ============================================================
@@ -334,10 +340,10 @@ class CTO(BaseChief):
 
         if job_ok and group_id and topic_id:
             self._send_telegram(group_id, topic_id,
-                "\U0001f527 CTO\n"
-                "Task dalla coda avviato\n\n"
-                "Task: " + next_title + "\n"
-                "Avviato alle " + ora)
+                format_cto_message(
+                    "Task dalla coda avviato",
+                    "Task: " + next_title + "\n"
+                    "Avviato alle " + ora))
             # Monitor in background
             self._start_monitor(next_id, group_id, topic_id, next_title)
 
@@ -364,17 +370,17 @@ class CTO(BaseChief):
             except Exception as e:
                 logger.warning("[CTO] update status queued: %s", e)
                 self._send_telegram(chat_id, thread_id,
-                                    "\U0001f527 CTO\nErrore\n\nImpossibile accodare task #" + str(task_id))
+                                    format_cto_message("Errore", "Impossibile accodare task #" + str(task_id)))
                 return
 
             pending_count = self._count_pending_tasks()
             running_title = (running.get("title") or "")[:40]
             self._send_telegram(chat_id, thread_id,
-                "\U0001f527 CTO\n"
-                "Task in coda\n\n"
-                "Task: " + titolo + "\n"
-                "Posizione: " + str(pending_count) + "\n"
-                "In esecuzione: " + running_title)
+                format_cto_message(
+                    "Task in coda",
+                    "Task: " + titolo + "\n"
+                    "Posizione: " + str(pending_count) + "\n"
+                    "In esecuzione: " + running_title))
             logger.info("[CTO] Task #%d accodato (pos=%d), running=#%d",
                         task_id, pending_count, running["id"])
             return
@@ -387,7 +393,7 @@ class CTO(BaseChief):
         except Exception as e:
             logger.warning("[CTO] update status ready: %s", e)
             self._send_telegram(chat_id, thread_id,
-                                "\U0001f527 CTO\nErrore\n\nImpossibile preparare task #" + str(task_id))
+                                format_cto_message("Errore", "Impossibile preparare task #" + str(task_id)))
             return
 
         # 4. Trigger Cloud Run Job con CODE_TASK_ID
@@ -397,19 +403,19 @@ class CTO(BaseChief):
         ora = format_time_rome()
         if job_ok:
             self._send_telegram(chat_id, thread_id,
-                "\U0001f527 CTO\n"
-                "Claude Code avviato in cloud\n\n"
-                "Task: " + titolo + "\n"
-                "Avviato alle " + ora + "\n"
-                "Esecuzione: Cloud Run Job\n"
-                "Aggiornamento ogni 5 minuti")
+                format_cto_message(
+                    "Claude Code avviato in cloud",
+                    "Task: " + titolo + "\n"
+                    "Avviato alle " + ora + "\n"
+                    "Esecuzione: Cloud Run Job\n"
+                    "Aggiornamento ogni 5 minuti"))
         else:
             self._send_telegram(chat_id, thread_id,
-                "\U0001f527 CTO\n"
-                "Task in coda\n\n"
-                "Task #" + str(task_id) + ": " + titolo + "\n"
-                "Job trigger fallito, il task rimane in stato ready.\n"
-                "Verra' eseguito al prossimo run del job.")
+                format_cto_message(
+                    "Task in coda",
+                    "Task #" + str(task_id) + ": " + titolo + "\n"
+                    "Job trigger fallito, il task rimane in stato ready.\n"
+                    "Verra' eseguito al prossimo run del job."))
 
         # 6. Monitor loop in background
         self._start_monitor(task_id, chat_id, thread_id, titolo)
@@ -447,10 +453,9 @@ class CTO(BaseChief):
                     labels = {"done": "Completato", "error": "Fallito", "interrupted": "Interrotto"}
                     label = labels.get(status, "Completato")
 
-                    completion_text = (
-                        "\U0001f527 CTO\n"
-                        + label + "\n\n"
-                        + "Task: " + _ttl + " " + str(_elapsed) + " min"
+                    completion_text = format_cto_message(
+                        label,
+                        "Task: " + _ttl + " " + str(_elapsed) + " min"
                     )
                     completion_markup = {"inline_keyboard": [[
                         {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
@@ -483,7 +488,7 @@ class CTO(BaseChief):
             }).eq("id", task_id).execute()
         except Exception as e:
             self._send_telegram(chat_id, thread_id,
-                                "\U0001f527 CTO\nErrore interrupt\n\n" + str(e))
+                                format_cto_message("Errore interrupt", str(e)))
             return
 
         logger.info("[CTO] interrupt_task #%d -> interrupt_requested", task_id)
@@ -497,10 +502,10 @@ class CTO(BaseChief):
             pass
 
         self._send_telegram(chat_id, thread_id,
-            "\U0001f527 CTO\n"
-            "Interruzione richiesta\n\n"
-            "Task: " + titolo + "\n"
-            "Il job terminera' il processo.")
+            format_cto_message(
+                "Interruzione richiesta",
+                "Task: " + titolo + "\n"
+                "Il job terminera' il processo."))
 
     # ---- CLOUD RUN JOB TRIGGER ----
 
@@ -614,7 +619,7 @@ class CTO(BaseChief):
         lines.append("Prospect: " + str(ctx.get("prospect_count", 0)))
         if ctx.get("cto_tasks"):
             lines.append("")
-            lines.append("TASK CTO:")
+            lines.append("TASK ASSEGNATI")
             for t in ctx["cto_tasks"]:
                 lines.append("  [" + t.get("status", "?") + "] " + t.get("title", "?")[:50])
         return {"context_text": "\n".join(lines), "raw": ctx}
@@ -640,9 +645,8 @@ class CTO(BaseChief):
 
         meta = self._extract_prompt_meta(prompt) if prompt else {"main_file": "da determinare", "time_minutes": 5}
 
-        card_text = (
-            "\U0001f527 CTO\n"
-            "Prossima azione\n\n"
+        card_text = format_cto_message(
+            "Prossima azione",
             "Task: " + title + "\n"
             "File coinvolti: " + meta.get("main_file", "da determinare") + "\n"
             "Stima: " + str(meta.get("time_minutes", 5)) + " min"
