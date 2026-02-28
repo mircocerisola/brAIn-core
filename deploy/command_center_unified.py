@@ -42,6 +42,31 @@ except ImportError:
     _CSUITE_DIRECT = False
     logger.info("C-Suite direct import: not available (fallback HTTP)")
 
+# v5.31: formato risposta Chief pulito (icona + nome + testo senza separatori)
+_CHIEF_ICONS = {
+    "cmo": "\U0001f3a8", "cso": "\U0001f3af", "cto": "\U0001f527",
+    "cfo": "\U0001f4ca", "coo": "\u2699\ufe0f", "clo": "\u2696\ufe0f",
+    "cpeo": "\U0001f331",
+}
+_CHIEF_NAMES = {
+    "cmo": "CMO", "cso": "CSO", "cto": "CTO",
+    "cfo": "CFO", "coo": "COO", "clo": "CLO", "cpeo": "CPeO",
+}
+import re as _re_sep
+_SEP_PATTERN = _re_sep.compile(r"^[\s]*[━─_=\-]{3,}[\s]*$", _re_sep.MULTILINE)
+
+def _format_chief_response(chief_id, answer):
+    """Formatta risposta Chief: icona + nome + testo pulito senza separatori."""
+    icon = _CHIEF_ICONS.get(chief_id, "")
+    name = _CHIEF_NAMES.get(chief_id, chief_id.upper() if chief_id else "Chief")
+    clean = _SEP_PATTERN.sub("", answer or "")
+    clean = clean.replace("**", "").replace("##", "").replace("# ", "")
+    clean = "\n".join(l for l in clean.split("\n") if l.strip() or not clean.strip())
+    while "\n\n\n" in clean:
+        clean = clean.replace("\n\n\n", "\n\n")
+    return icon + " " + name + "\n\n" + clean.strip()
+
+
 # Cache topic_id → domain per routing diretto ai Chief
 _chief_topic_cache: dict = {}   # thread_id (int) → domain (str)
 _chief_topic_cache_loaded: bool = False
@@ -2993,7 +3018,7 @@ async def handle_project_message(update, project):
                 _proj_chief_name = _chief_display
 
         if _proj_answer:
-            card = _proj_answer[:1200]
+            card = _format_chief_response(_chief_id, _proj_answer)[:1200]
             _token = os.getenv("TELEGRAM_BOT_TOKEN")
             if _token:
                 payload = {"chat_id": chat_id, "text": card}
@@ -4769,7 +4794,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     json={
                         "chat_id": chat_id,
                         "message_thread_id": thread_id,
-                        "text": _answer_t[:3800],
+                        "text": _format_chief_response(_chief_t.chief_id, _answer_t)[:3800],
                     },
                     timeout=15,
                 )
@@ -4851,7 +4876,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # v5.13: skip se CTO ha gia' inviato CODEACTION card
                 if "<<CODEACTION_SENT>>" not in str(_answer):
                     await update.message.reply_text(
-                        _answer[:3800]
+                        _format_chief_response(chief.chief_id, _answer)[:3800]
                     )
                 _topic_buffer_add(chat_id, 0, _answer[:200], role="bot")
             else:
@@ -4863,7 +4888,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "topic_scope_id": _scope_cs, "recent_messages": _recent_cs,
             })
             if result and result.get("answer"):
-                await update.message.reply_text(result["answer"][:4000])
+                _fb_chief = result.get("chief_id", _chief_id_cs)
+                await update.message.reply_text(
+                    _format_chief_response(_fb_chief, result["answer"])[:4000]
+                )
                 _topic_buffer_add(chat_id, 0, result["answer"][:200], role="bot")
 
         threading.Thread(

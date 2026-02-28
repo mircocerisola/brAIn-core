@@ -53,10 +53,11 @@ Ogni messaggio segue SOLO questo schema:
 
 {Contenuto}
 
-VIETATO ASSOLUTO:
-- Separatori di qualsiasi tipo
-- Tabelle markdown nei messaggi Telegram
-- ## intestazioni nei messaggi Telegram
+VIETATO ASSOLUTO (se violi queste regole il messaggio viene scartato):
+- Linee di separazione: mai generare linee orizzontali fatte di trattini, underscore, uguali o altri simboli ripetuti
+- Asterischi e bold: mai usare ** o * o __ nel testo
+- Intestazioni: mai usare # oppure ## nel testo
+- Tabelle markdown
 - "risponde" "dice" "Agente risponde" (il nome e gia nella prima riga)
 - "Risposta in elaborazione, riprova tra poco"
 - Messaggi senza presa in carico immediata
