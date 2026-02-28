@@ -1,10 +1,12 @@
 """COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue.
+v5.33: context awareness completo — delegation reale, topic history, pending actions, pipeline state.
 v5.31: conversation_state helpers, handle_interruption, complete_task_and_handoff.
 v5.28: orchestrate, delegate_to_chief, handle_domain_setup_flow.
 v5.23: send_daily_brain_snapshot (Drive + email + Supabase), rename_cantiere.
 """
 import json
 import os
+import re as _re
 import smtplib
 from datetime import timedelta
 from email.mime.text import MIMEText
@@ -13,11 +15,11 @@ from email.mime.base import MIMEBase
 from email import encoders
 
 import requests as _requests
-from core.base_chief import BaseChief
+from core.base_chief import BaseChief, agent_to_agent_call
 from csuite.cultura import CULTURA_BRAIN
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
-from csuite.utils import fmt
+from csuite.utils import fmt, CHIEF_ICONS, CHIEF_NAMES
 
 
 COO_INTERVENTION_TRIGGERS = [
@@ -29,6 +31,39 @@ COO_INTERVENTION_TRIGGERS = [
 ]
 
 CONVERSATION_TIMEOUT_MINUTES = 30
+
+# v5.33: trigger di delega — Mirco chiede al COO di parlare con un Chief
+COO_DELEGATION_TRIGGERS = [
+    "chiediglielo te", "chiediglielo tu", "parlaci tu", "vai tu",
+    "chiedi a ", "senti il ", "senti la ", "contatta ", "domanda a ",
+    "chiedigli", "chiedile", "senti cosa dice", "vai a chiedere",
+    "parlaci te", "fallo tu", "gestisci tu", "occupatene tu",
+    "pensaci tu", "digli ", "dille ", "comunicagli", "informalo",
+    "chiedi al ", "chiedi alla ", "senti cosa ne pensa",
+]
+
+# v5.33: keyword per identificare il Chief destinatario
+COO_CHIEF_KEYWORDS = {
+    "clo": ["clo", "legale", "legal", "privacy", "gdpr", "avvocato",
+            "contratto", "termini", "cookie", "compliance", "normativ"],
+    "cmo": ["cmo", "marketing", "landing", "brand", "bozza",
+            "design", "grafica", "logo", "social", "campagna"],
+    "cso": ["cso", "strategia", "strategico", "mercato",
+            "competitor", "prospect", "smoke test", "vendite"],
+    "cto": ["cto", "tecnico", "tech", "codice", "deploy",
+            "server", "bug", "sito", "app", "svilupp"],
+    "cfo": ["cfo", "finanza", "costi", "costo", "costa", "budget", "soldi",
+            "spesa", "prezzo", "revenue", "margine", "cash"],
+    "cpeo": ["cpeo", "hr", "formazione", "training",
+             "competenze", "team", "coaching", "gap"],
+}
+
+# v5.33: frasi VIETATE — il COO non deve MAI usarle come risposta finale
+COO_FORBIDDEN_PHRASES = [
+    "non ho dati", "non ho info", "non lo so con certezza",
+    "non ho risposta", "puoi dirmi dove aspettavi",
+    "cosa stavi aspettando esattamente", "non ho informazioni",
+]
 
 
 class COO(BaseChief):
@@ -1205,7 +1240,6 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] handoff event insert error: %s", e)
 
-        from csuite.utils import CHIEF_ICONS, CHIEF_NAMES
         to_icon = CHIEF_ICONS.get(to_chief, "")
         to_name = CHIEF_NAMES.get(to_chief, to_chief.upper())
         text = fmt("coo", "Passaggio consegne",
@@ -1216,3 +1250,591 @@ class COO(BaseChief):
             self._send_to_topic(target, text)
         logger.info("[COO] Handoff: %s -> %s topic=%s", from_chief, to_chief, topic_id)
         return {"from": from_chief, "to": to_chief, "topic_id": topic_id}
+
+    # ================================================================
+    # v5.33: COO CONTEXT AWARENESS
+    # delegation reale, topic history, pending actions, pipeline state
+    # ================================================================
+
+    def answer_question(self, question, user_context=None, project_context=None,
+                        topic_scope_id=None, project_scope_id=None,
+                        recent_messages=None):
+        """Override: COO con context awareness completo.
+        v5.33: legge history, pending actions, pipeline. Esegue deleghe reali.
+        """
+        # Estrai thread_id
+        thread_id = self._extract_thread_id(topic_scope_id)
+
+        # 1. Carica contesto conversazione
+        history = self._load_topic_history(thread_id) if thread_id else []
+        pending = self._load_pending_actions(thread_id)
+
+        # 2. Detecta intent di delega (Mirco dice "chiediglielo te" etc.)
+        delegation = self._detect_delegation_intent(question, history)
+        if delegation:
+            logger.info("[COO] Delegation detected: target=%s question=%s",
+                       delegation["target"], delegation["question"][:80])
+            return self._execute_delegation(
+                delegation["target"], delegation["question"],
+                delegation["context"], thread_id,
+            )
+
+        # 3. Carica stato pipeline del cantiere attivo
+        project = self._get_project_from_topic(thread_id)
+        pipeline_text = self._load_pipeline_status(project) if project else ""
+
+        # 4. Costruisci contesto arricchito
+        enriched_context = self._build_enriched_context(
+            history, pending, pipeline_text, user_context,
+        )
+
+        # 5. Chiama parent answer_question con contesto arricchito
+        response = super().answer_question(
+            question, user_context=enriched_context,
+            project_context=project_context,
+            topic_scope_id=topic_scope_id,
+            project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )
+
+        # 6. Post-processing: controlla frasi vietate
+        if self._contains_forbidden(response):
+            logger.info("[COO] Forbidden phrase detected, gathering data...")
+            gathered = self._gather_data_proactively(question, thread_id, project)
+            if gathered:
+                enriched_context += "\n\nDATI RACCOLTI ORA DAL DATABASE:\n" + gathered
+                response = super().answer_question(
+                    question, user_context=enriched_context,
+                    project_context=project_context,
+                    topic_scope_id=topic_scope_id,
+                    project_scope_id=project_scope_id,
+                    recent_messages=recent_messages,
+                )
+
+        # 7. Update project state se in un cantiere
+        if project:
+            slug = project.get("slug") or project.get("name", "")
+            self._update_project_state(
+                slug,
+                project_id=project.get("id"),
+                current_step=project.get("pipeline_step", ""),
+            )
+
+        return response
+
+    # --- Helper: estrai thread_id ---
+
+    def _extract_thread_id(self, topic_scope_id):
+        """Estrae thread_id da topic_scope_id (formato 'chat_id:thread_id')."""
+        if not topic_scope_id:
+            return None
+        parts = str(topic_scope_id).split(":")
+        if len(parts) >= 2 and parts[1] != "main":
+            try:
+                return int(parts[1])
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    # --- FIX 4: Carica topic_conversation_history ---
+
+    def _load_topic_history(self, thread_id, limit=20):
+        """Legge ultimi N messaggi da topic_conversation_history."""
+        if not thread_id:
+            return []
+        try:
+            scope_suffix = ":" + str(thread_id)
+            r = supabase.table("topic_conversation_history").select(
+                "role,text,created_at"
+            ).like("scope_id", "%" + scope_suffix).order(
+                "created_at", desc=True
+            ).limit(limit).execute()
+            return list(reversed(r.data or []))
+        except Exception as e:
+            logger.warning("[COO] _load_topic_history error: %s", e)
+            return []
+
+    # --- FIX 2: Pending actions ---
+
+    def _load_pending_actions(self, topic_id=None):
+        """Carica azioni pendenti del COO."""
+        try:
+            q = supabase.table("coo_pending_actions").select("*") \
+                .eq("status", "pending").order("created_at", desc=True).limit(10)
+            if topic_id:
+                q = q.eq("topic_id", int(topic_id))
+            r = q.execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning("[COO] _load_pending_actions error: %s", e)
+            return []
+
+    def _save_pending_action(self, topic_id=None, action_description="",
+                             target_chief="", project_slug="", context_summary=""):
+        """Salva azione promessa dal COO. Ritorna l'ID."""
+        try:
+            r = supabase.table("coo_pending_actions").insert({
+                "topic_id": int(topic_id) if topic_id else None,
+                "project_slug": project_slug or "",
+                "action_description": action_description,
+                "target_chief": target_chief,
+                "status": "pending",
+                "created_at": now_rome().isoformat(),
+                "context_summary": context_summary[:500] if context_summary else "",
+            }).execute()
+            if r.data:
+                return r.data[0].get("id")
+        except Exception as e:
+            logger.warning("[COO] _save_pending_action error: %s", e)
+        return None
+
+    def _complete_pending_action(self, action_id):
+        """Marca azione come completata."""
+        try:
+            supabase.table("coo_pending_actions").update({
+                "status": "done",
+                "completed_at": now_rome().isoformat(),
+            }).eq("id", action_id).execute()
+        except Exception as e:
+            logger.warning("[COO] _complete_pending_action error: %s", e)
+
+    def _fail_pending_action(self, action_id):
+        """Marca azione come fallita."""
+        try:
+            supabase.table("coo_pending_actions").update({
+                "status": "failed",
+                "completed_at": now_rome().isoformat(),
+            }).eq("id", action_id).execute()
+        except Exception as e:
+            logger.warning("[COO] _fail_pending_action error: %s", e)
+
+    # --- FIX 5: Pipeline awareness ---
+
+    def _get_project_from_topic(self, thread_id):
+        """Trova il progetto associato a un topic Telegram."""
+        if not thread_id:
+            return None
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,slug,status,pipeline_step,"
+                "pipeline_territory,cantiere_status,topic_id"
+            ).eq("topic_id", int(thread_id)).execute()
+            if r.data:
+                return r.data[0]
+        except Exception as e:
+            logger.warning("[COO] _get_project_from_topic: %s", e)
+        return None
+
+    def _load_pipeline_status(self, project):
+        """Costruisce stringa stato pipeline per un progetto."""
+        if not project:
+            return ""
+        project_id = project.get("id")
+        brand = project.get("brand_name") or project.get("name", "?")
+        step = project.get("pipeline_step") or project.get("status", "?")
+
+        lines = [
+            "Progetto: " + brand,
+            "Step pipeline: " + str(step),
+            "Status: " + str(project.get("status", "?")),
+            "Cantiere: " + str(project.get("cantiere_status", "closed")),
+        ]
+
+        # Carica task
+        tasks = self._get_project_tasks(project_id)
+        if tasks:
+            done = len([t for t in tasks if t.get("status") == "completed"])
+            total = len(tasks)
+            lines.append("Task: " + str(done) + "/" + str(total) + " completati")
+
+            in_progress = [t for t in tasks if t.get("status") == "in_progress"]
+            for t in in_progress:
+                lines.append("  IN CORSO: " + (t.get("assigned_to") or "?").upper()
+                           + " - " + (t.get("title") or "?")[:40])
+
+            blocked = [t for t in tasks if t.get("status") == "blocked"]
+            for t in blocked:
+                lines.append("  BLOCCATO: " + (t.get("title") or "?")[:40])
+
+            pending_t = [t for t in tasks if t.get("status") == "pending"]
+            if pending_t:
+                next_t = pending_t[0]
+                lines.append("Prossima azione: " + (next_t.get("title") or "?")[:40]
+                           + " (" + (next_t.get("assigned_to") or "?").upper() + ")")
+
+        # Project state dal COO
+        try:
+            slug = project.get("slug") or project.get("name", "")
+            r = supabase.table("coo_project_state").select("*") \
+                .eq("project_slug", slug).execute()
+            if r.data:
+                state = r.data[0]
+                if state.get("blocking_chief"):
+                    lines.append("Bloccato da: " + state["blocking_chief"].upper()
+                               + " - " + (state.get("blocking_reason") or "?"))
+                if state.get("next_action"):
+                    lines.append("Azione successiva: " + state["next_action"]
+                               + " (" + (state.get("next_action_owner") or "?").upper() + ")")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
+    # --- FIX 6: Project state tracking ---
+
+    def _update_project_state(self, project_slug, **kwargs):
+        """Aggiorna coo_project_state (upsert)."""
+        if not project_slug:
+            return
+        try:
+            data = {"project_slug": project_slug, "last_update": now_rome().isoformat()}
+            data.update(kwargs)
+            supabase.table("coo_project_state").upsert(data).execute()
+        except Exception as e:
+            logger.warning("[COO] _update_project_state error: %s", e)
+
+    # --- FIX 1: Delegation detection + execution ---
+
+    def _find_chief_in_text(self, text):
+        """Cerca un Chief nel testo tramite keyword matching. Ritorna chief_id o None."""
+        text_lower = text.lower()
+        for chief_id, keywords in COO_CHIEF_KEYWORDS.items():
+            for kw in keywords:
+                if kw in text_lower:
+                    return chief_id
+        return None
+
+    def _detect_delegation_intent(self, message, history=None):
+        """Rileva se Mirco chiede al COO di contattare un altro Chief.
+        Ritorna dict {target, question, context} o None.
+        """
+        lower = message.lower()
+
+        # Quick check: ha un trigger di delega?
+        has_trigger = any(t in lower for t in COO_DELEGATION_TRIGGERS)
+        if not has_trigger:
+            return None
+
+        # Identifica il Chief dal messaggio
+        target = self._find_chief_in_text(lower)
+
+        # Se non trovato nel messaggio, cerca nella history recente
+        if not target and history:
+            for msg in reversed(history[-5:]):
+                t = self._find_chief_in_text(msg.get("text", ""))
+                if t:
+                    target = t
+                    break
+
+        if not target:
+            # Usa Haiku per capire dal contesto
+            return self._haiku_parse_delegation(message, history)
+
+        # Formula la domanda dal contesto
+        question = self._build_delegation_question(message, history, target)
+
+        context_summary = ""
+        if history:
+            context_summary = " | ".join(
+                m.get("text", "")[:50] for m in history[-3:]
+            )
+
+        return {"target": target, "question": question, "context": context_summary}
+
+    def _haiku_parse_delegation(self, message, history):
+        """Usa Haiku per identificare target Chief e domanda dal contesto."""
+        context_msgs = "\n".join(
+            "[" + m.get("role", "?") + "] " + m.get("text", "")[:100]
+            for m in (history or [])[-10:]
+        )
+
+        prompt = (
+            "Analizza questo scambio. Mirco (CEO) chiede al COO di parlare con un Chief.\n\n"
+            "Ultimi messaggi:\n" + context_msgs + "\n\n"
+            "Messaggio di Mirco: " + message + "\n\n"
+            "I Chief disponibili sono: CMO (marketing), CSO (strategia), CTO (tech), "
+            "CFO (finanza), CLO (legale), CPeO (HR/formazione).\n\n"
+            "Rispondi SOLO JSON:\n"
+            '{"target": "cmo|cso|cto|cfo|clo|cpeo", '
+            '"question": "domanda da porre al Chief"}\n'
+            "Se non riesci a identificare il Chief, target = null."
+        )
+
+        try:
+            raw = self.call_claude(prompt, model="claude-haiku-4-5-20251001", max_tokens=200)
+            m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+                target = data.get("target")
+                question = data.get("question", message)
+                if target and target in ("cmo", "cso", "cto", "cfo", "clo", "cpeo"):
+                    return {"target": target, "question": question, "context": ""}
+        except Exception as e:
+            logger.warning("[COO] _haiku_parse_delegation error: %s", e)
+        return None
+
+    def _build_delegation_question(self, message, history, target_chief):
+        """Costruisce la domanda da porre al Chief target basandosi sul contesto."""
+        # Se il messaggio contiene gia' una domanda chiara dopo il trigger, usala
+        lower = message.lower()
+        for trigger in COO_DELEGATION_TRIGGERS:
+            idx = lower.find(trigger)
+            if idx >= 0:
+                after = message[idx + len(trigger):].strip()
+                # Rimuovi menzioni Chief generiche
+                for keywords in COO_CHIEF_KEYWORDS.values():
+                    for kw in keywords[:2]:  # solo le prime 2 keyword (nome Chief)
+                        after = after.replace(kw, "").replace(kw.upper(), "")
+                after = after.strip(" .,;:!?")
+                if len(after) > 15:
+                    return after
+                break
+
+        # Usa Haiku per formulare la domanda dal contesto
+        context_parts = []
+        if history:
+            for msg in history[-5:]:
+                text = msg.get("text", "")[:100]
+                if text:
+                    context_parts.append(text)
+        context_str = "\n".join(context_parts) if context_parts else message
+
+        prompt = (
+            "Mirco sta parlando con il COO e vuole che chieda qualcosa al "
+            + target_chief.upper() + ".\n\n"
+            "Contesto conversazione:\n" + context_str + "\n\n"
+            "Messaggio di Mirco: " + message + "\n\n"
+            "Formula la domanda PRECISA che il COO deve porre al "
+            + target_chief.upper() + ". Solo la domanda, nient'altro."
+        )
+
+        try:
+            question = self.call_claude(prompt, model="claude-haiku-4-5-20251001", max_tokens=200)
+            return question.strip()
+        except Exception:
+            return "Mirco chiede: " + message
+
+    def _execute_delegation(self, target_chief, question, context, thread_id):
+        """Chiama agent_to_agent_call verso il Chief target e riporta la risposta."""
+        target_icon = CHIEF_ICONS.get(target_chief, "")
+        target_name = CHIEF_NAMES.get(target_chief, target_chief.upper())
+
+        # Salva azione pendente
+        project = self._get_project_from_topic(thread_id)
+        project_slug = ""
+        if project:
+            project_slug = project.get("slug") or project.get("name", "")
+
+        action_id = self._save_pending_action(
+            topic_id=thread_id,
+            action_description="Chiesto a " + target_name + ": " + question[:100],
+            target_chief=target_chief,
+            project_slug=project_slug,
+            context_summary=context[:200] if context else "",
+        )
+
+        # Invia notifica "sto chiedendo..."
+        notify_text = fmt("coo", "Contatto " + target_icon + " " + target_name,
+                         "Domanda: " + question[:200])
+        if thread_id:
+            self._send_to_topic(thread_id, notify_text)
+
+        # Chiama il Chief
+        result = agent_to_agent_call(
+            from_chief_id="coo",
+            to_chief_id=target_chief,
+            task=question,
+            context=context or "",
+        )
+
+        if result.get("status") == "ok":
+            response_text = result.get("response", result.get("result", ""))
+            if isinstance(response_text, dict):
+                response_text = json.dumps(response_text, ensure_ascii=False, default=str)
+
+            if action_id:
+                self._complete_pending_action(action_id)
+
+            return fmt("coo", "Risposta da " + target_icon + " " + target_name,
+                      str(response_text)[:1500])
+
+        # Primo tentativo fallito — riprova
+        error_msg = result.get("error", "nessuna risposta")
+        logger.warning("[COO] Delegation to %s failed: %s. Retrying...", target_chief, error_msg)
+
+        import time
+        time.sleep(3)
+
+        result2 = agent_to_agent_call(
+            from_chief_id="coo",
+            to_chief_id=target_chief,
+            task=question,
+            context=context or "",
+        )
+
+        if result2.get("status") == "ok":
+            response_text = result2.get("response", result2.get("result", ""))
+            if isinstance(response_text, dict):
+                response_text = json.dumps(response_text, ensure_ascii=False, default=str)
+            if action_id:
+                self._complete_pending_action(action_id)
+            return fmt("coo", "Risposta da " + target_icon + " " + target_name,
+                      str(response_text)[:1500])
+
+        # Secondo tentativo fallito
+        if action_id:
+            self._fail_pending_action(action_id)
+
+        diagnosis = self._diagnose_chief_silence(target_chief)
+        return fmt("coo", target_name + " non disponibile",
+                  "Ho provato 2 volte. " + diagnosis
+                  + "\nSto cercando le informazioni direttamente nel database.")
+
+    def _diagnose_chief_silence(self, chief_id):
+        """Diagnosi: perche' il Chief non risponde."""
+        try:
+            r = supabase.table("agent_logs").select("action,status,created_at") \
+                .eq("agent_id", chief_id).order("created_at", desc=True).limit(1).execute()
+            if r.data:
+                last = r.data[0]
+                return ("Ultima attivita " + chief_id.upper() + ": "
+                       + (last.get("action") or "?")
+                       + " (" + (last.get("status") or "?") + ")"
+                       + " " + (last.get("created_at") or "?")[:16])
+            return "Nessuna attivita recente di " + chief_id.upper() + "."
+        except Exception:
+            return "Log non disponibili per " + chief_id.upper() + "."
+
+    # --- FIX 2+4: Enriched context builder ---
+
+    def _build_enriched_context(self, history, pending, pipeline_text, user_context):
+        """Costruisce contesto arricchito per il system prompt del COO."""
+        parts = []
+
+        # Conversazione recente
+        if history:
+            hist_lines = []
+            for m in history[-10:]:
+                role = m.get("role", "?")
+                text = m.get("text", "")[:150]
+                hist_lines.append("[" + role + "] " + text)
+            parts.append(
+                "CONVERSAZIONE RECENTE IN QUESTO TOPIC (ultimi "
+                + str(len(hist_lines)) + " messaggi):\n"
+                + "\n".join(hist_lines)
+            )
+
+        # Azioni pendenti
+        if pending:
+            pending_lines = []
+            for p in pending:
+                desc = p.get("action_description", "?")[:80]
+                chief = p.get("target_chief", "")
+                created = (p.get("created_at") or "")[:16]
+                pending_lines.append(
+                    "- " + desc + " [" + chief.upper() + "] (da " + created + ")")
+            parts.append(
+                "AZIONI PENDENTI DEL COO:\n" + "\n".join(pending_lines)
+            )
+
+        # Pipeline
+        if pipeline_text:
+            parts.append("STATO CANTIERE ATTIVO:\n" + pipeline_text)
+
+        # Regole operative
+        parts.append(
+            "REGOLE OPERATIVE TASSATIVE PER IL COO:\n"
+            "- NON dire MAI 'non ho dati', 'non ho info', 'non lo so con certezza'\n"
+            "- Se non hai informazioni, CERCA nei dati del database sopra\n"
+            "- Rispondi SEMPRE sull'argomento che Mirco sta discutendo in questo topic\n"
+            "- NON cambiare argomento senza motivo\n"
+            "- Se hai azioni pendenti relative all'argomento, riportane lo stato\n"
+            "- Se Mirco chiede 'a che punto siamo?', fornisci lo STATO COMPLETO del cantiere\n"
+            "- NON ribaltare su Mirco domande che dovresti gia sapere dal contesto"
+        )
+
+        # User context originale
+        if user_context:
+            parts.append("CONTESTO AGGIUNTIVO:\n" + user_context)
+
+        return "\n\n".join(parts)
+
+    # --- FIX 3: No "non ho dati" ---
+
+    def _contains_forbidden(self, response):
+        """Controlla se la risposta contiene frasi vietate."""
+        lower = response.lower()
+        return any(phrase in lower for phrase in COO_FORBIDDEN_PHRASES)
+
+    def _gather_data_proactively(self, question, thread_id, project):
+        """Raccoglie dati quando il COO non ne ha. Supabase + agent_logs."""
+        gathered = []
+
+        # 1. Dati progetto
+        if project:
+            project_id = project.get("id")
+            brand = project.get("brand_name") or project.get("name", "?")
+            gathered.append(
+                "Progetto " + brand
+                + ": step=" + str(project.get("pipeline_step", "?"))
+                + " status=" + str(project.get("status", "?")))
+
+            # Task
+            tasks = self._get_project_tasks(project_id)
+            if tasks:
+                for t in tasks[:5]:
+                    gathered.append(
+                        "  Task: " + (t.get("title") or "?")[:40]
+                        + " [" + (t.get("status") or "?") + "] "
+                        + (t.get("assigned_to") or "?").upper())
+
+            # Agent events recenti
+            try:
+                r = supabase.table("agent_events").select(
+                    "agent_from,agent_to,event_type,status,created_at"
+                ).order("created_at", desc=True).limit(10).execute()
+                if r.data:
+                    for e in r.data[:5]:
+                        gathered.append(
+                            "  Evento: " + (e.get("agent_from") or "?")
+                            + " -> " + (e.get("agent_to") or "?")
+                            + " (" + (e.get("event_type") or "?") + ")"
+                            + " [" + (e.get("status") or "?") + "]")
+            except Exception:
+                pass
+
+            # Project assets
+            try:
+                r = supabase.table("project_assets").select("asset_type,created_at") \
+                    .eq("project_id", project_id).execute()
+                if r.data:
+                    assets = ", ".join(a.get("asset_type", "?") for a in r.data)
+                    gathered.append("  Assets: " + assets)
+            except Exception:
+                pass
+
+        # 2. Pending actions COO
+        pending = self._load_pending_actions(thread_id)
+        if pending:
+            for p in pending:
+                gathered.append(
+                    "Azione COO pendente: "
+                    + (p.get("action_description") or "?")[:60]
+                    + " -> " + (p.get("target_chief") or "?").upper())
+
+        # 3. Agent logs recenti
+        try:
+            r = supabase.table("agent_logs").select(
+                "agent_id,action,status,created_at"
+            ).order("created_at", desc=True).limit(5).execute()
+            if r.data:
+                gathered.append("Ultime attivita agenti:")
+                for log in r.data:
+                    gathered.append(
+                        "  " + (log.get("agent_id") or "?")
+                        + ": " + (log.get("action") or "?")[:40]
+                        + " [" + (log.get("status") or "?") + "]")
+        except Exception:
+            pass
+
+        return "\n".join(gathered) if gathered else ""
