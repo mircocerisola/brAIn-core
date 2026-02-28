@@ -4172,6 +4172,61 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 json=_payload_cc, timeout=10,
             )
 
+    # ── TRAINING PLAN CALLBACKS (CPeO) ──
+    elif data.startswith("training_approve:"):
+        _tp_id = int(data.split(":")[1])
+        await query.answer("Approvazione in corso...")
+        def _handle_training_approve():
+            try:
+                from csuite.cpeo import handle_training_approve
+                handle_training_approve(_tp_id)
+            except Exception as e:
+                logger.error(f"[TRAINING_APPROVE] {e}")
+        threading.Thread(target=_handle_training_approve, daemon=True).start()
+
+    elif data.startswith("training_view:"):
+        _tv_id = int(data.split(":")[1])
+        await query.answer("Caricamento piano...")
+        try:
+            from csuite.cpeo import handle_training_view
+            _tv_text = handle_training_view(_tv_id)
+            _tv_token = os.getenv("TELEGRAM_BOT_TOKEN")
+            if _tv_token:
+                _tv_payload = {"chat_id": chat_id, "text": _tv_text}
+                if thread_id:
+                    _tv_payload["message_thread_id"] = thread_id
+                http_requests.post(
+                    f"https://api.telegram.org/bot{_tv_token}/sendMessage",
+                    json=_tv_payload, timeout=15,
+                )
+        except Exception as e:
+            logger.error(f"[TRAINING_VIEW] {e}")
+
+    elif data.startswith("training_feedback:"):
+        _tf_id = int(data.split(":")[1])
+        await query.answer("Scrivi il tuo feedback come prossimo messaggio.")
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_training_feedback"] = _tf_id
+
+    elif data.startswith("training_cancel:"):
+        _tcl_id = int(data.split(":")[1])
+        await query.answer("Piano annullato.")
+        try:
+            from csuite.cpeo import handle_training_cancel
+            handle_training_cancel(_tcl_id)
+        except Exception as e:
+            logger.error(f"[TRAINING_CANCEL] {e}")
+        _tcl_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _tcl_token:
+            _tcl_payload = {"chat_id": chat_id, "text": f"\u274c Training plan #{_tcl_id} annullato."}
+            if thread_id:
+                _tcl_payload["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_tcl_token}/sendMessage",
+                json=_tcl_payload, timeout=10,
+            )
+
     else:
         await query.answer()
 
@@ -4558,6 +4613,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         timeout=10,
                     )
         threading.Thread(target=_regenerate_prompt, daemon=True).start()
+        return
+
+    # ---- TRAINING FEEDBACK PENDING (CPeO v5.25) ----
+    if chat_id in _session_context and _session_context[chat_id].get("awaiting_training_feedback"):
+        _tf_plan_id = _session_context[chat_id].pop("awaiting_training_feedback")
+        _tf_feedback = msg
+        def _handle_training_feedback():
+            try:
+                # Leggi piano, rigenera con feedback
+                _tf_r = supabase.table("training_plans").select("chief_name,topic,plan_md,sources_json") \
+                    .eq("id", _tf_plan_id).execute()
+                if not _tf_r.data:
+                    return
+                _tf_plan = _tf_r.data[0]
+                from anthropic import Anthropic
+                _tf_client = Anthropic()
+                _tf_resp = _tf_client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=3000,
+                    messages=[{"role": "user", "content": (
+                        f"Sei il CPeO di brAIn. Hai creato un piano di formazione per {_tf_plan.get('chief_name', '').upper()} "
+                        f"sul tema {_tf_plan.get('topic', '')}.\n\n"
+                        f"PIANO ORIGINALE:\n{(_tf_plan.get('plan_md') or '')[:3000]}\n\n"
+                        f"FEEDBACK DI MIRCO SULLE FONTI:\n{_tf_feedback[:1000]}\n\n"
+                        "Rispondi SOLO con il piano aggiornato completo, incorporando il feedback. "
+                        "Formato: markdown pulito, senza bold (**), senza separatori (---). Italiano."
+                    )}],
+                )
+                _tf_new_plan = _tf_resp.content[0].text.strip()
+                supabase.table("training_plans").update({
+                    "plan_md": _tf_new_plan,
+                    "updated_at": _now_rome().isoformat(),
+                }).eq("id", _tf_plan_id).execute()
+                # Reinvia card
+                _tf_card = (
+                    "\U0001f331 CPeO\n"
+                    f"Training aggiornato {_tf_plan.get('chief_name', '').upper()}\n\n"
+                    f"Topic: {_tf_plan.get('topic', '')}\n"
+                    "Piano rielaborato con il tuo feedback"
+                )
+                _tf_markup = {"inline_keyboard": [
+                    [
+                        {"text": "\u2705 Approva ed esegui", "callback_data": f"training_approve:{_tf_plan_id}"},
+                        {"text": "\U0001f4c4 Vedi piano", "callback_data": f"training_view:{_tf_plan_id}"},
+                    ],
+                    [
+                        {"text": "\U0001f4dd Feedback fonti", "callback_data": f"training_feedback:{_tf_plan_id}"},
+                        {"text": "\u274c Annulla", "callback_data": f"training_cancel:{_tf_plan_id}"},
+                    ],
+                ]}
+                _tf_token = os.getenv("TELEGRAM_BOT_TOKEN")
+                if _tf_token:
+                    http_requests.post(
+                        f"https://api.telegram.org/bot{_tf_token}/sendMessage",
+                        json={"chat_id": chat_id, "text": _tf_card, "reply_markup": _tf_markup},
+                        timeout=15,
+                    )
+            except Exception as e:
+                logger.error(f"[TRAINING_FEEDBACK] {e}")
+        threading.Thread(target=_handle_training_feedback, daemon=True).start()
         return
 
     # ---- ACTIVE SESSION — carica contesto progetto attivo ----

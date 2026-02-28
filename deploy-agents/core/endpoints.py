@@ -689,6 +689,46 @@ async def run_cpeo_coaching_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_cpeo_training_endpoint(request):
+    """POST /cpeo/training — {chief_name, topic} — crea training plan per un Chief."""
+    try:
+        data = await request.json()
+        chief_name = data.get("chief_name", "")
+        topic = data.get("topic", "")
+        if not chief_name or not topic:
+            return web.json_response({"error": "chief_name e topic obbligatori"}, status=400)
+        from csuite.cpeo import create_training_plan
+        result = create_training_plan(chief_name, topic)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cpeo_gap_analysis_endpoint(request):
+    """POST /cpeo/gap-analysis — gap analysis giornaliera su tutti i Chief."""
+    try:
+        from csuite.cpeo import daily_gap_analysis
+        result = daily_gap_analysis()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cpeo_training_request_endpoint(request):
+    """POST /cpeo/training-request — {message, chief_names?} — training on-demand da Mirco."""
+    try:
+        data = await request.json()
+        message = data.get("message", "")
+        chief_names = data.get("chief_names")
+        if not message:
+            return web.json_response({"error": "message obbligatorio"}, status=400)
+        from csuite.cpeo import handle_training_request
+        result = handle_training_request(message, chief_names)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── Memory endpoints ──────────────────────────────────────────
 
 

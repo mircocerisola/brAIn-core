@@ -273,8 +273,76 @@ class CTO(BaseChief):
     # ESECUZIONE VIA CLOUD RUN JOB — trigger + monitor da DB
     # ============================================================
 
+    def _has_running_task(self):
+        """Controlla se esiste un task con status running/ready."""
+        try:
+            r = supabase.table("code_tasks").select("id,title") \
+                .in_("status", ["running", "ready"]).limit(1).execute()
+            if r.data:
+                return r.data[0]
+        except Exception as e:
+            logger.warning("[CTO] _has_running_task: %s", e)
+        return None
+
+    def _count_pending_tasks(self):
+        """Conta task in coda (status=queued)."""
+        try:
+            r = supabase.table("code_tasks").select("id", count="exact") \
+                .eq("status", "queued").limit(0).execute()
+            return r.count if r.count is not None else 0
+        except Exception:
+            return 0
+
+    def _dequeue_next_task(self):
+        """Prende il prossimo task in coda FIFO e lo esegue."""
+        try:
+            r = supabase.table("code_tasks").select("id,title") \
+                .eq("status", "queued") \
+                .order("created_at").limit(1).execute()
+            if not r.data:
+                logger.info("[CTO] Coda vuota, nessun task da dequeue")
+                return
+            next_task = r.data[0]
+            next_id = next_task["id"]
+            next_title = (next_task.get("title") or "Azione codice")[:60]
+            logger.info("[CTO] Dequeue task #%d: %s", next_id, next_title)
+        except Exception as e:
+            logger.warning("[CTO] dequeue read: %s", e)
+            return
+
+        # Setta ready e triggera
+        try:
+            supabase.table("code_tasks").update({"status": "ready"}).eq("id", next_id).execute()
+        except Exception as e:
+            logger.warning("[CTO] dequeue update ready: %s", e)
+            return
+
+        job_ok = self._trigger_cloud_run_job(next_id)
+        ora = format_time_rome()
+
+        # Recupera topic CTO per notifica
+        group_id, topic_id = None, None
+        try:
+            gr = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            tr = supabase.table("org_config").select("value").eq("key", "chief_topic_cto").execute()
+            if gr.data:
+                group_id = int(gr.data[0]["value"])
+            if tr.data:
+                topic_id = int(tr.data[0]["value"])
+        except Exception:
+            pass
+
+        if job_ok and group_id and topic_id:
+            self._send_telegram(group_id, topic_id,
+                "\U0001f527 CTO\n"
+                "Task dalla coda avviato\n\n"
+                "Task: " + next_title + "\n"
+                "Avviato alle " + ora)
+            # Monitor in background
+            self._start_monitor(next_id, group_id, topic_id, next_title)
+
     def execute_approved_task(self, task_id, chat_id, thread_id=None):
-        """Approva task: status=ready, triggera Cloud Run Job, avvia monitor output_log."""
+        """Approva task: controlla coda, se libero esegue, altrimenti accoda."""
 
         # 1. Recupera titolo
         titolo = "Azione codice"
@@ -285,7 +353,33 @@ class CTO(BaseChief):
         except Exception:
             pass
 
-        # 2. Status -> ready (il Job lo trovera')
+        # 2. Controlla se c'e' un task gia in esecuzione
+        running = self._has_running_task()
+        if running:
+            # Metti in coda
+            try:
+                supabase.table("code_tasks").update({
+                    "status": "queued",
+                }).eq("id", task_id).execute()
+            except Exception as e:
+                logger.warning("[CTO] update status queued: %s", e)
+                self._send_telegram(chat_id, thread_id,
+                                    "\U0001f527 CTO\nErrore\n\nImpossibile accodare task #" + str(task_id))
+                return
+
+            pending_count = self._count_pending_tasks()
+            running_title = (running.get("title") or "")[:40]
+            self._send_telegram(chat_id, thread_id,
+                "\U0001f527 CTO\n"
+                "Task in coda\n\n"
+                "Task: " + titolo + "\n"
+                "Posizione: " + str(pending_count) + "\n"
+                "In esecuzione: " + running_title)
+            logger.info("[CTO] Task #%d accodato (pos=%d), running=#%d",
+                        task_id, pending_count, running["id"])
+            return
+
+        # 3. Nessun task in esecuzione: esegui subito
         try:
             supabase.table("code_tasks").update({
                 "status": "ready",
@@ -296,10 +390,10 @@ class CTO(BaseChief):
                                 "\U0001f527 CTO\nErrore\n\nImpossibile preparare task #" + str(task_id))
             return
 
-        # 3. Trigger Cloud Run Job con CODE_TASK_ID
+        # 4. Trigger Cloud Run Job con CODE_TASK_ID
         job_ok = self._trigger_cloud_run_job(task_id)
 
-        # 4. Conferma a Mirco
+        # 5. Conferma a Mirco
         ora = format_time_rome()
         if job_ok:
             self._send_telegram(chat_id, thread_id,
@@ -317,11 +411,16 @@ class CTO(BaseChief):
                 "Job trigger fallito, il task rimane in stato ready.\n"
                 "Verra' eseguito al prossimo run del job.")
 
-        # 5. Monitor loop in background — legge output_log da DB
+        # 6. Monitor loop in background
+        self._start_monitor(task_id, chat_id, thread_id, titolo)
+
+    def _start_monitor(self, task_id, chat_id, thread_id, titolo):
+        """Avvia monitor loop per un task in background."""
         _tid = task_id
         _cid = chat_id
         _thid = thread_id
         _ttl = titolo
+        _self = self
 
         def _monitor():
             _elapsed = 0
@@ -342,13 +441,10 @@ class CTO(BaseChief):
 
                 status = task.get("status", "")
                 output_log = task.get("output_log") or ""
-                output_final = task.get("output") or ""
 
                 # Task terminato — card compatta 4 righe + bottoni
                 if status in ("done", "error", "interrupted"):
-                    icons = {"done": "\u2705", "error": "\u274c", "interrupted": "\U0001f6d1"}
                     labels = {"done": "Completato", "error": "Fallito", "interrupted": "Interrotto"}
-                    icon = icons.get(status, "\u2705")
                     label = labels.get(status, "Completato")
 
                     completion_text = (
@@ -360,8 +456,11 @@ class CTO(BaseChief):
                         {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
                         {"text": "\U0001f195 Nuovo task", "callback_data": "code_new:" + str(_tid)},
                     ]]}
-                    self._send_telegram(_cid, _thid, completion_text,
+                    _self._send_telegram(_cid, _thid, completion_text,
                                         reply_markup=completion_markup)
+
+                    # Auto-dequeue prossimo task in coda
+                    _self._dequeue_next_task()
                     break
 
                 # Ancora in esecuzione — aggiornamento 4 righe
@@ -371,7 +470,7 @@ class CTO(BaseChief):
                 ]]}
 
                 msg = CTO.build_update_message(_elapsed, output_log)
-                self._send_telegram(_cid, _thid, msg, reply_markup=markup)
+                _self._send_telegram(_cid, _thid, msg, reply_markup=markup)
 
         threading.Thread(target=_monitor, daemon=True).start()
         logger.info("[CTO] Monitor avviato per task #%d", task_id)

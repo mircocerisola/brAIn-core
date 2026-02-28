@@ -39,6 +39,8 @@ from core.endpoints import (
     # CDO + CPeO
     run_cto_data_audit_endpoint, run_cto_knowledge_monitor_endpoint,
     run_cpeo_coaching_endpoint,
+    run_cpeo_training_endpoint, run_cpeo_gap_analysis_endpoint,
+    run_cpeo_training_request_endpoint,
     # Memory
     run_memory_create_episode_endpoint, run_memory_extract_facts_endpoint, run_memory_cleanup_endpoint,
     # Admin
@@ -147,6 +149,9 @@ async def main():
 
     # CPeO
     app.router.add_post("/cpeo/coaching", run_cpeo_coaching_endpoint)
+    app.router.add_post("/cpeo/training", run_cpeo_training_endpoint)
+    app.router.add_post("/cpeo/gap-analysis", run_cpeo_gap_analysis_endpoint)
+    app.router.add_post("/cpeo/training-request", run_cpeo_training_request_endpoint)
 
     # Memory (L2 + L3)
     app.router.add_post("/memory/create-episode", run_memory_create_episode_endpoint)
