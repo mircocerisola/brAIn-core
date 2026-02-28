@@ -2997,7 +2997,7 @@ async def handle_project_message(update, project):
                         _ploop.run_in_executor(None, _call_project_chief_sync), timeout=25.0
                     )
                 except asyncio.TimeoutError:
-                    _proj_answer = f"[{_chief_display}] Risposta in elaborazione, riprova tra poco."
+                    _proj_answer = f"[{_chief_display}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
                 _proj_chief_name = _proj_chief.name
             else:
                 _proj_answer = f"Chief '{_domain_target}' non trovato."
@@ -4895,7 +4895,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     _loop_t.run_in_executor(None, _call_chief_topic), timeout=25.0
                 )
             except asyncio.TimeoutError:
-                _answer_t = f"[{_chief_t.name}] Risposta in elaborazione, riprova tra un momento."
+                _answer_t = f"[{_chief_t.name}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
             # v5.13: se CTO ha gia' inviato CODEACTION card, non duplicare il messaggio
             _is_codeaction = "<<CODEACTION_SENT>>" in str(_answer_t)
             _token_t = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -4983,7 +4983,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         _loop.run_in_executor(None, _call_chief_sync), timeout=25.0
                     )
                 except asyncio.TimeoutError:
-                    _answer = f"[{chief.name}] Risposta in elaborazione, riprova tra un momento."
+                    _answer = f"[{chief.name}] Sto analizzando la tua richiesta. Il sistema e sotto carico, la risposta arrivera a breve."
                 # v5.13: skip se CTO ha gia' inviato CODEACTION card
                 if "<<CODEACTION_SENT>>" not in str(_answer):
                     await update.message.reply_text(

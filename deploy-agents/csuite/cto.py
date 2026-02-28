@@ -721,8 +721,8 @@ class CTO(BaseChief):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "task_cancelled",
-                "agent_from": "cto",
-                "agent_to": "coo",
+                "source_agent": "cto",
+                "target_agent": "coo",
                 "payload": json.dumps({"task_id": task_id, "motivo": "annullato da Mirco"}),
                 "created_at": now_rome().isoformat(),
             }).execute()

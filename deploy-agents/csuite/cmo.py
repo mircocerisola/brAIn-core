@@ -786,8 +786,8 @@ class CMO(BaseChief):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "landing_brief_ready",
-                "agent_from": "cmo",
-                "agent_to": "cto",
+                "source_agent": "cmo",
+                "target_agent": "cto",
                 "payload": json.dumps(payload),
                 "created_at": now_rome().isoformat(),
             }).execute()
@@ -833,8 +833,8 @@ class CMO(BaseChief):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "landing_brief_approved",
-                "agent_from": "cmo",
-                "agent_to": "cto",
+                "source_agent": "cmo",
+                "target_agent": "cto",
                 "payload": json.dumps({
                     "project_id": project_id,
                     "brand": brand,

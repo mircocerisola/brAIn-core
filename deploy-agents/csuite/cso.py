@@ -582,8 +582,8 @@ class CSO(BaseChief):
             try:
                 supabase.table("agent_events").insert({
                     "event_type": "task_delegation",
-                    "agent_from": "cso",
-                    "agent_to": "coo",
+                    "source_agent": "cso",
+                    "target_agent": "coo",
                     "payload": json.dumps({
                         "project_id": project_id,
                         "assigned_to": task.get("assigned_to", "coo"),

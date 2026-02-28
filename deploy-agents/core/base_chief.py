@@ -671,8 +671,8 @@ class BaseChief(BaseAgent):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "domain_boundary_redirect",
-                "agent_from": self.chief_id,
-                "agent_to": "coo",
+                "source_agent": self.chief_id,
+                "target_agent": "coo",
                 "payload": json.dumps({
                     "question": question[:500],
                     "matched_keywords": matched,

@@ -342,8 +342,8 @@ class CLO(BaseChief):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "legal_approved",
-                "agent_from": "clo",
-                "agent_to": "coo",
+                "source_agent": "clo",
+                "target_agent": "coo",
                 "payload": json.dumps({"project_id": project_id}),
                 "created_at": now_rome().isoformat(),
             }).execute()

@@ -1088,8 +1088,8 @@ class COO(BaseChief):
         try:
             supabase.table("agent_events").insert({
                 "event_type": "task_delegation",
-                "agent_from": "coo",
-                "agent_to": chief,
+                "source_agent": "coo",
+                "target_agent": chief,
                 "payload": json.dumps({
                     "action": action.get("action", ""),
                     "description": action.get("description", ""),
@@ -1150,7 +1150,7 @@ class COO(BaseChief):
             chief = action.get("chief", "")
             try:
                 r = supabase.table("agent_events").select("id,status") \
-                    .eq("agent_from", "coo").eq("agent_to", chief) \
+                    .eq("source_agent", "coo").eq("target_agent", chief) \
                     .eq("event_type", "task_delegation") \
                     .order("created_at", desc=True).limit(1).execute()
                 if r.data and r.data[0].get("status") == "completed":
@@ -1246,8 +1246,8 @@ class COO(BaseChief):
 
         try:
             supabase.table("agent_events").insert({
-                "agent_from": from_chief,
-                "agent_to": to_chief,
+                "source_agent": from_chief,
+                "target_agent": to_chief,
                 "event_type": "handoff",
                 "payload": json.dumps({
                     "topic_id": int(topic_id),
@@ -1843,13 +1843,13 @@ class COO(BaseChief):
             # Agent events recenti
             try:
                 r = supabase.table("agent_events").select(
-                    "agent_from,agent_to,event_type,status,created_at"
+                    "source_agent,target_agent,event_type,status,created_at"
                 ).order("created_at", desc=True).limit(10).execute()
                 if r.data:
                     for e in r.data[:5]:
                         gathered.append(
-                            "  Evento: " + (e.get("agent_from") or "?")
-                            + " -> " + (e.get("agent_to") or "?")
+                            "  Evento: " + (e.get("source_agent") or "?")
+                            + " -> " + (e.get("target_agent") or "?")
                             + " (" + (e.get("event_type") or "?") + ")"
                             + " [" + (e.get("status") or "?") + "]")
             except Exception:
