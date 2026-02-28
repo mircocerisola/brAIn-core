@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from core.base_chief import BaseChief
 from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
+from csuite.utils import fmt, fmt_task_received
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -22,10 +23,8 @@ _BOZZA_KEYWORDS = ["bozza", "landing", "visiva", "design", "mockup", "wireframe"
 
 
 def format_cmo_message(titolo, contenuto=""):
-    """Helper formato CMO: icona + nome + titolo + contenuto. Zero separatori."""
-    if contenuto:
-        return "\U0001f3a8 CMO\n" + titolo + "\n\n" + contenuto
-    return "\U0001f3a8 CMO\n" + titolo
+    """Backward-compat wrapper. Usa fmt('cmo', ...) per nuovo codice."""
+    return fmt("cmo", titolo, contenuto)
 
 
 class CMO(BaseChief):
@@ -33,6 +32,9 @@ class CMO(BaseChief):
     chief_id = "cmo"
     domain = "marketing"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["marketing", "brand", "landing", "growth", "copy",
+                 "bozza", "visual", "logo", "contenuti", "ads"]
+    MY_REFUSE_DOMAINS = ["codice", "finanza", "legale", "hr", "dns", "deploy", "infrastruttura"]
     briefing_prompt_template = (
         "Sei il CMO di brAIn. Genera un briefing marketing settimanale includendo: "
         "1) Status brand identity progetti attivi, "
@@ -90,8 +92,8 @@ class CMO(BaseChief):
         """Gestisce richiesta bozza: estrai project, genera PNG, rispondi."""
         if not _HAS_PILLOW:
             logger.warning("[CMO] Pillow non disponibile per bozza")
-            return format_cmo_message("Bozza non disponibile",
-                                      "Pillow non installato nel container.")
+            return fmt("cmo", "Bozza non disponibile",
+                       "Pillow non installato nel container.")
 
         # Cerca project_id dal contesto o dal messaggio
         project_id = None
@@ -142,12 +144,12 @@ class CMO(BaseChief):
         result = self.generate_bozza_visiva(project_name, tagline, thread_id, project_id)
 
         if result.get("status") == "ok":
-            return format_cmo_message(
+            return fmt("cmo",
                 "Bozza visiva generata",
                 "Progetto: " + project_name + "\n"
                 "File: " + result.get("path", ""))
         else:
-            return format_cmo_message(
+            return fmt("cmo",
                 "Errore bozza visiva",
                 result.get("error", "errore sconosciuto"))
 
@@ -327,11 +329,13 @@ class CMO(BaseChief):
 
         return sections
 
-    def generate_landing_page_html(self, project_id):
-        """Genera HTML landing page via Claude per un progetto smoke test."""
+    def generate_landing_page_html(self, project_id, thread_id=None):
+        """Genera HTML landing page via Claude per un progetto smoke test.
+        v5.28: fmt_task_received, salva in project_assets, sendDocument, agent_event CTO.
+        """
         try:
             r = supabase.table("projects").select(
-                "id,name,brand_name,brand_email,brand_domain,smoke_test_method"
+                "id,name,brand_name,brand_email,brand_domain,smoke_test_method,topic_id"
             ).eq("id", project_id).execute()
             if not r.data:
                 return {"error": "progetto non trovato"}
@@ -342,6 +346,12 @@ class CMO(BaseChief):
         brand = project.get("brand_name") or project.get("name", "")
         email = project.get("brand_email") or ""
         domain = project.get("brand_domain") or ""
+        topic_id = thread_id or project.get("topic_id")
+
+        # Notifica task ricevuto
+        if topic_id:
+            self._send_report_to_topic_id(topic_id,
+                fmt_task_received("cmo", "Landing page " + brand, "60 secondi"))
 
         prompt = (
             "Genera una landing page HTML completa e moderna per uno smoke test.\n"
@@ -366,6 +376,7 @@ class CMO(BaseChief):
             logger.warning("[CMO] generate_landing_page_html error: %s", e)
             return {"error": str(e)}
 
+        # Salva in projects.landing_html (fallback)
         try:
             supabase.table("projects").update({
                 "landing_html": html,
@@ -373,8 +384,95 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] save landing_html: %s", e)
 
+        # Salva in project_assets
+        try:
+            supabase.table("project_assets").upsert({
+                "project_id": project_id,
+                "asset_type": "landing_html",
+                "content": html,
+                "filename": brand.lower().replace(" ", "-") + "-landing.html",
+                "updated_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] save project_assets: %s", e)
+
+        # Invia come documento Telegram
+        if topic_id:
+            self._send_landing_document(project_id, brand, html, topic_id)
+
+        # Crea agent_event per CTO
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "landing_ready_for_deploy",
+                "agent_from": "cmo",
+                "agent_to": "cto",
+                "payload": json.dumps({
+                    "project_id": project_id,
+                    "brand": brand,
+                    "html_length": len(html or ""),
+                }),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] landing_ready event: %s", e)
+
+        # Post-task learning
+        self._log_bozza_learning(project_id)
+
         logger.info("[CMO] Landing HTML generata per project #%d (%d chars)", project_id, len(html or ""))
         return {"status": "ok", "project_id": project_id, "html_length": len(html or "")}
+
+    def _send_landing_document(self, project_id, brand, html, topic_id):
+        """Invia landing HTML come documento Telegram."""
+        if not TELEGRAM_BOT_TOKEN or not html:
+            return
+        import tempfile
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+
+            # Scrivi file temporaneo
+            filename = brand.lower().replace(" ", "-") + "-landing.html"
+            tmp_path = tempfile.gettempdir() + "/" + filename
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(html)
+
+            caption = fmt("cmo", "Landing page " + brand,
+                          "HTML pronto per deploy\n" + str(len(html)) + " caratteri")
+
+            data_payload = {"chat_id": group_id, "caption": caption}
+            if topic_id:
+                data_payload["message_thread_id"] = topic_id
+
+            with open(tmp_path, "rb") as f:
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendDocument",
+                    data=data_payload,
+                    files={"document": (filename, f, "text/html")},
+                    timeout=15,
+                )
+            logger.info("[CMO] Landing document inviato (thread=%s)", topic_id)
+        except Exception as e:
+            logger.warning("[CMO] send_landing_document: %s", e)
+
+    def _send_report_to_topic_id(self, topic_id, text):
+        """Invia report a uno specifico topic ID."""
+        if not TELEGRAM_BOT_TOKEN or not text:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+            _requests.post(
+                "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning("[CMO] send_report_to_topic_id: %s", e)
 
     # ============================================================
     # BOZZA VISIVA — 1200x675, gradient, 3 card sections
@@ -540,7 +638,7 @@ class CMO(BaseChief):
                 except Exception:
                     pass
 
-            caption = format_cmo_message("Bozza landing " + project_name)
+            caption = fmt("cmo", "Bozza landing " + project_name)
 
             data_payload = {"chat_id": group_id, "caption": caption}
             if target_thread:

@@ -11,6 +11,9 @@ class CFO(BaseChief):
     chief_id = "cfo"
     domain = "finance"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["finanza", "costi", "budget", "revenue", "kpi finanziari",
+                 "burn rate", "cash flow", "pricing", "marginalita", "fatturato"]
+    MY_REFUSE_DOMAINS = ["codice", "vendite", "strategia", "marketing", "legale", "hr", "dns"]
     briefing_prompt_template = (
         "Sei il CFO di brAIn. Genera un briefing finanziario settimanale includendo: "
         "1) Costi totali settimana vs settimana precedente, "

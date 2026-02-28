@@ -1,4 +1,5 @@
 """CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunita'.
+v5.28: plan_smoke_test, delegate_execution_to_coo, analyze_bos_opportunity (strategy-only).
 v5.15: prospect reali via Perplexity + start_smoke_test autonomo + istruzioni potenziate.
 """
 import os
@@ -8,9 +9,10 @@ import requests as _requests
 from typing import Dict, List, Optional
 
 from core.base_chief import BaseChief
-from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
+from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
 from core.utils import search_perplexity
+from csuite.utils import fmt
 
 _SMOKE_TEST_INSTRUCTIONS = (
     "RESPONSABILITA' DIRETTA E NON DELEGABILE: lo smoke test e' tuo. "
@@ -66,6 +68,9 @@ class CSO(BaseChief):
     chief_id = "cso"
     domain = "strategy"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["strategia", "mercato", "competizione", "opportunita", "smoke test",
+                 "pipeline", "problemi", "soluzioni", "bos", "trend"]
+    MY_REFUSE_DOMAINS = ["codice", "finanza", "legale", "hr", "dns", "deploy", "marketing"]
     briefing_prompt_template = (
         "Sei il CSO di brAIn. Genera un briefing strategico settimanale includendo: "
         "1) Portfolio soluzioni in due sezioni: 'Pipeline sistema' (generate automaticamente) e 'Idee founder' (create da Mirco, NON archiviabili automaticamente), "
@@ -196,7 +201,9 @@ class CSO(BaseChief):
     # ============================================================
 
     def find_real_prospects(self, target, n=50):
-        """Cerca ristoranti con email reali via Perplexity. Cerca in piu' citta'."""
+        """DEPRECATED v5.28: usare plan_smoke_test + delegate_execution_to_coo.
+        Cerca ristoranti con email reali via Perplexity. Cerca in piu' citta'."""
+        logger.info("[CSO] DEPRECATED: find_real_prospects chiamato")
         import re as _re
         prospects = []
         cities_tried = []
@@ -312,7 +319,9 @@ class CSO(BaseChief):
     # ============================================================
 
     def start_smoke_test(self, project_id):
-        """Avvia smoke test: trova prospect reali, salva in DB, manda card nel cantiere."""
+        """DEPRECATED v5.28: usare plan_smoke_test + delegate_execution_to_coo.
+        Avvia smoke test: trova prospect reali, salva in DB, manda card nel cantiere."""
+        logger.info("[CSO] DEPRECATED: start_smoke_test chiamato")
         # Carica progetto
         try:
             r = supabase.table("projects").select("*").eq("id", project_id).execute()
@@ -453,3 +462,195 @@ class CSO(BaseChief):
         except Exception as e:
             logger.warning("[CSO] send_smoke_relaunch message error: %s", e)
             return {"status": "ok", "message_sent": False}
+
+    # ============================================================
+    # STRATEGY-ONLY: pianifica senza eseguire
+    # ============================================================
+
+    def plan_smoke_test(self, project_id, thread_id=None):
+        """Genera piano smoke test JSON. Zero execution — solo strategia.
+        Salva in projects.smoke_test_plan. Delega esecuzione a COO.
+        """
+        logger.info("[CSO] plan_smoke_test: project_id=%d", project_id)
+
+        # Carica progetto
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,brand_domain,smoke_test_method"
+            ).eq("id", project_id).execute()
+            if not r.data:
+                return {"error": "progetto non trovato"}
+            project = r.data[0]
+        except Exception as e:
+            return {"error": str(e)}
+
+        brand = project.get("brand_name") or project.get("name", "")
+        method = project.get("smoke_test_method") or "cold_outreach"
+
+        # Genera piano con Claude
+        plan_prompt = (
+            "Sei il CSO di brAIn. Genera un piano smoke test dettagliato.\n"
+            "Progetto: " + brand + "\n"
+            "Metodo: " + method + "\n\n"
+            "Rispondi SOLO JSON:\n"
+            '{"method": "...", "target_audience": "...", "kpi": {"metric": "...", "target": "..."},\n'
+            ' "duration_days": 14, "budget_eur": 0,\n'
+            ' "tasks_for_coo": [\n'
+            '   {"assigned_to": "cmo/cto/cso/mirco", "title": "...", "description": "..."}\n'
+            ' ]}\n\n'
+            "Il piano deve essere concreto, con KPI misurabili e task assegnabili."
+        )
+
+        try:
+            raw = self.call_claude(plan_prompt, model="claude-sonnet-4-6", max_tokens=1500)
+            import re as _re
+            m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if m:
+                plan = json.loads(m.group(0))
+            else:
+                plan = {"method": method, "target_audience": "", "kpi": {}, "tasks_for_coo": []}
+        except Exception as e:
+            logger.warning("[CSO] plan_smoke_test Claude: %s", e)
+            plan = {"method": method, "error": str(e)}
+
+        # Salva in DB
+        try:
+            supabase.table("projects").update({
+                "smoke_test_plan": json.dumps(plan),
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning("[CSO] save smoke_test_plan: %s", e)
+
+        # Notifica nel topic
+        text = fmt("cso", "Piano Smoke Test " + brand,
+                   "Metodo: " + plan.get("method", "?") + "\n"
+                   "Target: " + plan.get("target_audience", "?") + "\n"
+                   "Durata: " + str(plan.get("duration_days", 14)) + " giorni\n"
+                   "Task generati: " + str(len(plan.get("tasks_for_coo", []))))
+        if thread_id:
+            self._send_to_topic(thread_id, text)
+
+        logger.info("[CSO] Piano smoke test generato per project #%d", project_id)
+        return {"status": "ok", "project_id": project_id, "plan": plan}
+
+    def _send_to_topic(self, topic_id, text):
+        """Invia messaggio nel topic Telegram."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if group_r.data:
+                group_id = int(group_r.data[0]["value"])
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                    json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+                    timeout=10,
+                )
+        except Exception as e:
+            logger.warning("[CSO] _send_to_topic: %s", e)
+
+    def delegate_execution_to_coo(self, project_id, thread_id=None):
+        """Legge piano da DB, inserisce agent_events per ogni task per il COO."""
+        logger.info("[CSO] delegate_execution_to_coo: project_id=%d", project_id)
+
+        try:
+            r = supabase.table("projects").select("smoke_test_plan,brand_name,name") \
+                .eq("id", project_id).execute()
+            if not r.data:
+                return {"error": "progetto non trovato"}
+            project = r.data[0]
+        except Exception as e:
+            return {"error": str(e)}
+
+        plan_raw = project.get("smoke_test_plan")
+        if not plan_raw:
+            return {"error": "nessun piano smoke test salvato"}
+
+        try:
+            plan = json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw
+        except Exception:
+            return {"error": "piano non parsabile"}
+
+        tasks = plan.get("tasks_for_coo", [])
+        events_created = 0
+        now = now_rome()
+
+        for task in tasks:
+            try:
+                supabase.table("agent_events").insert({
+                    "event_type": "task_delegation",
+                    "agent_from": "cso",
+                    "agent_to": "coo",
+                    "payload": json.dumps({
+                        "project_id": project_id,
+                        "assigned_to": task.get("assigned_to", "coo"),
+                        "title": task.get("title", ""),
+                        "description": task.get("description", ""),
+                    }),
+                    "created_at": now.isoformat(),
+                }).execute()
+                events_created += 1
+            except Exception as e:
+                logger.warning("[CSO] delegate event: %s", e)
+
+        brand = project.get("brand_name") or project.get("name", "")
+        text = fmt("cso", "Esecuzione delegata a COO",
+                   "Progetto: " + brand + "\n"
+                   "Task delegati: " + str(events_created))
+        if thread_id:
+            self._send_to_topic(thread_id, text)
+
+        logger.info("[CSO] Delegati %d task a COO per project #%d", events_created, project_id)
+        return {"status": "ok", "events_created": events_created}
+
+    def analyze_bos_opportunity(self, problem_id, thread_id=None):
+        """Analizza opportunita BOS per un problema. Salva in chief_decisions."""
+        logger.info("[CSO] analyze_bos_opportunity: problem_id=%d", problem_id)
+
+        try:
+            r = supabase.table("problems").select(
+                "id,title,description,weighted_score,sector"
+            ).eq("id", problem_id).execute()
+            if not r.data:
+                return {"error": "problema non trovato"}
+            problem = r.data[0]
+        except Exception as e:
+            return {"error": str(e)}
+
+        analysis_prompt = (
+            "Sei il CSO di brAIn. Analizza questa opportunita Blue Ocean Strategy.\n"
+            "Problema: " + (problem.get("title") or "") + "\n"
+            "Descrizione: " + (problem.get("description") or "")[:500] + "\n"
+            "Score: " + str(problem.get("weighted_score", 0)) + "\n"
+            "Settore: " + (problem.get("sector") or "") + "\n\n"
+            "Analizza:\n"
+            "1. Spazio di mercato inesplorato\n"
+            "2. Fattori da eliminare/ridurre/aumentare/creare (framework BOS)\n"
+            "3. Potenziale di differenziazione\n"
+            "4. Raccomandazione: proceed/investigate/skip\n\n"
+            "Formato: testo diretto, italiano, max 15 righe. Zero markdown."
+        )
+
+        try:
+            analysis = self.call_claude(analysis_prompt, model="claude-sonnet-4-6", max_tokens=1000)
+        except Exception as e:
+            logger.warning("[CSO] analyze_bos Claude: %s", e)
+            analysis = "Errore analisi: " + str(e)
+
+        # Salva in chief_decisions
+        try:
+            supabase.table("chief_decisions").insert({
+                "chief_domain": "strategy",
+                "decision_type": "bos_analysis",
+                "summary": "BOS " + (problem.get("title") or "")[:100],
+                "full_text": analysis,
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CSO] save bos_analysis: %s", e)
+
+        text = fmt("cso", "Analisi BOS", analysis[:1000])
+        if thread_id:
+            self._send_to_topic(thread_id, text)
+
+        return {"status": "ok", "problem_id": problem_id, "analysis": analysis}

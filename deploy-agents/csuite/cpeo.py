@@ -33,6 +33,9 @@ class CPeO(BaseChief):
     domain = "people"
     chief_id = "cpeo"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["team", "coaching", "training", "competenze", "gap analysis",
+                 "performance", "onboarding", "knowledge", "hr"]
+    MY_REFUSE_DOMAINS = ["codice", "marketing", "finanza", "vendite", "legale", "dns", "deploy"]
     briefing_prompt_template = (
         "Sei il CPeO di brAIn — Chief People & Evolution Officer. "
         "Genera un briefing settimanale includendo: "

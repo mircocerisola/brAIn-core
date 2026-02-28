@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 from core.base_chief import BaseChief
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome, format_time_rome
+from csuite.utils import fmt
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = "mircocerisola/brAIn-core"
@@ -37,10 +38,8 @@ _PROMPT_PATTERN = re.compile(
 
 
 def format_cto_message(titolo, contenuto=""):
-    """Helper formato CTO: icona + nome + titolo + contenuto. Zero separatori."""
-    if contenuto:
-        return "\U0001f527 CTO\n" + titolo + "\n\n" + contenuto
-    return "\U0001f527 CTO\n" + titolo
+    """Backward-compat wrapper. Usa fmt('cto', ...) per nuovo codice."""
+    return fmt("cto", titolo, contenuto)
 
 
 class CTO(BaseChief):
@@ -48,6 +47,9 @@ class CTO(BaseChief):
     chief_id = "cto"
     domain = "tech"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["codice", "infrastruttura", "deploy", "sicurezza", "architettura",
+                 "bug", "cloud run", "docker", "github", "api tecnica"]
+    MY_REFUSE_DOMAINS = ["marketing", "finanza", "legale", "hr", "vendite"]
     briefing_prompt_template = (
         "Sei il CTO di brAIn. Genera un briefing tecnico settimanale includendo: "
         "1) Salute dei servizi Cloud Run (uptime, errori), "
@@ -270,7 +272,7 @@ class CTO(BaseChief):
         last_line = clean[-1] if clean else "In esecuzione \u2014 nessun output ancora"
         if len(last_line) > 200:
             last_line = last_line[:197] + "..."
-        return format_cto_message(
+        return fmt("cto",
             "Aggiornamento " + str(elapsed) + " min",
             last_line
         )
@@ -340,7 +342,7 @@ class CTO(BaseChief):
 
         if job_ok and group_id and topic_id:
             self._send_telegram(group_id, topic_id,
-                format_cto_message(
+                fmt("cto",
                     "Task dalla coda avviato",
                     "Task: " + next_title + "\n"
                     "Avviato alle " + ora))
@@ -370,13 +372,13 @@ class CTO(BaseChief):
             except Exception as e:
                 logger.warning("[CTO] update status queued: %s", e)
                 self._send_telegram(chat_id, thread_id,
-                                    format_cto_message("Errore", "Impossibile accodare task #" + str(task_id)))
+                                    fmt("cto","Errore", "Impossibile accodare task #" + str(task_id)))
                 return
 
             pending_count = self._count_pending_tasks()
             running_title = (running.get("title") or "")[:40]
             self._send_telegram(chat_id, thread_id,
-                format_cto_message(
+                fmt("cto",
                     "Task in coda",
                     "Task: " + titolo + "\n"
                     "Posizione: " + str(pending_count) + "\n"
@@ -393,7 +395,7 @@ class CTO(BaseChief):
         except Exception as e:
             logger.warning("[CTO] update status ready: %s", e)
             self._send_telegram(chat_id, thread_id,
-                                format_cto_message("Errore", "Impossibile preparare task #" + str(task_id)))
+                                fmt("cto","Errore", "Impossibile preparare task #" + str(task_id)))
             return
 
         # 4. Trigger Cloud Run Job con CODE_TASK_ID
@@ -403,7 +405,7 @@ class CTO(BaseChief):
         ora = format_time_rome()
         if job_ok:
             self._send_telegram(chat_id, thread_id,
-                format_cto_message(
+                fmt("cto",
                     "Claude Code avviato in cloud",
                     "Task: " + titolo + "\n"
                     "Avviato alle " + ora + "\n"
@@ -411,7 +413,7 @@ class CTO(BaseChief):
                     "Aggiornamento ogni 5 minuti"))
         else:
             self._send_telegram(chat_id, thread_id,
-                format_cto_message(
+                fmt("cto",
                     "Task in coda",
                     "Task #" + str(task_id) + ": " + titolo + "\n"
                     "Job trigger fallito, il task rimane in stato ready.\n"
@@ -453,7 +455,7 @@ class CTO(BaseChief):
                     labels = {"done": "Completato", "error": "Fallito", "interrupted": "Interrotto"}
                     label = labels.get(status, "Completato")
 
-                    completion_text = format_cto_message(
+                    completion_text = fmt("cto",
                         label,
                         "Task: " + _ttl + " " + str(_elapsed) + " min"
                     )
@@ -488,7 +490,7 @@ class CTO(BaseChief):
             }).eq("id", task_id).execute()
         except Exception as e:
             self._send_telegram(chat_id, thread_id,
-                                format_cto_message("Errore interrupt", str(e)))
+                                fmt("cto","Errore interrupt", str(e)))
             return
 
         logger.info("[CTO] interrupt_task #%d -> interrupt_requested", task_id)
@@ -502,7 +504,7 @@ class CTO(BaseChief):
             pass
 
         self._send_telegram(chat_id, thread_id,
-            format_cto_message(
+            fmt("cto",
                 "Interruzione richiesta",
                 "Task: " + titolo + "\n"
                 "Il job terminera' il processo."))
@@ -645,7 +647,7 @@ class CTO(BaseChief):
 
         meta = self._extract_prompt_meta(prompt) if prompt else {"main_file": "da determinare", "time_minutes": 5}
 
-        card_text = format_cto_message(
+        card_text = fmt("cto",
             "Prossima azione",
             "Task: " + title + "\n"
             "File coinvolti: " + meta.get("main_file", "da determinare") + "\n"

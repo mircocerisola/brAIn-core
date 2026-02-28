@@ -47,7 +47,7 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
         "tables_allowed": ["agent_logs", "agent_events", "action_queue", "scan_schedule",
                            "projects", "project_metrics", "kpi_daily", "smoke_tests",
                            "smoke_test_prospects", "smoke_test_events",
-                           "chief_memory", "chief_decisions"],
+                           "chief_memory", "chief_decisions", "project_assets"],
         "tables_forbidden": ["solutions", "brand_assets", "org_config", "code_tasks"],
     },
     "cto": {
@@ -58,7 +58,7 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
     "cmo": {
         "file_allowed": ["marketing/", "deploy-agents/marketing/"],
         "tables_allowed": ["brand_assets", "marketing_reports", "smoke_test_prospects",
-                           "chief_memory", "chief_decisions"],
+                           "chief_memory", "chief_decisions", "project_assets"],
         "tables_forbidden": ["agent_logs", "org_config", "scan_sources", "solutions", "projects", "code_tasks"],
     },
     "cfo": {
@@ -493,6 +493,50 @@ class BaseChief(BaseAgent):
             topic_scope_id=topic_scope_id,
             project_scope_id=project_scope_id,
             recent_messages=recent_messages,
+        )
+
+    # ============================================================
+    # DOMAIN BOUNDARY CHECK — fast keyword refuse
+    # ============================================================
+
+    def _check_domain_boundary(self, question: str) -> Optional[str]:
+        """Fast keyword check su MY_REFUSE_DOMAINS.
+        Se match, logga e inserisce agent_event per COO redirect.
+        Ritorna messaggio di redirect se fuori dominio, None se OK.
+        """
+        refuse_domains = getattr(self, "MY_REFUSE_DOMAINS", [])
+        if not refuse_domains:
+            return None  # COO non rifiuta nulla
+
+        q_lower = question.lower()
+        matched = [kw for kw in refuse_domains if kw in q_lower]
+        if not matched:
+            return None
+
+        logger.info("[%s] Domain boundary: rifiuto keyword=%s", self.name, matched)
+
+        # Inserisci agent_event per COO redirect
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "domain_boundary_redirect",
+                "agent_from": self.chief_id,
+                "agent_to": "coo",
+                "payload": json.dumps({
+                    "question": question[:500],
+                    "matched_keywords": matched,
+                    "reason": "fuori dominio " + self.chief_id,
+                }),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[%s] domain_boundary event: %s", self.name, e)
+
+        icon = CHIEF_ICONS.get(self.chief_id, "")
+        return (
+            icon + " " + self.name + "\n"
+            "Fuori dal mio dominio\n\n"
+            "Questa richiesta riguarda: " + ", ".join(matched) + "\n"
+            "La passo al COO per il coordinamento."
         )
 
     # ============================================================

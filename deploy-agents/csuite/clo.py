@@ -8,6 +8,9 @@ class CLO(BaseChief):
     chief_id = "clo"
     domain = "legal"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["legale", "compliance", "contratti", "gdpr", "privacy",
+                 "rischio legale", "normativa", "ai act", "termini"]
+    MY_REFUSE_DOMAINS = ["codice", "marketing", "finanza", "vendite", "hr", "dns", "deploy"]
     briefing_prompt_template = (
         "Sei il CLO di brAIn. Genera un briefing legale settimanale includendo: "
         "1) Violazioni etiche rilevate (ethics_violations), "

@@ -71,7 +71,7 @@ def audit_data_quality() -> Dict[str, Any]:
     Produce report al CTO nel topic #technology.
     """
     start = now_rome()
-    sep = "\u2501" * 15
+
     issues: List[str] = []
     logger.info("[CDO] Avvio audit_data_quality")
 
@@ -137,14 +137,14 @@ def audit_data_quality() -> Dict[str, Any]:
 
     report_lines = [
         f"🔍 CDO Data Audit — {start.strftime('%Y-%m-%d')}",
-        sep,
+        "",
         f"Segnale: {status_icon} {'OK' if not issues else f'{len(issues)} problemi trovati'}",
     ]
     if issues:
         report_lines.extend(issues)
     else:
         report_lines.append("✅ Nessun problema rilevato")
-    report_lines.append(sep)
+    report_lines.append("")
     report_lines.append(f"Durata: {duration_s}s")
 
     report_text = "\n".join(report_lines)
@@ -169,7 +169,7 @@ def optimize_knowledge_storage() -> Dict[str, Any]:
     - Propone threshold auto-archiviazione
     """
     start = now_rome()
-    sep = "\u2501" * 15
+
     logger.info("[CDO] Avvio optimize_knowledge_storage")
 
     table_stats: Dict[str, int] = {}
@@ -211,15 +211,15 @@ def optimize_knowledge_storage() -> Dict[str, Any]:
     stats_lines = [f"  {t}: {cnt} righe" for t, cnt in table_stats.items()]
     report_lines = [
         f"💾 CDO Storage Optimization — {start.strftime('%Y-%m-%d')}",
-        sep,
+        "",
         "Tabelle knowledge:",
     ] + stats_lines
     if suggestions:
-        report_lines.append(sep)
+        report_lines.append("")
         report_lines.extend(suggestions)
     else:
         report_lines.append("✅ Storage ottimale, nessuna azione necessaria")
-    report_lines.append(sep + f"\nDurata: {duration_s}s")
+    report_lines.append(f"\nDurata: {duration_s}s")
 
     report_text = "\n".join(report_lines)
     _save_cdo_report("cto", "storage_optimization", f"CDO Storage {start.strftime('%Y-%m-%d')}", report_text)
@@ -237,7 +237,7 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
     Alert CPeO se un Chief non riceve nuova conoscenza da >7gg.
     """
     start = now_rome()
-    sep = "\u2501" * 15
+
     week_ago = (start - timedelta(days=7)).isoformat()
     logger.info("[CDO] Avvio monitor_knowledge_growth")
 
@@ -276,12 +276,12 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
 
     report_lines = [
         f"📈 CDO Knowledge Growth — {start.strftime('%Y-%m-%d')} (ultimi 7gg)",
-        sep,
+        "",
         f"org_shared_knowledge: +{growth.get('org_shared', 0)} entries",
     ] + chief_lines
 
     if alerts:
-        report_lines.append(sep)
+        report_lines.append("")
         report_lines.append(f"⚠️ Nessuna nuova conoscenza: {', '.join(alerts)}")
         report_lines.append("→ CPeO dovrebbe intervenire con coaching")
 
@@ -293,7 +293,7 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
             grp_id = int(r_grp.data[0]["value"]) if r_grp.data else None
             if peo_topic and grp_id:
                 cpeo_alert = (
-                    f"\U0001f4e2 CDO Alert — Knowledge Stale\n{sep}\n"
+                    f"\U0001f4e2 CDO Alert — Knowledge Stale\n\n"
                     f"Chief senza nuova conoscenza nell'ultima settimana: {', '.join(alerts)}\n"
                     f"Pianifica coaching immediato."
                 )
@@ -303,7 +303,7 @@ def monitor_knowledge_growth() -> Dict[str, Any]:
     else:
         report_lines.append("✅ Tutti i Chief hanno ricevuto nuova conoscenza")
 
-    report_lines.append(sep + f"\nDurata: {duration_s}s")
+    report_lines.append(f"\nDurata: {duration_s}s")
     report_text = "\n".join(report_lines)
 
     _save_cdo_report("cto", "knowledge_growth", f"CDO Knowledge Growth {start.strftime('%Y-%m-%d')}", report_text)

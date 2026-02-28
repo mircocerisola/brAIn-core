@@ -1076,7 +1076,7 @@ def get_sources_report():
         average = [s for s in active if 0.4 <= (s.get("relevance_score") or 0) <= 0.7]
         weak = [s for s in active if (s.get("relevance_score") or 0) < 0.4]
 
-        SEP = "━━━━━━━━━━━━━━━"
+        SEP = ""
         NUMERI = ["①", "②", "③", "④", "⑤", "⑥", "⑦", "⑧", "⑨", "⑩"]
 
         def fmt_src(srcs, limit=5):
@@ -1088,7 +1088,7 @@ def get_sources_report():
                 out.append(f"{num} {s['name'][:28]} · score: {score:.2f} · problemi: {pf}")
             return out
 
-        lines = ["📡 REPORT FONTI", SEP]
+        lines = ["📡 REPORT FONTI", ""]
         if great:
             lines.append(f"\n🟢 OTTIME (score > 0.7)")
             lines.extend(fmt_src(great))
@@ -1100,7 +1100,7 @@ def get_sources_report():
             lines.extend(fmt_src(weak))
         lines.append(f"\n📦 ARCHIVIATE: {archived_count} fonti")
         lines.append(f"Soglia archiviazione attuale: {current_threshold:.2f}")
-        lines.append(SEP)
+        lines.append("")
         return "\n".join(lines)
     except Exception as e:
         return f"Errore report fonti: {e}"
@@ -1330,8 +1330,6 @@ def format_action_message(action, pending_count):
     action_type = action.get("action_type", "")
     title = action.get("title", "Azione")
     desc = action.get("description", "")
-    sep = "\u2501" * 15
-
     if action_type == "approve_bos":
         # Formato speciale per BOS — 2 righe descrizione essenziale
         payload = action.get("payload") or {}
@@ -1345,12 +1343,10 @@ def format_action_message(action, pending_count):
         problem_title = payload.get("problem_title", title.replace("BOS PRONTO \u2014 ", ""))
         desc_lines = "\n".join(desc.split("\n")[:2])
         return (
-            f"\u26a1 AZIONE RICHIESTA [{pending_count} in coda]\n"
-            f"{sep}\n"
+            f"\u26a1 AZIONE RICHIESTA [{pending_count} in coda]\n\n"
             f"\U0001f3af BOS PRONTO \u2014 {problem_title[:60]}\n"
             f"Score: {bos_score:.2f}/1 | Soluzione: {sol_title[:50]}\n"
-            f"{desc_lines[:200]}\n"
-            f"{sep}\n"
+            f"{desc_lines[:200]}\n\n"
             f"\u2705 Avvia esecuzione  |  \u274c Scarta  |  \U0001f50d Dettagli"
         )
 
@@ -1358,11 +1354,9 @@ def format_action_message(action, pending_count):
     desc_lines = desc.split("\n")[:3]
     desc_short = "\n".join(desc_lines)
     return (
-        f"AZIONE RICHIESTA [{pending_count} in coda]\n"
-        f"{'_' * 30}\n"
+        f"AZIONE RICHIESTA [{pending_count} in coda]\n\n"
         f"{title}\n"
-        f"{desc_short}\n"
-        f"{'_' * 30}\n"
+        f"{desc_short}\n\n"
         f"Si  |  No  |  Dettagli"
     )
 
@@ -2015,7 +2009,7 @@ def clean_reply(text):
 
 
 # ---- CARD FORMAT HELPERS (FIX 4) ----
-_SEP = "\u2501" * 15
+_SEP = ""
 
 
 def _make_card(emoji, title, context, body_lines, footer=None):
@@ -2078,7 +2072,7 @@ def _send_notification_now(message, parse_mode="Markdown"):
     if not token:
         return
     # Se non è già una card, wrappa
-    if _SEP not in message and not message.startswith("📊") and not message.startswith("💶") and not message.startswith("⚙️"):
+    if not message.startswith("📊") and not message.startswith("💶") and not message.startswith("⚙️"):
         emoji = "\U0001f514"
         first_line = message.split("\n")[0][:80]
         rest_lines = message.split("\n")[1:]
@@ -2897,7 +2891,6 @@ async def handle_project_message(update, project):
 
         _domain_target = _chief_domain_map.get(_chief_id, "ops")
         _chief_display = _chief_name_map.get(_chief_id, "COO")
-        sep = "\u2501" * 15
 
         # FIX 1: Chief chiamata sincrona (no placeholder, no thread)
         _topic_scope = f"{chat_id}:{thread_id}" if thread_id else f"{chat_id}:main"
@@ -2958,8 +2951,7 @@ async def handle_project_message(update, project):
 
         if _proj_answer:
             card = (
-                f"\U0001f464 {_proj_chief_name} risponde:\n"
-                f"{sep}\n"
+                f"\U0001f464 {_proj_chief_name}\n"
                 f"{_proj_answer[:1200]}"
             )
             _token = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -3288,7 +3280,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 _sd_kpi = json.loads(_sd_p.get("smoke_test_kpi") or "{}")
                 _sd_brand = _sd_p.get("brand_name") or _sd_p.get("name", "?")
                 _sd_method = _sd_plan.get("method", _sd_p.get("smoke_test_method", "?"))
-                _sd_sep = "\u2501" * 15
                 # Sezione prospect
                 _sd_prospects = _sd_plan.get("prospects_sample", [])
                 _sd_plines = ""
@@ -3332,8 +3323,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                     _sd_ads = "ADS: " + ", ".join(_sd_ads_plan.get("channels", [])) + " EUR" + str(_sd_ads_plan.get("budget_eur", 0)) + "\n"
                 # Doc completo
                 _sd_doc = (
-                    "DETTAGLIO SMOKE TEST \u2014 " + _sd_brand + "\n"
-                    + _sd_sep + "\n"
+                    "DETTAGLIO SMOKE TEST \u2014 " + _sd_brand + "\n\n"
                     "Metodo: " + _sd_method + "\n"
                     "Durata: " + str(_sd_plan.get("duration_days", "?")) + " giorni\n"
                     "Budget: " + ("EUR" + str(_sd_plan.get("budget_eur", 0)) if _sd_plan.get("budget_eur") else "gratuito") + "\n\n"
@@ -3354,7 +3344,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 _dur = _sd_plan.get("duration_days", 7)
                 _sd_doc += "- Giorno 1-" + str(_dur) + ": outreach automatico\n"
                 _sd_doc += "- Giorno " + str(_dur + 1) + ": analisi risultati + raccomandazione GO/NO-GO\n"
-                _sd_doc += _sd_sep
                 _sd_token = os.getenv("TELEGRAM_BOT_TOKEN")
                 if _sd_token:
                     _sd_payload = {"chat_id": chat_id, "text": _sd_doc[:4096]}
@@ -3951,8 +3940,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             for l in logs:
                 a = l.get("agent_id", "unknown")
                 by_agent[a] = by_agent.get(a, 0.0) + float(l.get("cost_usd", 0) or 0)
-            sep = "\u2501" * 15
-            lines = ["\U0001f50d *Dettaglio costi ultime 4h*", sep]
+            lines = ["\U0001f50d *Dettaglio costi ultime 4h*", ""]
             if by_agent:
                 for a, c in sorted(by_agent.items(), key=lambda x: x[1], reverse=True):
                     lines.append(f"\u2022 {a}: \u20ac{c * 0.92:.4f}")
@@ -3968,7 +3956,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data == "cost_trend_7d":
         await query.answer()
         try:
-            lines = ["\U0001f4ca *Trend costi 7 giorni*", "\u2501" * 15]
+            lines = ["\U0001f4ca *Trend costi 7 giorni*", ""]
             now_utc = _now_rome()
             for d in range(6, -1, -1):
                 day = now_utc - timedelta(days=d)
@@ -3995,9 +3983,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             prob_res = supabase.table("problems").select("id,title,weighted_score,sector").eq(
                 "status", "new").order("weighted_score", desc=True).limit(5).execute()
             probs = prob_res.data or []
-            sep = "\u2501" * 15
             if probs:
-                lines = [f"\U0001f4cb *Problemi in attesa ({len(probs)})*", sep]
+                lines = [f"\U0001f4cb *Problemi in attesa ({len(probs)})*", ""]
                 for p in probs:
                     score = float(p.get("weighted_score") or 0)
                     sector = (p.get("sector") or "?").split("/")[0][:10]
@@ -4017,8 +4004,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             bos_res = supabase.table("solutions").select("id,title,bos_score,bos_details").not_.is_(
                 "bos_score", "null").order("bos_score", desc=True).limit(3).execute()
             bos_list = bos_res.data or []
-            sep = "\u2501" * 15
-            lines = ["\U0001f3c6 *Top 3 BOS*", sep]
+            lines = ["\U0001f3c6 *Top 3 BOS*", ""]
             for s in bos_list:
                 bos = float(s.get("bos_score", 0) or 0)
                 details = s.get("bos_details", {})
@@ -4043,9 +4029,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             cantieri = supabase.table("projects").select("id,name,status,created_at,build_phase").neq(
                 "status", "archived").execute().data or []
-            sep = "\u2501" * 15
             if cantieri:
-                lines = [f"\U0001f3d7\ufe0f *Cantieri attivi ({len(cantieri)})*", sep]
+                lines = [f"\U0001f3d7\ufe0f *Cantieri attivi ({len(cantieri)})*", ""]
                 for c in cantieri:
                     created = c.get("created_at", "")[:16].replace("T", " ")
                     phase = c.get("build_phase") or 0
@@ -4112,12 +4097,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             if _cd_r.data:
                 _cd_prompt = _cd_r.data[0].get("prompt", "N/A")
                 _cd_title = _cd_r.data[0].get("title", "Azione codice")
-                _cd_sep = "\u2501" * 15
                 _cd_text = (
-                    f"\U0001f4cb Prompt completo \u2014 {_cd_title}\n"
-                    f"{_cd_sep}\n"
-                    f"{_cd_prompt[:3500]}\n"
-                    f"{_cd_sep}"
+                    f"\U0001f4cb Prompt completo \u2014 {_cd_title}\n\n"
+                    f"{_cd_prompt[:3500]}"
                 )
                 _cd_markup = json.dumps({"inline_keyboard": [[
                     {"text": "\u2705 Approva", "callback_data": f"code_approve:{_cd_task_id}"},
@@ -4582,12 +4564,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "title": _cm_title,
                 }).eq("id", _cm_tid).execute()
                 # Invia nuova card
-                _cm_sep = "\u2501" * 15
                 _cm_card = (
-                    f"\u26a1 PROMPT MODIFICATO \u2014 #{_cm_tid}\n"
-                    f"{_cm_sep}\n"
-                    f"{_cm_new_prompt[:300]}...\n"
-                    f"{_cm_sep}"
+                    f"\u26a1 PROMPT MODIFICATO \u2014 #{_cm_tid}\n\n"
+                    f"{_cm_new_prompt[:300]}..."
                 )
                 _cm_markup = json.dumps({"inline_keyboard": [[
                     {"text": "\u2705 Valida", "callback_data": f"code_approve:{_cm_tid}"},
@@ -4926,10 +4905,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if lower_msg in _REPORT_GENERIC_TRIGGERS:
-        sep = _SEP
         card_text = (
-            f"\U0001f4ca *REPORT DISPONIBILI*\n{sep}\n"
-            f"Scegli quale report vuoi vedere:\n{sep}"
+            f"\U0001f4ca *REPORT DISPONIBILI*\n\n"
+            f"Scegli quale report vuoi vedere:"
         )
         reply_markup = {
             "inline_keyboard": [[

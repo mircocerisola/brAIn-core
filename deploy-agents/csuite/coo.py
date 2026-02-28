@@ -1,4 +1,5 @@
 """COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue.
+v5.28: orchestrate, delegate_to_chief, handle_domain_setup_flow.
 v5.23: send_daily_brain_snapshot (Drive + email + Supabase), rename_cantiere.
 """
 import json
@@ -12,8 +13,9 @@ from email import encoders
 
 import requests as _requests
 from core.base_chief import BaseChief
-from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
+from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
+from csuite.utils import fmt
 
 
 class COO(BaseChief):
@@ -21,6 +23,9 @@ class COO(BaseChief):
     domain = "ops"
     chief_id = "coo"
     default_model = "claude-sonnet-4-6"
+    MY_DOMAIN = ["operazioni", "cantieri", "pipeline", "prodotto", "revenue",
+                 "coordinamento", "task", "dominio", "accelerazione", "report"]
+    MY_REFUSE_DOMAINS = []  # COO coordina tutto, non rifiuta nulla
     briefing_prompt_template = (
         "Sei il COO di brAIn — Chief Operations & Revenue Officer. "
         "Genera un briefing operativo settimanale includendo: "
@@ -933,3 +938,161 @@ class COO(BaseChief):
             return {"status": "partial", "project_id": project_id, "db": True, "telegram": False}
         else:
             return {"error": "Operazione fallita", "db": False, "telegram": False}
+
+    # ============================================================
+    # ORCHESTRAZIONE — COO come coordinatore reale
+    # ============================================================
+
+    HUMAN_ONLY_ACTIONS = [
+        "comprare_dominio", "creare_account_esterno", "pagamento",
+        "firma_contratto", "registrazione_servizio", "configurare_dns",
+        "creare_email_provider", "acquisto_licenza",
+    ]
+
+    def orchestrate(self, message, thread_id=None):
+        """Analizza richiesta, divide azioni umane/agente, delega.
+        Usa Haiku per intent analysis con output JSON.
+        """
+        logger.info("[COO] orchestrate: %s", message[:200])
+
+        classify_prompt = (
+            "Sei il COO di brAIn. Analizza questa richiesta e dividi in azioni.\n"
+            "Richiesta: " + message + "\n\n"
+            "Rispondi SOLO JSON:\n"
+            '{"intent": "breve descrizione",\n'
+            ' "human_actions": [{"action": "...", "description": "..."}],\n'
+            ' "agent_actions": [{"chief": "cmo/cto/cso/cfo/clo/cpeo", "action": "...", "description": "..."}]}\n\n'
+            "Azioni umane: comprare dominio, configurare DNS, creare account esterno, pagamento.\n"
+            "Azioni agente: landing page (CMO), deploy (CTO), strategia (CSO), analisi costi (CFO)."
+        )
+
+        try:
+            raw = self.call_claude(classify_prompt, model="claude-haiku-4-5-20251001", max_tokens=500)
+            import re as _re
+            m = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if m:
+                plan = json.loads(m.group(0))
+            else:
+                plan = {"intent": message[:100], "human_actions": [], "agent_actions": []}
+        except Exception as e:
+            logger.warning("[COO] orchestrate classify: %s", e)
+            plan = {"intent": message[:100], "human_actions": [], "agent_actions": []}
+
+        human_actions = plan.get("human_actions", [])
+        agent_actions = plan.get("agent_actions", [])
+
+        # Delega azioni agente
+        for action in agent_actions:
+            self.delegate_to_chief(action)
+
+        # Formatta risultato
+        lines = [plan.get("intent", "")]
+        if human_actions:
+            lines.append("")
+            lines.append(self.format_human_actions(human_actions))
+        if agent_actions:
+            lines.append("")
+            lines.append("Delegato a: " + ", ".join(
+                a.get("chief", "?").upper() for a in agent_actions
+            ))
+
+        result_text = fmt("coo", "Piano operativo", "\n".join(lines))
+
+        if thread_id:
+            self._send_to_topic(thread_id, result_text)
+
+        logger.info("[COO] orchestrate: %d human, %d agent actions",
+                    len(human_actions), len(agent_actions))
+        return {
+            "status": "ok",
+            "intent": plan.get("intent", ""),
+            "human_actions": human_actions,
+            "agent_actions": agent_actions,
+        }
+
+    def delegate_to_chief(self, action):
+        """Inserisce agent_event con event_type='task_delegation' per il Chief target."""
+        chief = action.get("chief", "coo")
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "task_delegation",
+                "agent_from": "coo",
+                "agent_to": chief,
+                "payload": json.dumps({
+                    "action": action.get("action", ""),
+                    "description": action.get("description", ""),
+                }),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+            logger.info("[COO] Delegato a %s: %s", chief, action.get("action", ""))
+        except Exception as e:
+            logger.warning("[COO] delegate_to_chief: %s", e)
+
+    def handle_domain_setup_flow(self, project_slug, thread_id=None):
+        """Crea checklist Mirco (DNS, email) + task agenti (CMO landing, CTO deploy)."""
+        logger.info("[COO] handle_domain_setup_flow: %s", project_slug)
+
+        # Azioni umane
+        human_actions = [
+            {"action": "comprare_dominio", "description": "Acquista dominio " + project_slug},
+            {"action": "configurare_dns", "description": "Punta DNS al server"},
+            {"action": "creare_email_provider", "description": "Crea email info@" + project_slug},
+        ]
+
+        # Azioni agente
+        agent_actions = [
+            {"chief": "cmo", "action": "genera_landing", "description": "Genera landing page HTML per " + project_slug},
+            {"chief": "cto", "action": "deploy_landing", "description": "Deploy landing page su Cloud Run per " + project_slug},
+        ]
+
+        for action in agent_actions:
+            self.delegate_to_chief(action)
+
+        result_text = fmt("coo", "Setup dominio " + project_slug,
+            self.format_human_actions(human_actions)
+            + "\n\nDelegato a: CMO (landing), CTO (deploy)")
+
+        if thread_id:
+            self._send_to_topic(thread_id, result_text)
+
+        return {
+            "status": "ok",
+            "project_slug": project_slug,
+            "human_actions": human_actions,
+            "agent_actions": agent_actions,
+        }
+
+    def format_human_actions(self, actions):
+        """Lista numerata azioni per Mirco."""
+        lines = ["AZIONI MIRCO:"]
+        for i, a in enumerate(actions, 1):
+            desc = a.get("description", a.get("action", "?"))
+            lines.append(str(i) + ". " + desc)
+        return "\n".join(lines)
+
+    def monitor_and_report(self, actions, thread_id=None):
+        """Check agent_events status per azioni delegate, report completamento."""
+        completed = 0
+        pending = 0
+        for action in actions:
+            chief = action.get("chief", "")
+            try:
+                r = supabase.table("agent_events").select("id,status") \
+                    .eq("agent_from", "coo").eq("agent_to", chief) \
+                    .eq("event_type", "task_delegation") \
+                    .order("created_at", desc=True).limit(1).execute()
+                if r.data and r.data[0].get("status") == "completed":
+                    completed += 1
+                else:
+                    pending += 1
+            except Exception:
+                pending += 1
+
+        text = fmt("coo", "Status deleghe",
+                   "Completate: " + str(completed) + "\n"
+                   "In attesa: " + str(pending))
+
+        if thread_id:
+            self._send_to_topic(thread_id, text)
+
+        return {"completed": completed, "pending": pending}
