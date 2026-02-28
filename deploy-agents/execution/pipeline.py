@@ -11,7 +11,6 @@ from core.templates import now_rome
 import requests as _requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 
-SEP = "\u2501" * 15
 
 # ── Pipeline steps — ordine OBBLIGATORIO sequenziale bloccante ────────────────
 
@@ -110,14 +109,12 @@ def advance_pipeline_step(project_id: int, new_step: str) -> bool:
             group_id = _get_group_id()
             if group_id and topic_id:
                 _send_topic_raw(group_id, topic_id,
-                    f"\u26d4 PIPELINE BLOCCATA — {name}\n"
-                    f"{SEP}\n"
-                    f"Tentativo di saltare step!\n"
+                    f"\u26d4 PIPELINE BLOCCATA\n{name}\n\n"
+                    f"Tentativo di saltare step\n"
                     f"Step attuale: {current}\n"
                     f"Step richiesto: {new_step}\n"
-                    f"Step mancanti: {', '.join(steps_skipped)}\n"
-                    f"{SEP}\n"
-                    f"Completa TUTTI i passi precedenti prima di procedere.")
+                    f"Step mancanti: {', '.join(steps_skipped)}\n\n"
+                    f"Completa tutti i passi precedenti prima di procedere.")
             return False
 
         territory = get_territory(new_step)

@@ -64,7 +64,15 @@ def _format_chief_response(chief_id, answer):
     clean = "\n".join(l for l in clean.split("\n") if l.strip() or not clean.strip())
     while "\n\n\n" in clean:
         clean = clean.replace("\n\n\n", "\n\n")
-    return icon + " " + name + "\n\n" + clean.strip()
+    clean = clean.strip()
+    # Se la risposta inizia gia' con l'icona del Chief, non duplicare
+    if icon and clean.startswith(icon):
+        return clean
+    # Se inizia con qualsiasi icona Chief nota, non aggiungere prefisso
+    for _ic in _CHIEF_ICONS.values():
+        if clean.startswith(_ic):
+            return clean
+    return icon + " " + name + "\n\n" + clean
 
 
 # Cache topic_id → domain per routing diretto ai Chief
