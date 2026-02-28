@@ -587,6 +587,37 @@ async def run_coo_accelerator_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_coo_snapshot_endpoint(request):
+    """POST /coo/snapshot — genera snapshot giornaliero brAIn."""
+    try:
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        result = coo.send_daily_brain_snapshot()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_coo_rename_cantiere_endpoint(request):
+    """POST /coo/rename-cantiere — {project_id, nuovo_nome} — rinomina progetto e topic."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        nuovo_nome = data.get("nuovo_nome", "")
+        if not project_id or not nuovo_nome:
+            return web.json_response({"error": "project_id e nuovo_nome obbligatori"}, status=400)
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        result = coo.rename_cantiere(project_id, nuovo_nome)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

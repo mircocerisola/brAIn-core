@@ -1,6 +1,16 @@
-"""COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue."""
-import requests as _requests
+"""COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue.
+v5.23: send_daily_brain_snapshot (Drive + email + Supabase), rename_cantiere.
+"""
+import json
+import os
+import smtplib
 from datetime import timedelta
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.mime.base import MIMEBase
+from email import encoders
+
+import requests as _requests
 from core.base_chief import BaseChief
 from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
@@ -423,7 +433,7 @@ class COO(BaseChief):
                     if age > 7:
                         anomalies.append({
                             "type": "stale_action",
-                            "description": f"Azione pending da {age} giorni",
+                            "description": "Azione pending da " + str(age) + " giorni",
                             "severity": "medium",
                         })
                         break
@@ -443,9 +453,476 @@ class COO(BaseChief):
                     if age > 5:
                         anomalies.append({
                             "type": "stale_build",
-                            "description": f"Cantiere {row.get('name','?')} in {row.get('status','?')} da {age} giorni senza aggiornamenti",
+                            "description": "Cantiere " + row.get("name", "?") + " in " + row.get("status", "?") + " da " + str(age) + " giorni",
                             "severity": "high",
                         })
         except Exception:
             pass
         return anomalies
+
+    # ============================================================
+    # SNAPSHOT GIORNALIERO — Drive + Email + Supabase
+    # ============================================================
+
+    def send_daily_brain_snapshot(self):
+        """Genera snapshot giornaliero, salva su Drive (brAIn/Snapshots/), Supabase, email a Mirco."""
+        now = now_rome()
+        today_str = now.strftime("%Y-%m-%d")
+        filename = "BRAIN-SNAPSHOT-" + today_str + ".md"
+
+        # 1. Genera contenuto snapshot da Supabase
+        snapshot_md = self._generate_snapshot_content(now)
+
+        # 2. Genera sommario (cambiamenti ultime 24h)
+        sommario = self._generate_snapshot_sommario(now)
+
+        # 3. Salva su Google Drive
+        drive_url = self._upload_to_drive(filename, snapshot_md)
+
+        # 4. Salva su Supabase
+        try:
+            supabase.table("brain_snapshots").insert({
+                "snapshot_date": today_str,
+                "snapshot_md": snapshot_md,
+                "sommario": sommario,
+                "drive_url": drive_url or "",
+                "filename": filename,
+                "created_at": now.isoformat(),
+            }).execute()
+            logger.info("[COO] Snapshot salvato in brain_snapshots: %s", filename)
+        except Exception as e:
+            logger.warning("[COO] brain_snapshots insert: %s", e)
+
+        # 5. Invia email a Mirco
+        mirco_email = os.getenv("MIRCO_EMAIL", "mircocerisola@gmail.com")
+        self._send_snapshot_email(mirco_email, today_str, sommario, filename, snapshot_md)
+
+        # 6. Assicurati record Mirco in users
+        try:
+            existing = supabase.table("users").select("id").eq("role", "ceo").execute()
+            if not existing.data:
+                supabase.table("users").insert({
+                    "name": "Mirco",
+                    "role": "ceo",
+                    "email": mirco_email,
+                    "telegram_id": "8307106544",
+                }).execute()
+            else:
+                supabase.table("users").update({
+                    "email": mirco_email,
+                }).eq("role", "ceo").execute()
+        except Exception as e:
+            logger.warning("[COO] users upsert: %s", e)
+
+        logger.info("[COO] Daily snapshot completato: %s", filename)
+        return {
+            "status": "ok",
+            "filename": filename,
+            "drive_url": drive_url or "",
+            "sommario_lines": len(sommario.split("\n")),
+        }
+
+    def _generate_snapshot_content(self, now):
+        """Genera contenuto markdown dello snapshot leggendo Supabase."""
+        lines = [
+            "# brAIn Snapshot",
+            "",
+            "Generato: " + now.strftime("%Y-%m-%d %H:%M") + " CET",
+            "",
+        ]
+
+        # Progetti
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,status,pipeline_step,cantiere_status"
+            ).neq("status", "archived").execute()
+            lines.append("## Progetti Attivi")
+            lines.append("")
+            for p in (r.data or []):
+                brand = p.get("brand_name") or p.get("name", "?")
+                lines.append(
+                    "- " + brand + " (id " + str(p["id"]) + "): "
+                    + (p.get("status") or "?") + " / " + (p.get("pipeline_step") or "?")
+                    + " / cantiere=" + (p.get("cantiere_status") or "closed")
+                )
+            if not r.data:
+                lines.append("- Nessun progetto attivo")
+            lines.append("")
+        except Exception as e:
+            lines.append("Progetti: errore " + str(e)[:50])
+            lines.append("")
+
+        # Task per progetto
+        try:
+            r = supabase.table("project_tasks").select(
+                "id,project_id,title,status,assigned_to"
+            ).execute()
+            if r.data:
+                lines.append("## Task Progetti")
+                lines.append("")
+                for t in (r.data or []):
+                    lines.append(
+                        "- [" + (t.get("status") or "?") + "] "
+                        + (t.get("assigned_to") or "?").upper() + ": "
+                        + (t.get("title") or "?")[:60]
+                        + " (proj " + str(t.get("project_id")) + ")"
+                    )
+                lines.append("")
+        except Exception:
+            pass
+
+        # Tabelle con conteggi
+        tables_counts = [
+            ("problems", "Problemi"), ("solutions", "Soluzioni"),
+            ("agent_logs", "Agent Logs"), ("agent_events", "Agent Events"),
+            ("code_tasks", "Code Tasks"), ("scan_sources", "Fonti"),
+        ]
+        lines.append("## Dati Supabase")
+        lines.append("")
+        for tbl, label in tables_counts:
+            try:
+                r = supabase.table(tbl).select("*", count="exact").limit(0).execute()
+                cnt = r.count if r.count is not None else "?"
+                lines.append("- " + label + ": " + str(cnt) + " record")
+            except Exception:
+                lines.append("- " + label + ": errore")
+        lines.append("")
+
+        # Errori ultime 24h
+        try:
+            ieri = (now - timedelta(hours=24)).isoformat()
+            r = supabase.table("agent_logs").select("agent_id,action,error") \
+                .eq("status", "error").gte("created_at", ieri).execute()
+            if r.data:
+                lines.append("## Errori ultime 24h (" + str(len(r.data)) + ")")
+                lines.append("")
+                for e in (r.data or [])[:10]:
+                    lines.append(
+                        "- " + (e.get("agent_id") or "?") + ": "
+                        + (e.get("error") or "?")[:80]
+                    )
+                lines.append("")
+        except Exception:
+            pass
+
+        # Costi ultime 24h
+        try:
+            ieri = (now - timedelta(hours=24)).isoformat()
+            r = supabase.table("agent_logs").select("cost_usd") \
+                .gte("created_at", ieri).execute()
+            total = sum(float(row.get("cost_usd") or 0) for row in (r.data or []))
+            lines.append("## Costi ultime 24h")
+            lines.append("")
+            eur = round(total * 0.92, 4)
+            lines.append("- Totale: EUR " + str(eur))
+            lines.append("")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+
+    def _generate_snapshot_sommario(self, now):
+        """Genera sommario max 20 righe con cambiamenti ultime 24h."""
+        ieri = (now - timedelta(hours=24)).isoformat()
+        lines = []
+
+        # Task completati
+        try:
+            r = supabase.table("project_tasks").select("title,project_id") \
+                .eq("status", "completed").gte("updated_at", ieri).execute()
+            if r.data:
+                lines.append("Task completati: " + str(len(r.data)))
+                for t in (r.data or [])[:3]:
+                    lines.append("  - " + (t.get("title") or "?")[:50])
+        except Exception:
+            pass
+
+        # Nuovi problemi
+        try:
+            r = supabase.table("problems").select("id", count="exact") \
+                .gte("created_at", ieri).limit(0).execute()
+            cnt = r.count if r.count is not None else 0
+            if cnt > 0:
+                lines.append("Nuovi problemi scansionati: " + str(cnt))
+        except Exception:
+            pass
+
+        # Nuove soluzioni
+        try:
+            r = supabase.table("solutions").select("id", count="exact") \
+                .gte("created_at", ieri).limit(0).execute()
+            cnt = r.count if r.count is not None else 0
+            if cnt > 0:
+                lines.append("Nuove soluzioni generate: " + str(cnt))
+        except Exception:
+            pass
+
+        # Errori
+        try:
+            r = supabase.table("agent_logs").select("id", count="exact") \
+                .eq("status", "error").gte("created_at", ieri).limit(0).execute()
+            cnt = r.count if r.count is not None else 0
+            if cnt > 0:
+                lines.append("Errori agenti: " + str(cnt))
+        except Exception:
+            pass
+
+        # Costi
+        try:
+            r = supabase.table("agent_logs").select("cost_usd") \
+                .gte("created_at", ieri).execute()
+            total = sum(float(row.get("cost_usd") or 0) for row in (r.data or []))
+            lines.append("Costi 24h: EUR " + str(round(total * 0.92, 4)))
+        except Exception:
+            pass
+
+        # Progetti attivi
+        try:
+            r = supabase.table("projects").select("name,pipeline_step") \
+                .neq("status", "archived").execute()
+            for p in (r.data or []):
+                lines.append("Progetto " + (p.get("name") or "?")[:30] + ": " + (p.get("pipeline_step") or "?"))
+        except Exception:
+            pass
+
+        if not lines:
+            lines.append("Nessun cambiamento significativo nelle ultime 24h.")
+
+        return "\n".join(lines[:20])
+
+    def _upload_to_drive(self, filename, content):
+        """Carica file su Google Drive in brAIn/Snapshots/. Crea cartelle se necessario."""
+        sa_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        if not sa_json:
+            logger.warning("[COO] GOOGLE_SERVICE_ACCOUNT_JSON non configurato, skip Drive upload")
+            return ""
+
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            from googleapiclient.http import MediaInMemoryUpload
+
+            creds_dict = json.loads(sa_json)
+            creds = service_account.Credentials.from_service_account_info(
+                creds_dict, scopes=["https://www.googleapis.com/auth/drive"]
+            )
+            service = build("drive", "v3", credentials=creds)
+        except Exception as e:
+            logger.warning("[COO] Google Drive auth error: %s", e)
+            return ""
+
+        # Cartella brAIn — cerca o crea, salva ID in brain_config
+        brain_folder_id = self._get_or_create_drive_folder(service, "brAIn", None)
+        if not brain_folder_id:
+            return ""
+
+        # Sottocartella Snapshots
+        snapshots_folder_id = self._get_or_create_drive_folder(service, "Snapshots", brain_folder_id)
+        if not snapshots_folder_id:
+            return ""
+
+        # Upload file
+        try:
+            media = MediaInMemoryUpload(content.encode("utf-8"), mimetype="text/markdown")
+            file_meta = {
+                "name": filename,
+                "parents": [snapshots_folder_id],
+                "mimeType": "text/markdown",
+            }
+            uploaded = service.files().create(
+                body=file_meta, media_body=media, fields="id,webViewLink"
+            ).execute()
+            drive_url = uploaded.get("webViewLink", "")
+            logger.info("[COO] Drive upload OK: %s -> %s", filename, drive_url)
+
+            # Cleanup: mantieni ultimi 30 file
+            self._cleanup_old_drive_files(service, snapshots_folder_id, keep=30)
+
+            return drive_url
+        except Exception as e:
+            logger.warning("[COO] Drive upload error: %s", e)
+            return ""
+
+    def _get_or_create_drive_folder(self, service, name, parent_id):
+        """Cerca o crea cartella Drive. Salva brain folder ID in brain_config."""
+        is_root = parent_id is None
+
+        # Se e' la cartella brAIn, cerca ID salvato
+        if is_root:
+            try:
+                r = supabase.table("brain_config").select("value") \
+                    .eq("key", "DRIVE_BRAIN_FOLDER_ID").execute()
+                if r.data and r.data[0].get("value"):
+                    return r.data[0]["value"]
+            except Exception:
+                pass
+
+        # Cerca cartella esistente
+        try:
+            query = "name='" + name + "' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            if parent_id:
+                query += " and '" + parent_id + "' in parents"
+            results = service.files().list(q=query, fields="files(id)").execute()
+            files = results.get("files", [])
+            if files:
+                folder_id = files[0]["id"]
+                if is_root:
+                    self._save_brain_folder_id(folder_id)
+                return folder_id
+        except Exception as e:
+            logger.warning("[COO] Drive folder search error: %s", e)
+
+        # Crea cartella
+        try:
+            meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+            if parent_id:
+                meta["parents"] = [parent_id]
+            folder = service.files().create(body=meta, fields="id").execute()
+            folder_id = folder["id"]
+            logger.info("[COO] Drive folder creata: %s (id=%s)", name, folder_id)
+            if is_root:
+                self._save_brain_folder_id(folder_id)
+            return folder_id
+        except Exception as e:
+            logger.warning("[COO] Drive folder create error: %s", e)
+            return None
+
+    def _save_brain_folder_id(self, folder_id):
+        """Salva l'ID della cartella brAIn in brain_config."""
+        try:
+            supabase.table("brain_config").upsert({
+                "key": "DRIVE_BRAIN_FOLDER_ID",
+                "value": folder_id,
+                "updated_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[COO] brain_config save: %s", e)
+
+    def _cleanup_old_drive_files(self, service, folder_id, keep=30):
+        """Elimina file piu' vecchi di keep nella cartella."""
+        try:
+            results = service.files().list(
+                q="'" + folder_id + "' in parents and trashed=false",
+                fields="files(id,name,createdTime)",
+                orderBy="createdTime desc",
+                pageSize=100,
+            ).execute()
+            files = results.get("files", [])
+            if len(files) > keep:
+                for f in files[keep:]:
+                    service.files().delete(fileId=f["id"]).execute()
+                logger.info("[COO] Drive cleanup: eliminati %d file vecchi", len(files) - keep)
+        except Exception as e:
+            logger.warning("[COO] Drive cleanup error: %s", e)
+
+    def _send_snapshot_email(self, to_email, date_str, sommario, filename, snapshot_md):
+        """Invia email con sommario + allegato snapshot."""
+        gmail_user = os.getenv("GMAIL_USER", "")
+        gmail_pass = os.getenv("GMAIL_APP_PASSWORD", "")
+        if not gmail_user or not gmail_pass:
+            logger.warning("[COO] GMAIL_USER o GMAIL_APP_PASSWORD non configurati, skip email")
+            return
+
+        msg = MIMEMultipart()
+        msg["From"] = gmail_user
+        msg["To"] = to_email
+        msg["Subject"] = "brAIn Snapshot \u2014 " + date_str
+
+        body = "Sommario giornaliero brAIn\n\n" + sommario
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        # Allegato
+        attachment = MIMEBase("application", "octet-stream")
+        attachment.set_payload(snapshot_md.encode("utf-8"))
+        encoders.encode_base64(attachment)
+        attachment.add_header("Content-Disposition", "attachment", filename=filename)
+        msg.attach(attachment)
+
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
+                server.login(gmail_user, gmail_pass)
+                server.sendmail(gmail_user, to_email, msg.as_string())
+            logger.info("[COO] Email snapshot inviata a %s", to_email)
+        except Exception as e:
+            logger.warning("[COO] Email send error: %s", e)
+
+    # ============================================================
+    # RENAME CANTIERE — Supabase + Telegram topic
+    # ============================================================
+
+    def rename_cantiere(self, project_id, nuovo_nome):
+        """Rinomina progetto su Supabase e topic Telegram. Conferma solo se entrambi OK."""
+        # 1. Aggiorna nome in Supabase
+        db_ok = False
+        try:
+            supabase.table("projects").update({
+                "name": nuovo_nome,
+                "brand_name": nuovo_nome,
+            }).eq("id", project_id).execute()
+            db_ok = True
+            logger.info("[COO] DB rinominato project #%d -> %s", project_id, nuovo_nome)
+        except Exception as e:
+            logger.warning("[COO] rename_cantiere DB error: %s", e)
+            return {"error": "DB update fallito: " + str(e)}
+
+        # 2. Trova topic_id del cantiere
+        topic_id = None
+        group_id = None
+        try:
+            r = supabase.table("projects").select("topic_id,cantiere_thread_id") \
+                .eq("id", project_id).execute()
+            if r.data:
+                topic_id = r.data[0].get("cantiere_thread_id") or r.data[0].get("topic_id")
+        except Exception as e:
+            logger.warning("[COO] rename_cantiere topic lookup: %s", e)
+
+        try:
+            group_r = supabase.table("org_config").select("value") \
+                .eq("key", "telegram_group_id").execute()
+            if group_r.data:
+                group_id = int(group_r.data[0]["value"])
+        except Exception:
+            pass
+
+        # 3. Rinomina topic Telegram
+        tg_ok = False
+        if TELEGRAM_BOT_TOKEN and group_id and topic_id:
+            try:
+                resp = _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/editForumTopic",
+                    json={
+                        "chat_id": group_id,
+                        "message_thread_id": topic_id,
+                        "name": "\U0001f3d7 " + nuovo_nome[:60],
+                    },
+                    timeout=10,
+                )
+                result = resp.json()
+                if result.get("ok"):
+                    tg_ok = True
+                    logger.info("[COO] Telegram topic rinominato: %s", nuovo_nome)
+                    # Salva cantiere_thread_id se non presente
+                    try:
+                        supabase.table("projects").update({
+                            "cantiere_thread_id": topic_id,
+                        }).eq("id", project_id).execute()
+                    except Exception:
+                        pass
+                else:
+                    logger.warning("[COO] editForumTopic failed: %s", result.get("description", ""))
+            except Exception as e:
+                logger.warning("[COO] rename_cantiere Telegram error: %s", e)
+
+        # 4. Conferma o errore nel topic
+        if db_ok and tg_ok:
+            confirm_text = "\U0001f464 COO \u2014 Cantiere rinominato in " + nuovo_nome + "."
+            if topic_id:
+                self._send_to_topic(topic_id, confirm_text)
+            return {"status": "ok", "project_id": project_id, "nuovo_nome": nuovo_nome, "db": True, "telegram": True}
+        elif db_ok and not tg_ok:
+            err_text = "\u26a0\ufe0f COO \u2014 Nome aggiornato in DB ma rinomina topic Telegram fallita."
+            if topic_id:
+                self._send_to_topic(topic_id, err_text)
+            return {"status": "partial", "project_id": project_id, "db": True, "telegram": False}
+        else:
+            return {"error": "Operazione fallita", "db": False, "telegram": False}
