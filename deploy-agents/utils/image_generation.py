@@ -81,48 +81,64 @@ def _openai_generate(prompt, size, prefix):
 
 
 def _cloudflare_generate(prompt, prefix):
-    """Genera immagine via Cloudflare Workers AI (FLUX)."""
-    try:
-        url = (
-            "https://api.cloudflare.com/client/v4/accounts/"
-            + CF_ACCOUNT_ID
-            + "/ai/run/@cf/black-forest-labs/FLUX.1-schnell"
-        )
-        resp = _requests.post(
-            url,
-            headers={"Authorization": "Bearer " + CF_API_TOKEN},
-            json={"prompt": prompt},
-            timeout=60,
-        )
-        if resp.status_code != 200:
-            logger.warning("[IMG] Cloudflare status %d", resp.status_code)
-            return None
+    """Genera immagine via Cloudflare Workers AI.
+    Prova flux-2-dev (qualita' migliore), fallback flux-1-schnell.
+    """
+    _BASE = "https://api.cloudflare.com/client/v4/accounts/" + CF_ACCOUNT_ID + "/ai/run/"
+    _MODELS = [
+        ("flux-2-dev", "@cf/black-forest-labs/flux-2-dev", True),
+        ("flux-1-schnell", "@cf/black-forest-labs/flux-1-schnell", False),
+    ]
 
-        # Cloudflare ritorna immagine binaria direttamente
-        content_type = resp.headers.get("content-type", "")
-        if "image" in content_type:
-            path = _save_temp(resp.content, prefix)
-            logger.info("[IMG] Cloudflare FLUX OK: %s", path)
-            return path
-
-        # Potrebbe essere JSON con base64
+    for model_name, model_path, use_form_data in _MODELS:
         try:
-            data = resp.json()
-            if data.get("result", {}).get("image"):
-                import base64
-                img_bytes = base64.b64decode(data["result"]["image"])
-                path = _save_temp(img_bytes, prefix)
-                logger.info("[IMG] Cloudflare FLUX (base64) OK: %s", path)
+            url = _BASE + model_path
+            if use_form_data:
+                resp = _requests.post(
+                    url,
+                    headers={"Authorization": "Bearer " + CF_API_TOKEN},
+                    data={"prompt": prompt, "steps": "20"},
+                    timeout=90,
+                )
+            else:
+                resp = _requests.post(
+                    url,
+                    headers={"Authorization": "Bearer " + CF_API_TOKEN},
+                    json={"prompt": prompt},
+                    timeout=60,
+                )
+
+            if resp.status_code != 200:
+                logger.warning("[IMG] Cloudflare %s status %d: %s",
+                               model_name, resp.status_code, resp.text[:150])
+                continue
+
+            # Risposta immagine diretta
+            content_type = resp.headers.get("content-type", "")
+            if "image" in content_type:
+                path = _save_temp(resp.content, prefix)
+                logger.info("[IMG] Cloudflare %s OK (binary): %s", model_name, path)
                 return path
-        except Exception:
-            pass
 
-        logger.warning("[IMG] Cloudflare response non riconosciuta")
-        return None
+            # Risposta JSON con base64
+            try:
+                data = resp.json()
+                img_b64 = data.get("result", {}).get("image")
+                if img_b64:
+                    import base64
+                    img_bytes = base64.b64decode(img_b64)
+                    path = _save_temp(img_bytes, prefix)
+                    logger.info("[IMG] Cloudflare %s OK (base64): %s", model_name, path)
+                    return path
+            except Exception:
+                pass
 
-    except Exception as e:
-        logger.warning("[IMG] Cloudflare error: %s", e)
-        return None
+            logger.warning("[IMG] Cloudflare %s response non riconosciuta", model_name)
+
+        except Exception as e:
+            logger.warning("[IMG] Cloudflare %s error: %s", model_name, e)
+
+    return None
 
 
 def _replicate_generate(prompt, prefix):
