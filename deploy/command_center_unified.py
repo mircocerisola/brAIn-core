@@ -56,22 +56,26 @@ import re as _re_sep
 _SEP_PATTERN = _re_sep.compile(r"^[\s]*[━─_=\-]{3,}[\s]*$", _re_sep.MULTILINE)
 
 def _format_chief_response(chief_id, answer):
-    """Formatta risposta Chief: icona + nome + testo pulito senza separatori."""
+    """Formatta risposta Chief: SEMPRE icona corretta + nome + testo pulito."""
     icon = _CHIEF_ICONS.get(chief_id, "")
     name = _CHIEF_NAMES.get(chief_id, chief_id.upper() if chief_id else "Chief")
-    clean = _SEP_PATTERN.sub("", answer or "")
-    clean = clean.replace("**", "").replace("##", "").replace("# ", "")
-    clean = "\n".join(l for l in clean.split("\n") if l.strip() or not clean.strip())
+    clean = answer or ""
+    # Strip separatori
+    clean = _SEP_PATTERN.sub("", clean)
+    # Strip bold/markdown
+    clean = clean.replace("**", "").replace("*", "").replace("##", "").replace("# ", "")
+    # Strip icona+nome che Claude potrebbe aver messo (spesso sbagliata)
+    first_line = clean.split("\n")[0].strip()
+    for _ic in _CHIEF_ICONS.values():
+        if first_line.startswith(_ic):
+            clean = "\n".join(clean.split("\n")[1:])
+            break
+    # Pulisci righe vuote multiple
+    lines = [l for l in clean.split("\n") if l.strip()]
+    clean = "\n".join(lines)
     while "\n\n\n" in clean:
         clean = clean.replace("\n\n\n", "\n\n")
     clean = clean.strip()
-    # Se la risposta inizia gia' con l'icona del Chief, non duplicare
-    if icon and clean.startswith(icon):
-        return clean
-    # Se inizia con qualsiasi icona Chief nota, non aggiungere prefisso
-    for _ic in _CHIEF_ICONS.values():
-        if clean.startswith(_ic):
-            return clean
     return icon + " " + name + "\n\n" + clean
 
 

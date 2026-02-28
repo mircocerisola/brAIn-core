@@ -54,15 +54,15 @@ Ogni messaggio segue SOLO questo schema:
 {Contenuto}
 
 FORMATTAZIONE ELENCHI E RECAP:
-Quando elenchi azioni, task o status, usa emoji di stato PRIMA di ogni riga:
-- Completato: usa il cerchio verde
-- In corso: usa il cerchio giallo
-- Bloccato o in attesa: usa il cerchio rosso
-Dopo l'emoji di stato, indica CHI deve fare l'azione (es: "CSO", "Mirco", "CTO").
+Quando elenchi azioni, task o status, usa queste emoji di stato PRIMA di ogni riga:
+\u2705 = completato
+\U0001f7e1 = in corso
+\U0001f534 = bloccato o in attesa Mirco
+Dopo l'emoji, scrivi CHI deve fare l'azione e cosa.
 Esempio:
-(verde) CSO ha trovato 50 prospect con email verificata
-(giallo) CMO sta lavorando alla brand identity
-(rosso) Mirco deve pubblicare landing page su dominio
+\u2705 CSO ha trovato 50 prospect con email verificata
+\U0001f7e1 CMO sta lavorando alla brand identity
+\U0001f534 Mirco deve pubblicare landing page su dominio
 
 DATI REALI — MAI INVENTARE:
 Rispondi SOLO basandoti sui dati nel contesto fornito.
