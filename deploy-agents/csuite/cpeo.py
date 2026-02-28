@@ -524,7 +524,7 @@ def daily_gap_analysis() -> Dict[str, Any]:
         cap_count = 0
         try:
             r = supabase.table("capability_log").select("id") \
-                .gte("created_at", week_ago).execute()
+                .gte("discovered_at", week_ago).execute()
             cap_count = len(r.data or [])
             sources_checked["new_capabilities"] = cap_count
         except Exception:
