@@ -593,6 +593,19 @@ async def run_coo_accelerator_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_coo_health_endpoint(request):
+    """POST /coo/health — controlla anomalie cantieri (loop, stalli, silenzi)."""
+    try:
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        result = coo.check_project_health()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_coo_snapshot_endpoint(request):
     """POST /coo/snapshot — genera snapshot giornaliero brAIn."""
     try:

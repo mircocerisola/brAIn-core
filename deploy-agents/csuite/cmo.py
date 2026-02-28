@@ -26,6 +26,12 @@ _BOZZA_KEYWORDS = [
     "crea immagine", "crea logo", "grafica",
 ]
 
+# Keyword che forzano un NUOVO concept (bypass feedback mode)
+_NEW_CONCEPT_KEYWORDS = [
+    "rifai", "ricrea", "nuova landing", "nuovo concept", "nuova bozza",
+    "ricomincia", "da zero", "rifai da capo", "genera nuova",
+]
+
 
 def format_cmo_message(titolo, contenuto=""):
     """Backward-compat wrapper. Usa fmt('cmo', ...) per nuovo codice."""
@@ -72,14 +78,33 @@ class CMO(BaseChief):
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
                         project_scope_id=None, recent_messages=None):
-        """Override: logging completo + keyword trigger per bozza visiva."""
+        """Override: logging completo + keyword trigger per bozza visiva.
+        v5.36d: distingue nuovo concept da feedback su concept esistente.
+        """
         logger.info("[CMO] answer_question ricevuta: %s", question[:200])
 
-        # Keyword detection per bozza visiva
         q_lower = question.lower()
         matched_kw = [kw for kw in _BOZZA_KEYWORDS if kw in q_lower]
+
         if matched_kw:
-            logger.info("[CMO] Keyword bozza rilevate: %s", matched_kw)
+            # Verifica se e' una richiesta di NUOVO concept o FEEDBACK su esistente
+            force_new = any(kw in q_lower for kw in _NEW_CONCEPT_KEYWORDS)
+
+            if not force_new:
+                # Controlla se esiste gia' un landing_brief per questo progetto
+                _has_brief = self._project_has_landing_brief(project_scope_id)
+                if _has_brief:
+                    # Concept gia' esistente: tratta come feedback, non rigenerare
+                    logger.info("[CMO] Brief esistente, tratto come feedback (keywords: %s)", matched_kw)
+                    return super().answer_question(
+                        question, user_context=user_context,
+                        project_context=project_context,
+                        topic_scope_id=topic_scope_id,
+                        project_scope_id=project_scope_id,
+                        recent_messages=recent_messages,
+                    )
+
+            logger.info("[CMO] Keyword bozza + nuovo concept: %s (force=%s)", matched_kw, force_new)
             return self._handle_bozza_request(question, project_scope_id)
 
         # Risposta standard via BaseChief
@@ -93,6 +118,31 @@ class CMO(BaseChief):
         )
         logger.info("[CMO] Risposta generata: %d chars", len(response or ""))
         return response
+
+    def _project_has_landing_brief(self, project_scope_id):
+        """Verifica se esiste gia' un landing_brief in project_assets."""
+        pid = None
+        if project_scope_id:
+            try:
+                pid = int(project_scope_id)
+            except (ValueError, TypeError):
+                pass
+        if not pid:
+            try:
+                r = supabase.table("projects").select("id") \
+                    .neq("status", "archived").order("created_at", desc=True).limit(1).execute()
+                if r.data:
+                    pid = r.data[0]["id"]
+            except Exception:
+                return False
+        if not pid:
+            return False
+        try:
+            r = supabase.table("project_assets").select("id") \
+                .eq("project_id", pid).eq("asset_type", "landing_brief").limit(1).execute()
+            return bool(r.data)
+        except Exception:
+            return False
 
     def _handle_bozza_request(self, question, project_scope_id=None):
         """Gestisce richiesta bozza/landing: estrai project, lancia design_landing_concept."""

@@ -461,6 +461,86 @@ class COO(BaseChief):
             logger.warning("[COO] accelerate_open_cantieri: %s", e)
             return {"error": str(e)}
 
+    def check_project_health(self):
+        """v5.36d: Controlla anomalie nei cantieri attivi.
+        Rileva: loop messaggi ripetuti, Chief bloccati, topic senza attivita'.
+        Invia alert a Mirco se trova problemi.
+        """
+        alerts = []
+        try:
+            projects = supabase.table("projects").select("id,name,brand_name,topic_id,status") \
+                .eq("status", "active").not_.is_("topic_id", "null").execute()
+        except Exception as e:
+            logger.warning("[COO] check_project_health projects: %s", e)
+            return {"error": str(e)}
+
+        for proj in (projects.data or []):
+            topic_id = proj.get("topic_id")
+            brand = proj.get("brand_name") or proj.get("name", "?")
+            if not topic_id:
+                continue
+
+            # Controlla ultimi 20 messaggi nel topic
+            try:
+                scope_id = None
+                r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+                if r.data:
+                    scope_id = r.data[0]["value"] + ":" + str(topic_id)
+
+                if not scope_id:
+                    continue
+
+                msgs = supabase.table("topic_conversation_history").select("role,text,created_at") \
+                    .eq("scope_id", scope_id).order("created_at", desc=True).limit(20).execute()
+                bot_msgs = [m for m in (msgs.data or []) if m.get("role") == "assistant"]
+            except Exception as e:
+                logger.warning("[COO] health check topic %s: %s", topic_id, e)
+                continue
+
+            if len(bot_msgs) < 3:
+                continue
+
+            # Detect loop: 3+ risposte identiche consecutive
+            texts = [m.get("text", "")[:200] for m in bot_msgs[:5]]
+            if len(texts) >= 3 and texts[0] == texts[1] == texts[2]:
+                alerts.append({
+                    "project": brand,
+                    "topic_id": topic_id,
+                    "type": "loop_detected",
+                    "detail": "3+ risposte identiche consecutive: " + texts[0][:80],
+                })
+
+            # Detect stallo: nessun messaggio bot nelle ultime 6 ore ma user attivo
+            try:
+                from datetime import timedelta
+                six_h_ago = (now_rome() - timedelta(hours=6)).isoformat()
+                recent = supabase.table("topic_conversation_history").select("role") \
+                    .eq("scope_id", scope_id).gte("created_at", six_h_ago).execute()
+                user_recent = [m for m in (recent.data or []) if m.get("role") == "user"]
+                bot_recent = [m for m in (recent.data or []) if m.get("role") == "assistant"]
+                if len(user_recent) >= 3 and len(bot_recent) == 0:
+                    alerts.append({
+                        "project": brand,
+                        "topic_id": topic_id,
+                        "type": "bot_silent",
+                        "detail": f"{len(user_recent)} messaggi utente senza risposta bot in 6h",
+                    })
+            except Exception:
+                pass
+
+        # Invia alert se trovati
+        if alerts:
+            from core.utils import notify_telegram
+            alert_text = "\u2699\ufe0f COO\n\u26a0\ufe0f ANOMALIE RILEVATE:\n\n"
+            for a in alerts:
+                alert_text += f"Progetto: {a['project']}\n"
+                alert_text += f"Tipo: {a['type']}\n"
+                alert_text += f"Dettaglio: {a['detail']}\n\n"
+            notify_telegram(alert_text, level="warning", source="coo_health")
+            logger.warning("[COO] Health check: %d anomalie trovate", len(alerts))
+
+        return {"status": "ok", "alerts": alerts}
+
     def _check_and_remind(self, project):
         """Controlla task di un progetto e invia reminder per quelli bloccati."""
         project_id = project["id"]
