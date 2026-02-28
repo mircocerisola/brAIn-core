@@ -2164,3 +2164,249 @@ class COO(BaseChief):
             self._send_to_topic(thread_id, msg)
         else:
             self.notify_mirco(msg, level="warning")
+
+    # ================================================================
+    # v5.37: COO PROACTIVE ORCHESTRATION
+    # Reagisce ad eventi, crea TODO, coordina handoff, invia status
+    # ================================================================
+
+    # Landing flow steps: CMO mockup → Mirco approva → CTO HTML → Mirco approva deploy → CSO email
+    _LANDING_FLOW_TASKS = [
+        {"desc": "Generare concept landing (mockup + brief)", "owner": "cmo", "priority": "P0"},
+        {"desc": "Approvare concept landing", "owner": "mirco", "priority": "P0"},
+        {"desc": "Costruire landing page HTML dal brief", "owner": "cto", "priority": "P0"},
+        {"desc": "Approvare landing per deploy", "owner": "mirco", "priority": "P0"},
+        {"desc": "Raccogliere email target per lancio", "owner": "cso", "priority": "P1"},
+        {"desc": "Preparare documenti legali (privacy, cookie, terms)", "owner": "clo", "priority": "P1"},
+    ]
+
+    def setup_landing_flow(self, project_id):
+        """Crea TODO list completa per il flow landing page di un progetto.
+        Chiamato automaticamente quando il CMO avvia design_landing_concept.
+        """
+        # Leggi dati progetto
+        brand = ""
+        slug = ""
+        topic_id = None
+        try:
+            r = supabase.table("projects").select("brand_name,name,slug,topic_id") \
+                .eq("id", project_id).execute()
+            if r.data:
+                brand = r.data[0].get("brand_name") or r.data[0].get("name", "")
+                slug = r.data[0].get("slug") or brand.lower().replace(" ", "-")
+                topic_id = r.data[0].get("topic_id")
+        except Exception as e:
+            logger.warning("[COO] setup_landing_flow read: %s", e)
+            return {"error": str(e)}
+
+        if not slug:
+            return {"error": "progetto non trovato"}
+
+        # Controlla se flow gia' creato (evita duplicati)
+        existing = self._load_todo_list(slug)
+        landing_tasks = [t for t in existing if "landing" in (t.get("task_description") or "").lower()]
+        if landing_tasks:
+            logger.info("[COO] Landing flow gia' esistente per %s (%d task)", slug, len(landing_tasks))
+            return {"status": "already_exists", "tasks": len(landing_tasks)}
+
+        # Crea task
+        created = []
+        for step in self._LANDING_FLOW_TASKS:
+            task_id = self._add_todo_task(
+                project_slug=slug,
+                task_description=step["desc"],
+                owner_chief=step["owner"],
+                priority=step["priority"],
+                project_id=project_id,
+            )
+            if task_id:
+                created.append(task_id)
+
+        # Notifica nel topic
+        if topic_id:
+            todo_tasks = self._load_todo_list(slug)
+            text = fmt("coo", "Piano operativo " + brand,
+                "Ho creato la TODO list per il lancio landing:\n\n"
+                + self._format_todo_list(todo_tasks)
+                + "\n\nCoordino io il team. Ogni Chief sa cosa fare.")
+            self._send_to_topic(topic_id, text)
+
+        logger.info("[COO] Landing flow creato per %s: %d task", slug, len(created))
+        return {"status": "ok", "tasks_created": len(created), "project_slug": slug}
+
+    def process_agent_events(self):
+        """Processa agent_events non gestiti e reagisce proattivamente.
+        Chiamato periodicamente (ogni 5 min) o su trigger.
+        """
+        processed = 0
+        try:
+            r = supabase.table("agent_events").select("*") \
+                .eq("status", "pending").order("created_at").limit(20).execute()
+        except Exception as e:
+            logger.warning("[COO] process_agent_events read: %s", e)
+            return {"error": str(e)}
+
+        for event in (r.data or []):
+            event_id = event.get("id")
+            event_type = event.get("event_type", "")
+            payload = {}
+            try:
+                payload = json.loads(event.get("payload") or "{}")
+            except Exception:
+                pass
+
+            handled = False
+
+            # --- Landing concept creato → crea TODO list flow ---
+            if event_type == "landing_concept_created":
+                project_id = payload.get("project_id")
+                if project_id:
+                    self.setup_landing_flow(project_id)
+                    # Marca CMO task come fatto
+                    slug = ""
+                    try:
+                        pr = supabase.table("projects").select("slug") \
+                            .eq("id", project_id).execute()
+                        if pr.data:
+                            slug = pr.data[0].get("slug") or ""
+                    except Exception:
+                        pass
+                    if slug:
+                        todo = self._load_todo_list(slug)
+                        for t in todo:
+                            if "generare concept" in (t.get("task_description") or "").lower() \
+                                    and t.get("status") == "da_fare":
+                                self._update_todo_status(t["id"], "fatto",
+                                    output_text="Mockup + brief inviati a Mirco")
+                    handled = True
+
+            # --- Landing brief approvato → avvia CTO HTML build ---
+            elif event_type == "landing_brief_approved":
+                project_id = payload.get("project_id")
+                if project_id:
+                    handled = self._handle_landing_approved(project_id, payload)
+
+            # --- Handoff completato → notifica nel topic ---
+            elif event_type == "handoff":
+                handled = True  # gia' gestito da complete_task_and_handoff
+
+            # --- Task delegation → aggiorna TODO ---
+            elif event_type == "task_delegation":
+                target = event.get("target_agent", "")
+                action_desc = payload.get("description") or payload.get("action", "")
+                if target and action_desc:
+                    handled = True
+
+            # Marca come processato
+            if handled:
+                try:
+                    supabase.table("agent_events").update({
+                        "status": "processed",
+                    }).eq("id", event_id).execute()
+                    processed += 1
+                except Exception:
+                    pass
+
+        logger.info("[COO] process_agent_events: %d processati", processed)
+        return {"status": "ok", "processed": processed}
+
+    def _handle_landing_approved(self, project_id, payload):
+        """Dopo approvazione landing: aggiorna TODO, coordina handoff a CTO."""
+        slug = ""
+        topic_id = None
+        brand = payload.get("brand", "")
+        try:
+            r = supabase.table("projects").select("slug,topic_id,brand_name,name") \
+                .eq("id", project_id).execute()
+            if r.data:
+                slug = r.data[0].get("slug") or ""
+                topic_id = r.data[0].get("topic_id")
+                if not brand:
+                    brand = r.data[0].get("brand_name") or r.data[0].get("name", "")
+        except Exception:
+            pass
+
+        if not slug:
+            return False
+
+        # Aggiorna TODO: marca "Approvare concept" come FATTO
+        todo = self._load_todo_list(slug)
+        for t in todo:
+            desc_lower = (t.get("task_description") or "").lower()
+            if "approvare concept" in desc_lower and t.get("status") == "da_fare":
+                self._update_todo_status(t["id"], "fatto",
+                    output_text="Concept approvato da Mirco")
+            if "generare concept" in desc_lower and t.get("status") == "da_fare":
+                self._update_todo_status(t["id"], "fatto",
+                    output_text="Mockup + brief completati")
+
+        # Notifica nel topic: handoff CMO → CTO
+        if topic_id:
+            self.set_active_chief(topic_id, "cto", project_slug=slug,
+                context="handoff da cmo: landing approvata")
+            updated_todo = self._load_todo_list(slug)
+            text = fmt("coo", "Passaggio al CTO",
+                "Mirco ha approvato il concept landing " + brand + ".\n"
+                "CTO: costruisci la landing HTML dal brief in project_assets.\n\n"
+                "TODO aggiornata:\n" + self._format_todo_list(updated_todo))
+            self._send_to_topic(topic_id, text)
+
+        logger.info("[COO] Landing approved handled: project #%d", project_id)
+        return True
+
+    def send_proactive_status(self):
+        """Invia status proattivo nei cantieri attivi se ci sono cambiamenti.
+        Chiamato ogni 2-3 ore per mantenere il team aggiornato.
+        """
+        try:
+            projects = supabase.table("projects").select("id,slug,brand_name,name,topic_id") \
+                .eq("cantiere_status", "open").not_.is_("topic_id", "null").execute()
+        except Exception as e:
+            logger.warning("[COO] send_proactive_status read: %s", e)
+            return {"error": str(e)}
+
+        sent = 0
+        for proj in (projects.data or []):
+            slug = proj.get("slug") or ""
+            topic_id = proj.get("topic_id")
+            brand = proj.get("brand_name") or proj.get("name", "?")
+            if not slug or not topic_id:
+                continue
+
+            todo = self._load_todo_list(slug)
+            if not todo:
+                continue
+
+            da_fare = [t for t in todo if t.get("status") == "da_fare"]
+            bloccati = [t for t in todo if t.get("status") == "bloccato"]
+
+            # Solo se ci sono task bloccati o attivi da notificare
+            if not da_fare and not bloccati:
+                continue
+
+            next_task = da_fare[0] if da_fare else None
+            next_owner = (next_task.get("owner_chief") or "?").upper() if next_task else "?"
+            next_desc = (next_task.get("task_description") or "?")[:50] if next_task else "?"
+
+            lines = [
+                "Status " + brand + ":",
+                self._format_todo_list(todo),
+            ]
+
+            if bloccati:
+                for b in bloccati:
+                    lines.append(
+                        "\u26a0\ufe0f " + (b.get("owner_chief") or "?").upper()
+                        + " bloccato: " + (b.get("blocked_reason") or "?")[:60])
+
+            if next_task:
+                lines.append("\nProssimo: " + next_owner + " deve " + next_desc)
+                if next_task.get("owner_chief") == "mirco":
+                    lines.append("\U0001f534 Mirco, servono le tue istruzioni.")
+
+            text = fmt("coo", "Status cantiere", "\n".join(lines))
+            self._send_to_topic(topic_id, text)
+            sent += 1
+
+        logger.info("[COO] Proactive status inviato per %d cantieri", sent)
+        return {"status": "ok", "cantieri_notified": sent}

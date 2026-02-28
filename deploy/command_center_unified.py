@@ -79,6 +79,71 @@ def _format_chief_response(chief_id, answer):
     return icon + " " + name + "\n\n" + clean
 
 
+_LONG_RESPONSE_THRESHOLD = 800  # chars: oltre questo, invia card + documento
+
+def _send_chief_response_smart(token, chat_id, thread_id, chief_id, full_answer):
+    """Invia risposta Chief: se corta → messaggio normale, se lunga → card breve + documento dettagli."""
+    formatted = _format_chief_response(chief_id, full_answer)
+
+    if len(formatted) <= _LONG_RESPONSE_THRESHOLD:
+        # Risposta corta: invio normale
+        payload = {"chat_id": chat_id, "text": formatted}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        http_requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json=payload, timeout=15,
+        )
+        return
+
+    # Risposta lunga: card riassuntiva + documento con dettagli
+    icon = _CHIEF_ICONS.get(chief_id, "")
+    name = _CHIEF_NAMES.get(chief_id, chief_id.upper() if chief_id else "Chief")
+
+    # Genera riassunto (prime 3 righe significative + "Dettagli nel documento allegato")
+    clean_lines = [l.strip() for l in formatted.split("\n") if l.strip()]
+    # Skip header (icon + name)
+    content_lines = clean_lines[1:] if len(clean_lines) > 1 else clean_lines
+    summary_lines = content_lines[:4]
+    summary = "\n".join(summary_lines)
+    if len(content_lines) > 4:
+        summary += "\n\n[Dettagli completi nel documento allegato]"
+    card_text = icon + " " + name + "\n\n" + summary
+
+    # 1. Invia card riassuntiva
+    payload = {"chat_id": chat_id, "text": card_text}
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+    http_requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        json=payload, timeout=15,
+    )
+
+    # 2. Invia documento con dettagli completi
+    import tempfile as _tempfile
+    chief_label = name.lower().replace(" ", "-")
+    ts = str(int(__import__("time").time()))
+    filename = f"{chief_label}-dettagli-{ts}.txt"
+    tmp_path = _tempfile.gettempdir() + "/" + filename
+    # Scrivi contenuto pulito senza icona/nome header
+    full_clean = formatted
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write(full_clean)
+        doc_payload = {"chat_id": chat_id, "caption": icon + " " + name + " — dettagli completi"}
+        if thread_id:
+            doc_payload["message_thread_id"] = thread_id
+        with open(tmp_path, "rb") as f:
+            http_requests.post(
+                f"https://api.telegram.org/bot{token}/sendDocument",
+                data=doc_payload,
+                files={"document": (filename, f, "text/plain")},
+                timeout=15,
+            )
+    except Exception as e:
+        logger.warning(f"[SMART_RESPONSE] doc send error: {e}")
+
+
 # Cache topic_id → domain per routing diretto ai Chief
 _chief_topic_cache: dict = {}   # thread_id (int) → domain (str)
 _chief_topic_cache_loaded: bool = False
@@ -2581,6 +2646,18 @@ async def handle_project_message(update, project):
 
     ctx = _session_context.get(chat_id, {})
 
+    # 3b. awaiting_landing_modify: Mirco invia feedback landing → CMO applica + rigenera mockup
+    if ctx.get("awaiting_landing_modify") and _is_mirco:
+        _alm_pid = _session_context[chat_id].pop("awaiting_landing_modify")
+        _alm_feedback = msg
+        def _handle_landing_modify():
+            if _CSUITE_DIRECT:
+                _cmo = _csuite_get_chief("marketing")
+                if _cmo:
+                    _cmo.handle_landing_modify(_alm_pid, feedback=_alm_feedback)
+        threading.Thread(target=_handle_landing_modify, daemon=True).start()
+        return
+
     # 4. awaiting_phone: salva telefono + genera invite link
     if ctx.get("awaiting_phone") == project_id and _is_mirco:
         phone = msg.strip()
@@ -3081,16 +3158,9 @@ async def handle_project_message(update, project):
                 _proj_chief_name = _chief_display
 
         if _proj_answer:
-            card = _format_chief_response(_chief_id, _proj_answer)[:1200]
             _token = os.getenv("TELEGRAM_BOT_TOKEN")
             if _token:
-                payload = {"chat_id": chat_id, "text": card}
-                if thread_id:
-                    payload["message_thread_id"] = thread_id
-                http_requests.post(
-                    f"https://api.telegram.org/bot{_token}/sendMessage",
-                    json=payload, timeout=15,
-                )
+                _send_chief_response_smart(_token, chat_id, thread_id, _chief_id, _proj_answer)
             _topic_buffer_add(chat_id, thread_id or 0, _proj_answer, role="bot")
             threading.Thread(
                 target=_trigger_extract_facts, args=(msg, _chief_id), daemon=True
@@ -4346,6 +4416,10 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 _cmo = _csuite_get_chief("marketing")
                 if _cmo:
                     _cmo.handle_landing_approve(_la_pid)
+                # v5.37: COO processa eventi (handoff a CTO + TODO update)
+                _coo = _csuite_get_chief("ops")
+                if _coo:
+                    _coo.process_agent_events()
         threading.Thread(target=_handle_landing_approve, daemon=True).start()
 
     elif data.startswith("landing_modify:"):
@@ -4969,15 +5043,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _is_codeaction = "<<CODEACTION_SENT>>" in str(_answer_t)
             _token_t = os.getenv("TELEGRAM_BOT_TOKEN")
             if _token_t and not _is_codeaction:
-                http_requests.post(
-                    f"https://api.telegram.org/bot{_token_t}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "message_thread_id": thread_id,
-                        "text": _format_chief_response(_chief_t.chief_id, _answer_t)[:3800],
-                    },
-                    timeout=15,
-                )
+                _send_chief_response_smart(_token_t, chat_id, thread_id, _chief_t.chief_id, _answer_t)
             # Storia garantita — scrittura sincrona DOPO risposta Chief
             _scope_write = f"{chat_id}:{thread_id}"
             _cid_write = _chief_t.chief_id

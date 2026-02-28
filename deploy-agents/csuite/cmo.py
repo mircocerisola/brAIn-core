@@ -472,6 +472,20 @@ class CMO(BaseChief):
                     "Stile: " + str(brief.get("style_notes", ""))[:200]))
 
         self._log_bozza_learning(project_id)
+
+        # v5.37: Notifica COO per creare TODO list landing flow
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "landing_concept_created",
+                "source_agent": "cmo",
+                "target_agent": "coo",
+                "payload": json.dumps({"project_id": project_id, "brand": brand}),
+                "status": "pending",
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] landing_concept_created event: %s", e)
+
         logger.info("[CMO] Landing concept generato per project #%d", project_id)
         return {"status": "ok", "project_id": project_id, "brief": brief}
 
@@ -909,9 +923,87 @@ class CMO(BaseChief):
         return {"status": "ok", "project_id": project_id}
 
     def handle_landing_modify(self, project_id, feedback=""):
-        """Callback: Mirco vuole modifiche al concept landing."""
-        logger.info("[CMO] Landing modify richiesta per project #%d", project_id)
-        return {"status": "awaiting_feedback", "project_id": project_id}
+        """Callback: Mirco invia feedback → aggiorna brief → rigenera mockup → nuova card approvazione.
+        v5.37: feedback applicato al brief esistente, non rigenerato da zero.
+        """
+        logger.info("[CMO] Landing modify: project #%d, feedback=%s", project_id, feedback[:100])
+        if not feedback:
+            return {"status": "awaiting_feedback", "project_id": project_id}
+
+        # 1. Leggi brief esistente
+        existing_brief = {}
+        try:
+            r = supabase.table("project_assets").select("content") \
+                .eq("project_id", project_id).eq("asset_type", "landing_brief").execute()
+            if r.data and r.data[0].get("content"):
+                existing_brief = json.loads(r.data[0]["content"])
+        except Exception as e:
+            logger.warning("[CMO] handle_landing_modify read brief: %s", e)
+
+        # 2. Leggi dati progetto
+        brand = ""
+        topic_id = None
+        try:
+            r = supabase.table("projects").select("brand_name,name,topic_id") \
+                .eq("id", project_id).execute()
+            if r.data:
+                brand = r.data[0].get("brand_name") or r.data[0].get("name", "")
+                topic_id = r.data[0].get("topic_id")
+        except Exception:
+            pass
+
+        # 3. Notifica
+        if topic_id:
+            self._send_report_to_topic_id(topic_id,
+                fmt("cmo", "Modifiche in corso",
+                    "Aggiorno il concept con il tuo feedback. 1-2 minuti."))
+
+        # 4. Applica feedback al brief via Claude
+        modify_prompt = (
+            "Sei il CMO di brAIn. Devi AGGIORNARE un brief di design landing page.\n"
+            "NON scrivere MAI codice (HTML, CSS, JS).\n\n"
+            "BRIEF ATTUALE:\n" + json.dumps(existing_brief, indent=2, ensure_ascii=False)[:3000] + "\n\n"
+            "FEEDBACK DI MIRCO:\n" + feedback + "\n\n"
+            "Applica le modifiche richieste al brief e rispondi SOLO con il JSON aggiornato.\n"
+            "Mantieni la stessa struttura JSON. Modifica SOLO cio che Mirco ha chiesto."
+        )
+
+        try:
+            updated_raw = self.call_claude(modify_prompt, model="claude-sonnet-4-6", max_tokens=2000)
+            updated_brief = self._parse_brief_json(updated_raw)
+            if not updated_brief:
+                updated_brief = existing_brief
+        except Exception as e:
+            logger.warning("[CMO] modify brief Claude error: %s", e)
+            updated_brief = existing_brief
+
+        # 5. Salva brief aggiornato
+        try:
+            supabase.table("project_assets").upsert({
+                "project_id": project_id,
+                "asset_type": "landing_brief",
+                "content": json.dumps(updated_brief),
+                "filename": brand.lower().replace(" ", "-") + "-brief.json",
+                "updated_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] save updated brief: %s", e)
+
+        # 6. Rigenera mockup con brief aggiornato
+        mockup_path = self._generate_landing_mockup(brand, updated_brief, project_id)
+
+        # 7. Invia nuova card approvazione
+        if topic_id and mockup_path:
+            self._send_landing_approval_card(project_id, brand, updated_brief, mockup_path, topic_id)
+        elif topic_id:
+            self._send_report_to_topic_id(topic_id,
+                fmt("cmo", "Brief aggiornato " + brand,
+                    "Palette: " + str(updated_brief.get("palette", {})) + "\n"
+                    "Hero: " + str(updated_brief.get("hero", {}).get("headline", "")) + "\n"
+                    "Approvi questo concept aggiornato?"))
+
+        logger.info("[CMO] Landing modify completato project #%d", project_id)
+        return {"status": "ok", "project_id": project_id, "brief": updated_brief}
 
     def handle_landing_redo(self, project_id):
         """Callback: Mirco chiede di rifare il concept landing da zero."""

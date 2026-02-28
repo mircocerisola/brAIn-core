@@ -606,6 +606,23 @@ async def run_coo_health_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_coo_orchestrate_endpoint(request):
+    """POST /coo/orchestrate — processa eventi + status proattivo cantieri."""
+    try:
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        events_result = coo.process_agent_events()
+        status_result = coo.send_proactive_status()
+        return web.json_response({
+            "events": events_result,
+            "proactive_status": status_result,
+        })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_coo_snapshot_endpoint(request):
     """POST /coo/snapshot — genera snapshot giornaliero brAIn."""
     try:

@@ -58,6 +58,7 @@ from core.endpoints import (
     run_coo_project_daily_endpoint,
     run_coo_accelerator_endpoint,
     run_coo_health_endpoint,
+    run_coo_orchestrate_endpoint,
     run_coo_snapshot_endpoint,
     run_coo_rename_cantiere_endpoint,
     # v5.34: CTO Phoenix/Security/Webhook + CSO auto + CMO ads + CLO legal + CPeO versioning
@@ -149,6 +150,7 @@ async def main():
     app.router.add_post("/coo/project-daily", run_coo_project_daily_endpoint)
     app.router.add_post("/coo/accelerator", run_coo_accelerator_endpoint)
     app.router.add_post("/coo/health", run_coo_health_endpoint)
+    app.router.add_post("/coo/orchestrate", run_coo_orchestrate_endpoint)
     app.router.add_post("/coo/snapshot", run_coo_snapshot_endpoint)
     app.router.add_post("/coo/rename-cantiere", run_coo_rename_cantiere_endpoint)
 
