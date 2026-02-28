@@ -729,6 +729,38 @@ async def run_cpeo_training_request_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_cpeo_gap_profile_endpoint(request):
+    """POST /cpeo/gap-profile — {chief_name} — gap profile singolo Chief."""
+    try:
+        data = await request.json()
+        chief_name = data.get("chief_name", "")
+        if not chief_name:
+            return web.json_response({"error": "chief_name obbligatorio"}, status=400)
+        from csuite.cpeo import compute_chief_gap_profile
+        result = compute_chief_gap_profile(chief_name)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_post_task_learning_endpoint(request):
+    """POST /cpeo/post-task-learning — {chief_name, task_title, task_result, competenza, success}."""
+    try:
+        data = await request.json()
+        chief_name = data.get("chief_name", "")
+        task_title = data.get("task_title", "")
+        task_result = data.get("task_result", "")
+        competenza = data.get("competenza", "")
+        success = data.get("success", True)
+        if not chief_name or not competenza:
+            return web.json_response({"error": "chief_name e competenza obbligatori"}, status=400)
+        from csuite.cpeo import post_task_learning
+        result = post_task_learning(chief_name, task_title, task_result, competenza, success)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── Memory endpoints ──────────────────────────────────────────
 
 

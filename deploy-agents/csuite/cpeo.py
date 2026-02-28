@@ -1,4 +1,5 @@
 """CPeO — Chief People & Evolution Officer. Dominio: team, manager, coaching Chief, knowledge base.
+v5.26: compute_chief_gap_profile, daily_gap_analysis basato su agent_capabilities 0-100.
 v5.25: create_training_plan, daily_gap_analysis, handle_training_request.
 """
 from __future__ import annotations
@@ -444,150 +445,154 @@ def handle_training_cancel(plan_id: int) -> Dict[str, Any]:
 
 
 # ============================================================
-# TASK 2: daily_gap_analysis()
+# FIX 3: compute_chief_gap_profile(chief_name)
+# ============================================================
+
+_GAP_THRESHOLD = 20  # gap >= 20 punti → training
+
+
+def compute_chief_gap_profile(chief_name: str) -> Dict[str, Any]:
+    """
+    Calcola profilo gap per un Chief da agent_capabilities.
+    1. Legge tutte le competenze del Chief
+    2. Calcola gap = livello_atteso - score_percentuale (colonna GENERATED)
+    3. gap_score_globale = media pesata (peso = livello_atteso)
+    4. Ordina per gap decrescente → top 3
+    5. Salva in gap_analysis_log
+    6. Propone training solo sulle top 3 con gap >= 20
+    """
+    chief_id = chief_name.lower().replace(" ", "")
+    logger.info("[CPeO] compute_chief_gap_profile: %s", chief_id)
+
+    try:
+        r = supabase.table("agent_capabilities").select(
+            "competenza,categoria,livello_atteso,score_percentuale,gap"
+        ).eq("agent_name", chief_id).execute()
+        rows = r.data or []
+    except Exception as e:
+        logger.warning("[CPeO] agent_capabilities read %s: %s", chief_id, e)
+        return {"status": "error", "error": str(e)}
+
+    if not rows:
+        return {"status": "error", "error": "nessuna competenza per " + chief_id}
+
+    # Calcola gap_score_globale = media pesata dei gap (peso = livello_atteso)
+    total_weight = 0.0
+    weighted_gap_sum = 0.0
+    for row in rows:
+        la = row.get("livello_atteso") or 80
+        gap_val = row.get("gap") or 0
+        weighted_gap_sum += gap_val * la
+        total_weight += la
+
+    gap_score_globale = round(weighted_gap_sum / total_weight, 2) if total_weight > 0 else 0.0
+
+    # Ordina per gap decrescente
+    sorted_rows = sorted(rows, key=lambda x: (x.get("gap") or 0), reverse=True)
+
+    # Top 3 gap prioritari
+    top3 = sorted_rows[:3]
+    top3_topics = [row["competenza"] for row in top3]
+    top3_gaps = [row.get("gap", 0) for row in top3]
+
+    # Salva in gap_analysis_log
+    now = now_rome()
+    sources_checked = {
+        "competenze_totali": len(rows),
+        "gap_score_globale": gap_score_globale,
+        "top3_gaps": [{"competenza": t["competenza"], "gap": t.get("gap", 0), "categoria": t.get("categoria", "")} for t in top3],
+    }
+
+    # Training proposto se almeno 1 delle top 3 ha gap >= threshold
+    training_needed = any(g >= _GAP_THRESHOLD for g in top3_gaps)
+
+    gap_entry = {
+        "chief_name": chief_id,
+        "gap_score": gap_score_globale,
+        "gap_topics": json.dumps(top3_topics),
+        "sources_checked": json.dumps(sources_checked),
+        "training_proposed": training_needed,
+        "created_at": now.isoformat(),
+    }
+
+    plan_id = None
+    if training_needed:
+        # Training sulla competenza con gap piu alto
+        top_competenza = top3[0]["competenza"].replace("_", " ")
+        try:
+            plan_result = create_training_plan(chief_id, top_competenza)
+            plan_id = plan_result.get("plan_id")
+        except Exception as e:
+            logger.warning("[CPeO] auto training %s: %s", chief_id, e)
+
+    if plan_id:
+        gap_entry["training_plan_id"] = plan_id
+
+    try:
+        supabase.table("gap_analysis_log").insert(gap_entry).execute()
+    except Exception as e:
+        logger.warning("[CPeO] gap_analysis_log insert: %s", e)
+
+    return {
+        "status": "ok",
+        "chief_id": chief_id,
+        "gap_score_globale": gap_score_globale,
+        "competenze_totali": len(rows),
+        "top3": [{"competenza": t["competenza"], "gap": t.get("gap", 0), "categoria": t.get("categoria", "")} for t in top3],
+        "training_proposed": training_needed,
+        "plan_id": plan_id,
+    }
+
+
+# ============================================================
+# TASK 2: daily_gap_analysis() — v5.26 basata su agent_capabilities
 # ============================================================
 
 def daily_gap_analysis() -> Dict[str, Any]:
     """
     Gap analysis giornaliera su tutti i 7 Chief (incluso CPeO).
-    Analizza: org_knowledge, chief_knowledge, agent_logs, training_plans, capability_log.
-    gap_score 0-1. Se >= 0.3, chiama create_training_plan().
+    Usa compute_chief_gap_profile() per ogni Chief.
+    Training proposto se gap >= 20 punti su top 3 competenze.
     """
     start = now_rome()
-    week_ago = (start - timedelta(days=7)).isoformat()
-    logger.info("[CPeO] Avvio daily_gap_analysis")
+    logger.info("[CPeO] Avvio daily_gap_analysis v5.26")
 
     results_list: List[Dict[str, Any]] = []
     training_proposed = 0
 
     for chief_id in _ALL_CHIEF_IDS:
-        gap_score = 0.0
-        gap_topics: List[str] = []
-        sources_checked: Dict[str, Any] = {}
+        profile = compute_chief_gap_profile(chief_id)
+        if profile.get("status") != "ok":
+            results_list.append({
+                "chief_id": chief_id,
+                "gap_score": 0,
+                "gap_topics": [],
+                "training_proposed": False,
+                "error": profile.get("error", "unknown"),
+            })
+            continue
 
-        # 1. Errori ultimi 7 giorni (peso 0.3)
-        error_count = 0
-        try:
-            r = supabase.table("agent_logs").select("id") \
-                .like("agent_id", "%" + chief_id + "%") \
-                .eq("status", "error") \
-                .gte("created_at", week_ago).execute()
-            error_count = len(r.data or [])
-            sources_checked["agent_logs_errors"] = error_count
-        except Exception:
-            pass
-        error_score = min(error_count / 10.0, 1.0) * 0.3
-
-        # 2. Routing fuori dominio (peso 0.25)
-        routing_count = 0
-        try:
-            chief_domain_map = {
-                "cso": "strategy", "coo": "ops", "cto": "tech",
-                "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
-            }
-            domain = chief_domain_map.get(chief_id, "")
-            r = supabase.table("chief_decisions").select("id") \
-                .eq("chief_domain", domain) \
-                .like("decision_type", "routed_to_%") \
-                .gte("created_at", week_ago).execute()
-            routing_count = len(r.data or [])
-            sources_checked["routing_misses"] = routing_count
-        except Exception:
-            pass
-        routing_score = min(routing_count / 5.0, 1.0) * 0.25
-
-        # 3. Knowledge growth (peso 0.2) — inverso: meno knowledge = piu gap
-        knowledge_count = 0
-        try:
-            r = supabase.table("chief_knowledge").select("id") \
-                .eq("chief_id", chief_id) \
-                .gte("created_at", week_ago).execute()
-            knowledge_count = len(r.data or [])
-            sources_checked["knowledge_added_7d"] = knowledge_count
-        except Exception:
-            pass
-        knowledge_score = max(0, (1.0 - knowledge_count / 5.0)) * 0.2
-
-        # 4. Training plans completati (peso 0.15) — inverso
-        training_count = 0
-        try:
-            r = supabase.table("training_plans").select("id") \
-                .eq("chief_name", chief_id) \
-                .eq("status", "approved").execute()
-            training_count = len(r.data or [])
-            sources_checked["training_approved"] = training_count
-        except Exception:
-            pass
-        training_score = max(0, (1.0 - training_count / 3.0)) * 0.15
-
-        # 5. Capability gap (peso 0.1) — nuove capability non integrate
-        cap_count = 0
-        try:
-            r = supabase.table("capability_log").select("id") \
-                .gte("discovered_at", week_ago).execute()
-            cap_count = len(r.data or [])
-            sources_checked["new_capabilities"] = cap_count
-        except Exception:
-            pass
-        cap_score = min(cap_count / 10.0, 1.0) * 0.1
-
-        gap_score = round(error_score + routing_score + knowledge_score + training_score + cap_score, 2)
-
-        # Identifica topic del gap
-        if error_count >= 3:
-            gap_topics.append("error_handling")
-        if routing_count >= 2:
-            gap_topics.append("domain_boundaries")
-        if knowledge_count == 0:
-            gap_topics.append("knowledge_stagnation")
-
-        # Salva in gap_analysis_log
-        gap_entry = {
-            "chief_name": chief_id,
-            "gap_score": gap_score,
-            "gap_topics": json.dumps(gap_topics),
-            "sources_checked": json.dumps(sources_checked),
-            "training_proposed": gap_score >= 0.3,
-            "created_at": start.isoformat(),
-        }
-
-        plan_id = None
-        if gap_score >= 0.3 and gap_topics:
-            # Proponi training
-            topic_for_training = gap_topics[0].replace("_", " ")
-            try:
-                plan_result = create_training_plan(chief_id, topic_for_training)
-                plan_id = plan_result.get("plan_id")
-                training_proposed += 1
-            except Exception as e:
-                logger.warning("[CPeO] auto training %s: %s", chief_id, e)
-
-        if plan_id:
-            gap_entry["training_plan_id"] = plan_id
-
-        try:
-            supabase.table("gap_analysis_log").insert(gap_entry).execute()
-        except Exception as e:
-            logger.warning("[CPeO] gap_analysis_log insert: %s", e)
+        if profile.get("training_proposed"):
+            training_proposed += 1
 
         results_list.append({
             "chief_id": chief_id,
-            "gap_score": gap_score,
-            "gap_topics": gap_topics,
-            "training_proposed": gap_score >= 0.3,
+            "gap_score": profile.get("gap_score_globale", 0),
+            "gap_topics": [t["competenza"] for t in profile.get("top3", [])],
+            "training_proposed": profile.get("training_proposed", False),
         })
 
     # Report sintetico in #people
     report_lines = []
     for r in results_list:
-        icon = "\u2705" if r["gap_score"] < 0.3 else "\u26a0\ufe0f"
+        icon = "\u2705" if not r.get("training_proposed") else "\u26a0\ufe0f"
         score_str = str(r["gap_score"])
-        topics_str = ", ".join(r["gap_topics"]) if r["gap_topics"] else "ok"
-        report_lines.append(icon + " " + r["chief_id"].upper() + " " + score_str + " " + topics_str)
+        topics_str = ", ".join(r.get("gap_topics", [])) if r.get("gap_topics") else "ok"
+        report_lines.append(icon + " " + r["chief_id"].upper() + " gap=" + score_str + " " + topics_str)
 
     report = (
         "\U0001f331 CPeO\n"
-        "Gap Analysis Giornaliera\n\n"
+        "Gap Analysis Giornaliera v5.26\n\n"
         + "\n".join(report_lines)
         + "\n\nTraining proposti: " + str(training_proposed)
     )
@@ -844,4 +849,105 @@ def coach_chiefs() -> Dict[str, Any]:
         "status": "ok",
         "learning_added": learning_added,
         "chief_status": chief_status,
+    }
+
+
+# ============================================================
+# FIX 4: post_task_learning — continuous learning
+# ============================================================
+
+def post_task_learning(
+    chief_name: str,
+    task_title: str,
+    task_result: str,
+    competenza: str,
+    success: bool,
+) -> Dict[str, Any]:
+    """
+    Chiamata dopo ogni task completato da un Chief.
+    - Aggiorna score_percentuale in agent_capabilities: +5 successo, -8 fallimento
+    - Salva lezione in org_knowledge
+    - Salva riga in agent_performance (se esiste)
+    """
+    chief_id = chief_name.lower().replace(" ", "")
+    now = now_rome()
+    delta = 5 if success else -8
+    logger.info("[CPeO] post_task_learning: %s/%s success=%s delta=%d", chief_id, competenza, success, delta)
+
+    # 1. Leggi score_percentuale attuale
+    old_score = 50
+    try:
+        r = supabase.table("agent_capabilities").select("score_percentuale") \
+            .eq("agent_name", chief_id).eq("competenza", competenza).execute()
+        if r.data:
+            old_score = r.data[0].get("score_percentuale", 50)
+    except Exception as e:
+        logger.warning("[CPeO] post_task_learning read: %s", e)
+
+    new_score = max(0, min(100, old_score + delta))
+
+    # 2. Aggiorna score_percentuale
+    try:
+        supabase.table("agent_capabilities").update({
+            "score_percentuale": new_score,
+            "updated_at": now.isoformat(),
+        }).eq("agent_name", chief_id).eq("competenza", competenza).execute()
+    except Exception as e:
+        logger.warning("[CPeO] post_task_learning update: %s", e)
+
+    # 3. Genera lezione con Haiku
+    outcome = "completato con successo" if success else "fallito"
+    lesson_prompt = (
+        "Il " + chief_id.upper() + " ha " + outcome + " il task: " + task_title + ".\n"
+        "Competenza: " + competenza + ". Risultato: " + task_result[:500] + "\n\n"
+        "Scrivi una lezione appresa in 1-2 frasi. Diretta, specifica, azionabile. Italiano."
+    )
+    lesson_text = ""
+    try:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
+            messages=[{"role": "user", "content": lesson_prompt}],
+        )
+        lesson_text = resp.content[0].text.strip()
+    except Exception as e:
+        logger.warning("[CPeO] lesson generation: %s", e)
+        lesson_text = chief_id.upper() + " " + outcome + ": " + task_title
+
+    # 4. Salva in org_knowledge
+    impact = "high" if abs(delta) >= 8 else "medium"
+    try:
+        supabase.table("org_knowledge").insert({
+            "title": "Learning " + chief_id.upper() + " " + competenza,
+            "content": lesson_text,
+            "category": "performance",
+            "source": "post_task_learning",
+        }).execute()
+    except Exception as e:
+        logger.warning("[CPeO] org_knowledge insert: %s", e)
+
+    # 5. Salva in agent_performance (se tabella esiste)
+    try:
+        supabase.table("agent_performance").insert({
+            "agent_name": chief_id,
+            "task_title": task_title[:200],
+            "competenza": competenza,
+            "success": success,
+            "score_before": old_score,
+            "score_after": new_score,
+            "lesson": lesson_text[:500],
+            "created_at": now.isoformat(),
+        }).execute()
+    except Exception:
+        pass  # tabella potrebbe non esistere
+
+    logger.info("[CPeO] post_task_learning done: %s/%s %d->%d", chief_id, competenza, old_score, new_score)
+    return {
+        "status": "ok",
+        "chief_id": chief_id,
+        "competenza": competenza,
+        "old_score": old_score,
+        "new_score": new_score,
+        "delta": delta,
+        "lesson": lesson_text,
     }
