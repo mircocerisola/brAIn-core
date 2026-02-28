@@ -1,4 +1,5 @@
 """CLO — Chief Legal Officer. Dominio: legale, compliance, contratti, rischi normativi.
+v5.34: daily_legal_scan() — monitoraggio giornaliero trigger legali (GDPR, AI Act, ePrivacy).
 v5.32: generate_legal_documents() — Privacy Policy, Cookie Policy, ToS, AI Disclosure.
        legal_gate_check() — nessun MVP online senza approvazione CLO.
 """
@@ -388,3 +389,76 @@ class CLO(BaseChief):
             )
         except Exception as e:
             logger.warning("[CLO] send_to_topic: %s", e)
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 7: Daily legal scan
+    # ------------------------------------------------------------------
+
+    def daily_legal_scan(self):
+        """Scan giornaliero alle 08:00: cerca aggiornamenti normativi via Perplexity.
+        Focus: GDPR, AI Act, ePrivacy, normativa italiana AI e dati.
+        """
+        logger.info("[CLO] daily_legal_scan: inizio")
+        from core.utils import search_perplexity
+
+        topics = [
+            "GDPR enforcement actions Italy February 2026",
+            "EU AI Act implementation updates February 2026",
+            "ePrivacy regulation changes 2026",
+            "Italy data protection authority Garante new guidelines 2026",
+        ]
+
+        findings = []
+        for topic in topics:
+            try:
+                result = search_perplexity(topic, max_tokens=500)
+                if result and len(result) > 50:
+                    findings.append({"topic": topic, "content": result[:1000]})
+            except Exception as e:
+                logger.warning("[CLO] legal scan topic '%s': %s", topic[:30], e)
+
+        if not findings:
+            logger.info("[CLO] daily_legal_scan: nessun aggiornamento trovato")
+            return {"status": "ok", "findings": 0}
+
+        # Analizza con Haiku per estrarre azioni richieste
+        analysis_prompt = (
+            "Sei il CLO di brAIn (organismo AI). Analizza questi aggiornamenti normativi "
+            "e identifica SOLO quelli rilevanti per un'azienda AI-native italiana.\n\n"
+        )
+        for f in findings:
+            analysis_prompt += "TOPIC: " + f["topic"] + "\n" + f["content"][:500] + "\n\n"
+        analysis_prompt += (
+            "Per ogni aggiornamento rilevante, indica:\n"
+            "1. Cosa e' cambiato\n"
+            "2. Impatto su brAIn\n"
+            "3. Azione richiesta (se presente)\n"
+            "Scrivi in italiano, max 300 parole."
+        )
+
+        try:
+            analysis = self.call_claude(
+                analysis_prompt, model="claude-haiku-4-5-20251001", max_tokens=400
+            )
+        except Exception:
+            analysis = "Trovati " + str(len(findings)) + " aggiornamenti normativi da verificare."
+
+        # Salva in org_knowledge
+        try:
+            supabase.table("org_knowledge").insert({
+                "title": "Legal Scan " + now_rome().strftime("%Y-%m-%d"),
+                "content": analysis[:3000],
+                "category": "legal_update",
+                "source": "clo_daily_scan",
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CLO] save legal scan: %s", e)
+
+        # Invia al topic CLO
+        msg = fmt("clo", "Scan Legale Giornaliero",
+                  str(len(findings)) + " aggiornamenti trovati\n\n" + analysis[:800])
+        self._send_to_chief_topic(msg)
+
+        logger.info("[CLO] daily_legal_scan: %d findings", len(findings))
+        return {"status": "ok", "findings": len(findings), "analysis": analysis[:500]}

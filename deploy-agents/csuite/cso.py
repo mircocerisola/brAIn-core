@@ -1,4 +1,5 @@
 """CSO — Chief Strategy Officer. Dominio: strategia, mercati, competizione, opportunita'.
+v5.34: auto_pipeline (auto-score, auto-archive, auto-generate solutions).
 v5.28: plan_smoke_test, delegate_execution_to_coo, analyze_bos_opportunity (strategy-only).
 v5.15: prospect reali via Perplexity + start_smoke_test autonomo + istruzioni potenziate.
 """
@@ -655,3 +656,115 @@ class CSO(BaseChief):
             self._send_to_topic(thread_id, text)
 
         return {"status": "ok", "problem_id": problem_id, "analysis": analysis}
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 5: Auto Pipeline
+    # ------------------------------------------------------------------
+
+    def auto_pipeline(self):
+        """Pipeline automatica: auto-score problemi, auto-archive bassi, auto-genera soluzioni.
+        Scheduled: giornaliero alle 09:00.
+        """
+        logger.info("[CSO] auto_pipeline: inizio")
+        results = {"scored": 0, "archived": 0, "solutions_generated": 0}
+
+        # 1. Auto-score: problemi con status='new' senza weighted_score
+        try:
+            r = supabase.table("problems") \
+                .select("id,title,description,weighted_score") \
+                .eq("status", "new").limit(20).execute()
+            for problem in (r.data or []):
+                if problem.get("weighted_score") and problem["weighted_score"] > 0:
+                    continue
+                # Score via Haiku
+                score_prompt = (
+                    "Valuta questo problema su 7 parametri (0.0-1.0 ciascuno).\n"
+                    "Parametri: market_size, willingness_to_pay, urgency, competition_gap, "
+                    "ai_solvability, time_to_market, recurring_potential.\n"
+                    "Pesi: 0.20, 0.15, 0.15, 0.15, 0.15, 0.10, 0.10.\n\n"
+                    "Problema: " + (problem.get("title") or "") + "\n"
+                    + (problem.get("description") or "")[:500] + "\n\n"
+                    "Rispondi SOLO con JSON: {\"weighted_score\": 0.XX}"
+                )
+                try:
+                    raw = self.call_claude(
+                        score_prompt, model="claude-haiku-4-5-20251001", max_tokens=100
+                    )
+                    score_data = json.loads(raw.strip().strip("`").replace("json", ""))
+                    ws = float(score_data.get("weighted_score", 0))
+                    if 0 < ws <= 1:
+                        supabase.table("problems").update({
+                            "weighted_score": ws,
+                        }).eq("id", problem["id"]).execute()
+                        results["scored"] += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("[CSO] auto_pipeline scoring error: %s", e)
+
+        # 2. Auto-archive: problemi con weighted_score < 0.3 e status='new'
+        try:
+            r = supabase.table("problems") \
+                .select("id,title,weighted_score") \
+                .eq("status", "new").lt("weighted_score", 0.3).execute()
+            for problem in (r.data or []):
+                if not problem.get("weighted_score"):
+                    continue
+                supabase.table("problems").update({
+                    "status": "archived",
+                }).eq("id", problem["id"]).execute()
+                results["archived"] += 1
+                logger.info("[CSO] auto-archived problem %d: score=%.2f",
+                            problem["id"], problem["weighted_score"])
+        except Exception as e:
+            logger.warning("[CSO] auto_pipeline archive error: %s", e)
+
+        # 3. Auto-generate: problemi approved senza soluzioni
+        try:
+            r = supabase.table("problems") \
+                .select("id,title,description") \
+                .eq("status", "approved").limit(5).execute()
+            for problem in (r.data or []):
+                # Check se ha gia' soluzioni
+                sol_r = supabase.table("solutions") \
+                    .select("id").eq("problem_id", problem["id"]).limit(1).execute()
+                if sol_r.data:
+                    continue
+                # Genera soluzione via Sonnet
+                sol_prompt = (
+                    "Genera una soluzione AI-first per questo problema.\n"
+                    "Problema: " + (problem.get("title") or "") + "\n"
+                    + (problem.get("description") or "")[:500] + "\n\n"
+                    "Rispondi con JSON:\n"
+                    "{\"title\": \"...\", \"description\": \"...\", \"sector\": \"...\", "
+                    "\"sub_sector\": \"...\", \"feasibility_score\": 0.X}"
+                )
+                try:
+                    raw = self.call_claude(sol_prompt, max_tokens=500)
+                    sol_data = json.loads(raw.strip().strip("`").replace("json", ""))
+                    supabase.table("solutions").insert({
+                        "problem_id": problem["id"],
+                        "title": sol_data.get("title", "Soluzione AI")[:200],
+                        "description": sol_data.get("description", "")[:2000],
+                        "sector": sol_data.get("sector", "tech"),
+                        "sub_sector": sol_data.get("sub_sector", ""),
+                        "status": "new",
+                        "feasibility_score": sol_data.get("feasibility_score"),
+                        "source": "system",
+                        "created_at": now_rome().isoformat(),
+                    }).execute()
+                    results["solutions_generated"] += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("[CSO] auto_pipeline generate error: %s", e)
+
+        # Notifica
+        msg = fmt("cso", "Auto Pipeline completata",
+                  "Problemi scorati: " + str(results["scored"]) +
+                  "\nArchiviati (score<0.3): " + str(results["archived"]) +
+                  "\nSoluzioni generate: " + str(results["solutions_generated"]))
+        self._send_to_chief_topic(msg)
+
+        logger.info("[CSO] auto_pipeline completata: %s", results)
+        return {"status": "ok", **results}

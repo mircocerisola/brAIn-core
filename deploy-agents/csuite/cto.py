@@ -1,4 +1,5 @@
 """CTO — Chief Technology Officer. Dominio: infrastruttura, codice, deploy, sicurezza tecnica.
+v5.34: Phoenix Snapshot, GitHub webhook, security report, enhanced prompt generation.
 v5.32: build_landing_from_brief() — riceve brief CMO, genera HTML, screenshot, card approvazione.
 v5.18: Claude Code headless in Cloud Run Job. CTO triggera job, monitora output_log da DB.
 """
@@ -85,6 +86,24 @@ class CTO(BaseChief):
             ctx["recent_code_tasks"] = r.data or []
         except Exception as e:
             ctx["recent_code_tasks"] = "errore lettura DB: " + str(e)
+        # v5.34: architettura corrente (dall'ultimo Phoenix Snapshot)
+        try:
+            r = supabase.table("cto_architecture_summary") \
+                .select("total_files,total_methods,total_classes,total_lines,snapshot_date") \
+                .order("snapshot_date", desc=True).limit(1).execute()
+            if r.data:
+                ctx["architecture_snapshot"] = r.data[0]
+        except Exception:
+            pass
+        # v5.34: ultimo security report
+        try:
+            r = supabase.table("cto_security_reports") \
+                .select("severity,summary,report_date") \
+                .order("report_date", desc=True).limit(1).execute()
+            if r.data:
+                ctx["last_security_report"] = r.data[0]
+        except Exception:
+            pass
         return ctx
 
     def check_anomalies(self):
@@ -982,3 +1001,359 @@ class CTO(BaseChief):
             "task_id": task_id,
             "prompt": technical_prompt,
         }
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 1: Phoenix Snapshot — dump giornaliero architettura
+    # ------------------------------------------------------------------
+
+    def generate_phoenix_snapshot(self):
+        """Scansiona il codebase e salva indice architetturale completo su Supabase.
+        Scheduled daily alle 23:00. Serve per disaster recovery + context CTO.
+        """
+        import hashlib
+        logger.info("[CTO] Phoenix Snapshot: inizio scansione architettura")
+
+        # Scansiona il repo via GitHub API
+        files_index = []
+        totals = {"files": 0, "methods": 0, "classes": 0, "lines": 0}
+        dep_graph = {}
+
+        dirs_to_scan = [
+            "deploy-agents/core", "deploy-agents/csuite",
+            "deploy-agents/intelligence", "deploy-agents/execution",
+            "deploy-agents/utils", "deploy-agents/marketing",
+            "deploy-agents/finance", "deploy-agents/memory",
+            "deploy-agents/ethics", "deploy",
+        ]
+
+        for dir_path in dirs_to_scan:
+            try:
+                files = self._github_list_files(dir_path)
+                for finfo in files:
+                    if not finfo["name"].endswith(".py"):
+                        continue
+                    fpath = finfo["path"]
+                    content = self._github_read_file(fpath)
+                    if not content:
+                        continue
+
+                    parsed = self._parse_python_file(content, fpath)
+                    content_hash = hashlib.md5(content.encode()).hexdigest()
+
+                    # Upsert in cto_architecture_index
+                    try:
+                        supabase.table("cto_architecture_index").upsert({
+                            "file_path": fpath,
+                            "file_type": "python",
+                            "classes": json.dumps(parsed["classes"]),
+                            "methods": json.dumps(parsed["methods"]),
+                            "imports": json.dumps(parsed["imports"]),
+                            "line_count": parsed["line_count"],
+                            "last_scanned": now_rome().isoformat(),
+                            "content_hash": content_hash,
+                        }).execute()
+                    except Exception as e:
+                        logger.warning("[CTO] phoenix upsert error %s: %s", fpath, e)
+
+                    totals["files"] += 1
+                    totals["methods"] += len(parsed["methods"])
+                    totals["classes"] += len(parsed["classes"])
+                    totals["lines"] += parsed["line_count"]
+
+                    # Build dependency graph (imports)
+                    dep_graph[fpath] = parsed["imports"]
+            except Exception as e:
+                logger.warning("[CTO] phoenix scan dir %s error: %s", dir_path, e)
+
+        # Genera summary via Haiku
+        summary_prompt = (
+            "Riassumi in 200 parole lo stato architetturale di brAIn:\n"
+            "File: " + str(totals["files"]) + "\n"
+            "Classi: " + str(totals["classes"]) + "\n"
+            "Metodi: " + str(totals["methods"]) + "\n"
+            "Righe: " + str(totals["lines"]) + "\n"
+            "Scrivi in italiano, focus su modularita e punti critici."
+        )
+        try:
+            summary_text = self.call_claude(
+                summary_prompt, model="claude-haiku-4-5-20251001", max_tokens=300
+            )
+        except Exception:
+            summary_text = "Summary non disponibile"
+
+        # Salva summary giornaliero
+        today = now_rome().strftime("%Y-%m-%d")
+        try:
+            supabase.table("cto_architecture_summary").upsert({
+                "snapshot_date": today,
+                "total_files": totals["files"],
+                "total_methods": totals["methods"],
+                "total_classes": totals["classes"],
+                "total_lines": totals["lines"],
+                "summary_text": summary_text,
+                "dependency_graph": dep_graph,
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.error("[CTO] phoenix summary save error: %s", e)
+
+        # Invia notifica al topic CTO
+        msg = fmt("cto", "Phoenix Snapshot completato",
+                  "File: " + str(totals["files"]) +
+                  "\nClassi: " + str(totals["classes"]) +
+                  "\nMetodi: " + str(totals["methods"]) +
+                  "\nRighe: " + str(totals["lines"]) +
+                  "\n\n" + summary_text[:500])
+        self._send_to_chief_topic(msg)
+
+        logger.info("[CTO] Phoenix Snapshot completato: %s", totals)
+        return {"status": "ok", "totals": totals, "summary": summary_text[:200]}
+
+    def _github_list_files(self, dir_path):
+        """Lista file da GitHub API per directory."""
+        if not GITHUB_TOKEN:
+            return []
+        url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + dir_path
+        headers = {"Authorization": "token " + GITHUB_TOKEN, "Accept": "application/vnd.github.v3+json"}
+        try:
+            r = _requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                return r.json()
+        except Exception as e:
+            logger.warning("[CTO] github list %s: %s", dir_path, e)
+        return []
+
+    def _github_read_file(self, file_path):
+        """Legge contenuto file da GitHub API."""
+        if not GITHUB_TOKEN:
+            return ""
+        url = "https://api.github.com/repos/" + GITHUB_REPO + "/contents/" + file_path
+        headers = {"Authorization": "token " + GITHUB_TOKEN, "Accept": "application/vnd.github.v3.raw"}
+        try:
+            r = _requests.get(url, headers=headers, timeout=15)
+            if r.status_code == 200:
+                return r.text
+        except Exception as e:
+            logger.warning("[CTO] github read %s: %s", file_path, e)
+        return ""
+
+    def _parse_python_file(self, content, file_path=""):
+        """Parsing base di un file Python: classi, metodi, import, righe."""
+        lines = content.split("\n")
+        classes = []
+        methods = []
+        imports = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("class ") and ":" in stripped:
+                name = stripped.split("(")[0].replace("class ", "").strip().rstrip(":")
+                classes.append(name)
+            elif stripped.startswith("def ") and "(" in stripped:
+                name = stripped.split("(")[0].replace("def ", "").strip()
+                methods.append(name)
+            elif stripped.startswith("import ") or stripped.startswith("from "):
+                imports.append(stripped)
+        return {
+            "classes": classes,
+            "methods": methods,
+            "imports": imports[:20],  # max 20 imports
+            "line_count": len(lines),
+        }
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 2: GitHub webhook handler
+    # ------------------------------------------------------------------
+
+    def handle_github_webhook(self, payload):
+        """Processa push webhook da GitHub e aggiorna architecture_index per i file modificati."""
+        commits = payload.get("commits", [])
+        modified_files = set()
+        for commit in commits:
+            modified_files.update(commit.get("added", []))
+            modified_files.update(commit.get("modified", []))
+
+        py_files = [f for f in modified_files if f.endswith(".py")]
+        if not py_files:
+            return {"status": "ok", "updated": 0, "message": "No Python files changed"}
+
+        import hashlib
+        updated = 0
+        for fpath in py_files:
+            content = self._github_read_file(fpath)
+            if not content:
+                continue
+            parsed = self._parse_python_file(content, fpath)
+            content_hash = hashlib.md5(content.encode()).hexdigest()
+            try:
+                supabase.table("cto_architecture_index").upsert({
+                    "file_path": fpath,
+                    "file_type": "python",
+                    "classes": json.dumps(parsed["classes"]),
+                    "methods": json.dumps(parsed["methods"]),
+                    "imports": json.dumps(parsed["imports"]),
+                    "line_count": parsed["line_count"],
+                    "last_scanned": now_rome().isoformat(),
+                    "content_hash": content_hash,
+                }).execute()
+                updated += 1
+            except Exception as e:
+                logger.warning("[CTO] webhook upsert %s: %s", fpath, e)
+
+        # Rimuovi file eliminati
+        for commit in commits:
+            for removed in commit.get("removed", []):
+                if removed.endswith(".py"):
+                    try:
+                        supabase.table("cto_architecture_index") \
+                            .delete().eq("file_path", removed).execute()
+                    except Exception:
+                        pass
+
+        logger.info("[CTO] GitHub webhook: %d file aggiornati", updated)
+        return {"status": "ok", "updated": updated}
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 8: Security report
+    # ------------------------------------------------------------------
+
+    def generate_security_report(self):
+        """Genera report sicurezza: dipendenze, env vars, rischi OWASP."""
+        logger.info("[CTO] Generazione security report")
+
+        # 1. Analizza requirements.txt via GitHub
+        deps = []
+        req_content = self._github_read_file("deploy-agents/requirements.txt")
+        if req_content:
+            for line in req_content.strip().split("\n"):
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    deps.append(line)
+
+        # 2. Cerca pattern pericolosi nel codice
+        dangerous_patterns = []
+        files_to_check = []
+        for d in ["deploy-agents/core", "deploy-agents/csuite"]:
+            files_to_check.extend(self._github_list_files(d))
+
+        for finfo in files_to_check:
+            if not finfo.get("name", "").endswith(".py"):
+                continue
+            content = self._github_read_file(finfo["path"])
+            if not content:
+                continue
+            # Controlla pattern OWASP
+            for pattern_name, pattern_str in [
+                ("eval_usage", "eval("),
+                ("exec_usage", "exec("),
+                ("subprocess_shell", "shell=True"),
+                ("sql_injection_risk", ".format("),
+                ("hardcoded_secret", "password"),
+            ]:
+                if pattern_str in content:
+                    dangerous_patterns.append({
+                        "file": finfo["path"],
+                        "risk": pattern_name,
+                        "severity": "medium",
+                    })
+
+        # 3. Audit env vars
+        env_vars_audit = {
+            "total_env_vars_used": 0,
+            "secrets_in_env": [],
+        }
+        config_content = self._github_read_file("deploy-agents/core/config.py")
+        if config_content:
+            import re as _re
+            env_matches = _re.findall(r'os\.getenv\(["\'](\w+)', config_content)
+            env_vars_audit["total_env_vars_used"] = len(env_matches)
+            for var in env_matches:
+                if any(kw in var.lower() for kw in ["key", "token", "password", "secret"]):
+                    env_vars_audit["secrets_in_env"].append(var)
+
+        # 4. Determina severity
+        severity = "low"
+        if len(dangerous_patterns) > 5:
+            severity = "high"
+        elif len(dangerous_patterns) > 2:
+            severity = "medium"
+
+        # 5. Genera summary via Haiku
+        summary_prompt = (
+            "Genera un breve report di sicurezza (150 parole, italiano).\n"
+            "Dipendenze: " + str(len(deps)) + "\n"
+            "Pattern rischiosi trovati: " + str(len(dangerous_patterns)) + "\n"
+            "Env vars con segreti: " + str(len(env_vars_audit["secrets_in_env"])) + "\n"
+            "Severita: " + severity
+        )
+        try:
+            summary = self.call_claude(
+                summary_prompt, model="claude-haiku-4-5-20251001", max_tokens=200
+            )
+        except Exception:
+            summary = "Security report generato. " + str(len(dangerous_patterns)) + " pattern rischiosi trovati."
+
+        # 6. Salva su DB
+        today = now_rome().strftime("%Y-%m-%d")
+        try:
+            supabase.table("cto_security_reports").insert({
+                "report_date": today,
+                "dependencies_checked": len(deps),
+                "vulnerabilities": json.dumps(dangerous_patterns[:20]),
+                "env_vars_audit": json.dumps(env_vars_audit),
+                "owasp_risks": json.dumps(dangerous_patterns[:10]),
+                "summary": summary,
+                "severity": severity,
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.error("[CTO] security report save error: %s", e)
+
+        # 7. Notifica topic CTO
+        msg = fmt("cto", "Security Report",
+                  "Dipendenze: " + str(len(deps)) +
+                  "\nPattern rischiosi: " + str(len(dangerous_patterns)) +
+                  "\nSeverita: " + severity +
+                  "\n\n" + summary[:400])
+        self._send_to_chief_topic(msg)
+
+        logger.info("[CTO] Security report completato: severity=%s", severity)
+        return {"status": "ok", "severity": severity, "risks": len(dangerous_patterns)}
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 9: Enhanced prompt generation con architettura
+    # ------------------------------------------------------------------
+
+    def generate_prompt_with_architecture(self, task_description, context=""):
+        """Come generate_and_deliver_prompt ma inietta architettura reale dal DB."""
+        # Carica architettura rilevante
+        arch_context = ""
+        try:
+            # Cerca file rilevanti nell'indice basandosi sulle keyword del task
+            keywords = task_description.lower().split()[:5]
+            all_files = supabase.table("cto_architecture_index") \
+                .select("file_path,classes,methods,line_count") \
+                .execute()
+            relevant = []
+            for f in (all_files.data or []):
+                fpath = f.get("file_path", "").lower()
+                if any(kw in fpath for kw in keywords if len(kw) > 3):
+                    relevant.append(f)
+            if relevant:
+                parts = []
+                for f in relevant[:10]:
+                    classes = json.loads(f.get("classes", "[]")) if isinstance(f.get("classes"), str) else f.get("classes", [])
+                    methods = json.loads(f.get("methods", "[]")) if isinstance(f.get("methods"), str) else f.get("methods", [])
+                    parts.append(
+                        f["file_path"] + " (" + str(f.get("line_count", 0)) + " righe)"
+                        + "\n  Classi: " + ", ".join(classes[:5])
+                        + "\n  Metodi: " + ", ".join(methods[:10])
+                    )
+                arch_context = "ARCHITETTURA FILE RILEVANTI:\n" + "\n\n".join(parts)
+        except Exception as e:
+            logger.warning("[CTO] arch context load error: %s", e)
+
+        full_context = context
+        if arch_context:
+            full_context = (context + "\n\n" + arch_context) if context else arch_context
+
+        return self.generate_and_deliver_prompt(task_description, full_context)

@@ -59,6 +59,12 @@ from core.endpoints import (
     run_coo_accelerator_endpoint,
     run_coo_snapshot_endpoint,
     run_coo_rename_cantiere_endpoint,
+    # v5.34: CTO Phoenix/Security/Webhook + CSO auto + CMO ads + CLO legal + CPeO versioning
+    run_cto_phoenix_snapshot_endpoint, run_cto_github_webhook_endpoint,
+    run_cto_security_report_endpoint, run_cto_prompt_with_arch_endpoint,
+    run_cso_auto_pipeline_endpoint, run_cmo_paid_ads_endpoint,
+    run_clo_daily_legal_scan_endpoint,
+    run_cpeo_version_track_endpoint, run_cpeo_weekly_improvement_endpoint,
 )
 
 
@@ -179,6 +185,21 @@ async def main():
     app.router.add_post("/admin/restaurant-reposition", run_restaurant_reposition_endpoint)
     app.router.add_post("/admin/health-check", run_health_check_endpoint)
     app.router.add_post("/admin/flush-bos", run_flush_bos_endpoint)
+
+    # v5.34: CTO Phoenix/Security/Webhook
+    app.router.add_post("/cto/phoenix-snapshot", run_cto_phoenix_snapshot_endpoint)
+    app.router.add_post("/cto/github-webhook", run_cto_github_webhook_endpoint)
+    app.router.add_post("/cto/security-report", run_cto_security_report_endpoint)
+    app.router.add_post("/cto/prompt-with-arch", run_cto_prompt_with_arch_endpoint)
+
+    # v5.34: CSO auto pipeline + CMO paid ads + CLO legal scan
+    app.router.add_post("/cso/auto-pipeline", run_cso_auto_pipeline_endpoint)
+    app.router.add_post("/cmo/paid-ads", run_cmo_paid_ads_endpoint)
+    app.router.add_post("/clo/daily-legal-scan", run_clo_daily_legal_scan_endpoint)
+
+    # v5.34: CPeO versioning + improvement
+    app.router.add_post("/cpeo/version-track", run_cpeo_version_track_endpoint)
+    app.router.add_post("/cpeo/weekly-improvement", run_cpeo_weekly_improvement_endpoint)
 
     # All
     app.router.add_post("/all", run_all_endpoint)

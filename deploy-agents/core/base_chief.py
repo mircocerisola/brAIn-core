@@ -152,9 +152,101 @@ class BaseChief(BaseAgent):
     _ALWAYS_SONNET = {"cso", "cmo", "cpeo", "cto"}
     _ADAPTIVE_MODEL = {"cfo", "clo", "coo"}
 
+    # v5.34 — 3-level context system
+    _LIGHT_KEYWORDS = {
+        "ciao", "ok", "grazie", "si", "no", "va bene", "perfetto",
+        "buongiorno", "buonasera", "capito", "ricevuto",
+    }
+    _FULL_KEYWORDS = {
+        "analizza", "analisi", "strategia", "piano", "pianifica",
+        "confronta", "valuta", "dettaglio", "approfond", "spiega",
+        "perche", "come funziona", "architettura", "report completo",
+        "audit", "revisione", "ottimizza", "migliora", "problema",
+    }
+
     # System prompt cache — TTL 5 minuti, evita 6+ query DB per messaggio
     _base_prompt_cache: Dict[str, Tuple[str, float]] = {}  # chief_id -> (prompt, timestamp)
     _BASE_PROMPT_TTL = 300  # secondi
+
+    # ------------------------------------------------------------------
+    # v5.34 — Universal 3-level context
+    # ------------------------------------------------------------------
+
+    def detect_context_level(self, message: str) -> str:
+        """Classifica il messaggio in light/medium/full per calibrare il contesto.
+        light (~200 tok): saluti, conferme, risposte brevi.
+        medium (~500 tok): domande standard di dominio.
+        full (~1500 tok): analisi complesse, pianificazione, debug.
+        """
+        msg_lower = message.lower().strip()
+
+        # Light: messaggi brevissimi o saluti
+        if len(msg_lower) < 15 or msg_lower in self._LIGHT_KEYWORDS:
+            return "light"
+
+        # Full: keyword di analisi/complessita'
+        for kw in self._FULL_KEYWORDS:
+            if kw in msg_lower:
+                return "full"
+
+        # Full: messaggi lunghi (>200 chars) sono probabilmente complessi
+        if len(msg_lower) > 200:
+            return "full"
+
+        return "medium"
+
+    def _load_topic_summary(self, scope_id: str) -> str:
+        """Carica il riassunto incrementale del topic da topic_context_summary."""
+        if not scope_id:
+            return ""
+        try:
+            r = supabase.table("topic_context_summary") \
+                .select("summary,message_count") \
+                .eq("scope_id", scope_id).execute()
+            if r.data and r.data[0].get("summary"):
+                return r.data[0]["summary"]
+        except Exception as e:
+            logger.warning("[%s] _load_topic_summary error: %s", self.name, e)
+        return ""
+
+    def _update_topic_summary(self, scope_id: str, message: str,
+                               response: str) -> None:
+        """Aggiorna il riassunto incrementale del topic via Haiku (fire-and-forget)."""
+        if not scope_id:
+            return
+        try:
+            existing = self._load_topic_summary(scope_id)
+            prompt = (
+                "Aggiorna questo riassunto di conversazione con il nuovo scambio.\n"
+                "Mantieni SOLO informazioni chiave: decisioni, fatti, numeri, azioni.\n"
+                "Max 300 parole. Scrivi in italiano.\n\n"
+                f"RIASSUNTO ATTUALE:\n{existing or '(vuoto)'}\n\n"
+                f"NUOVO MESSAGGIO UTENTE:\n{message[:500]}\n\n"
+                f"RISPOSTA CHIEF:\n{response[:500]}\n\n"
+                "RIASSUNTO AGGIORNATO:"
+            )
+            updated = self.call_claude(
+                prompt, model="claude-haiku-4-5-20251001", max_tokens=400
+            )
+            # Conta messaggi
+            count = 1
+            try:
+                r = supabase.table("topic_context_summary") \
+                    .select("message_count").eq("scope_id", scope_id).execute()
+                if r.data:
+                    count = (r.data[0].get("message_count") or 0) + 1
+            except Exception:
+                pass
+
+            supabase.table("topic_context_summary").upsert({
+                "scope_id": scope_id,
+                "summary": updated.strip(),
+                "message_count": count,
+                "last_updated": now_rome().isoformat(),
+                "chief_id": self.chief_id,
+            }).execute()
+        except Exception as e:
+            logger.warning("[%s] _update_topic_summary error: %s", self.name, e)
 
     def _select_model(self, question: str) -> str:
         """FIX 5: Seleziona modello ottimale.
@@ -397,9 +489,14 @@ class BaseChief(BaseAgent):
         FIX 4: inietta get_domain_context() live prima di rispondere.
         FIX 5: usa modello ottimale via _select_model().
         v5.29: web search via Perplexity se Mirco chiede di cercare online.
+        v5.34: 3-level context (light/medium/full) + topic summary incrementale.
         """
         if self.is_circuit_open():
             return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
+
+        # v5.34: detect context level
+        ctx_level = self.detect_context_level(question)
+        logger.info("[%s] context_level=%s for: %s", self.name, ctx_level, question[:60])
 
         # v5.29: web search trigger — cerca online se Mirco lo chiede
         from csuite.utils import detect_web_search, web_search, fmt
@@ -410,7 +507,6 @@ class BaseChief(BaseAgent):
                 fmt(self.chief_id, "Ricerca online", "Sto cercando: " + search_query[:80] + "...")
             )
             search_result = web_search(search_query, self.chief_id)
-            # Inietta il risultato nel contesto per Claude
             web_context = (
                 "RISULTATO RICERCA WEB:\n" + search_result
                 + "\n\nUsa queste informazioni per rispondere a Mirco in modo diretto."
@@ -420,13 +516,38 @@ class BaseChief(BaseAgent):
             else:
                 user_context = web_context
 
-        system = self.build_system_prompt(
-            project_context=project_context,
-            topic_scope_id=topic_scope_id,
-            project_scope_id=project_scope_id,
-            recent_messages=recent_messages,
-            query=question,
-        )
+        # v5.34: build system prompt based on context level
+        if ctx_level == "light":
+            # Solo base prompt + domain context, niente memory/episodes
+            system = self._build_base_prompt()
+        elif ctx_level == "medium":
+            # Base + topic summary + solo 3 episodes (no relevant memories search)
+            system = self._build_base_prompt()
+            topic_summary = self._load_topic_summary(topic_scope_id or "")
+            if topic_summary:
+                system += "\n\n=== CONTESTO CONVERSAZIONE ===\n" + topic_summary
+            if topic_scope_id:
+                try:
+                    from intelligence.memory import get_episodes
+                    episodes = get_episodes("topic", topic_scope_id, limit=3)
+                    if episodes:
+                        system += "\n\n=== SESSIONI PRECEDENTI ===\n" + "\n---\n".join(episodes)
+                except Exception as e:
+                    logger.warning("[%s] medium ctx episodes error: %s", self.name, e)
+            if project_context:
+                system += "\n\n=== CONTESTO CANTIERE ===\n" + project_context
+        else:
+            # full: tutto (come prima + topic summary)
+            system = self.build_system_prompt(
+                project_context=project_context,
+                topic_scope_id=topic_scope_id,
+                project_scope_id=project_scope_id,
+                recent_messages=recent_messages,
+                query=question,
+            )
+            topic_summary = self._load_topic_summary(topic_scope_id or "")
+            if topic_summary:
+                system += "\n\n=== CONTESTO CONVERSAZIONE ===\n" + topic_summary
 
         # FIX 4: inietta dati live dal dominio (FIX 2 v5.11: limit 2000 chars, include errors)
         try:
@@ -489,6 +610,19 @@ class BaseChief(BaseAgent):
             response = _re.sub(
                 r'<<CODE_ACTION>>.*?<<END_CODE_ACTION>>', '', response, flags=_re.DOTALL
             ).strip()
+
+        # v5.34: aggiorna topic summary (fire-and-forget, non blocca)
+        if topic_scope_id and ctx_level != "light":
+            try:
+                import threading
+                t = threading.Thread(
+                    target=self._update_topic_summary,
+                    args=(topic_scope_id, question, response),
+                    daemon=True,
+                )
+                t.start()
+            except Exception:
+                pass
 
         return response
 

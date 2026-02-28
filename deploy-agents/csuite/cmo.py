@@ -1,4 +1,5 @@
 """CMO — Chief Marketing Officer. Dominio: marketing, brand, growth, conversion.
+v5.34: plan_paid_ads() — piani Google Ads e Meta Ads per smoke test.
 v5.32: CMO non scrive MAI codice. Flow landing: research → mockup image → card approvazione → brief CTO.
 """
 import json
@@ -883,3 +884,104 @@ class CMO(BaseChief):
             )
         except Exception as e:
             logger.warning("[CMO] send_report_to_topic: %s", e)
+
+    # ------------------------------------------------------------------
+    # v5.34 FIX 6: Paid Ads capabilities
+    # ------------------------------------------------------------------
+
+    def plan_paid_ads(self, project_id, thread_id=None):
+        """Genera piani per Google Ads e Meta Ads smoke test.
+        Ricerca di mercato → budget stimato → creativita → targeting.
+        """
+        logger.info("[CMO] plan_paid_ads per project_id=%s", project_id)
+
+        # Load progetto
+        try:
+            r = supabase.table("projects") \
+                .select("id,name,brand_name,description,status") \
+                .eq("id", project_id).execute()
+            if not r.data:
+                return {"status": "error", "error": "Progetto non trovato"}
+            project = r.data[0]
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+        brand = project.get("brand_name") or project.get("name") or "Progetto"
+
+        # Ricerca di mercato via Perplexity
+        from csuite.utils import web_search
+        market_data = web_search(
+            brand + " target audience demographics Italy paid ads benchmark CPC",
+            "cmo"
+        )
+
+        # Genera piano via Sonnet
+        plan_prompt = (
+            "Sei il CMO di brAIn. Genera un piano paid ads per smoke test.\n"
+            "Progetto: " + brand + "\n"
+            "Descrizione: " + (project.get("description") or "N/A")[:300] + "\n\n"
+            "Dati di mercato:\n" + market_data[:1000] + "\n\n"
+            "Genera piano JSON con:\n"
+            "1. google_ads: {budget_daily_eur, keywords[], ad_copy[], targeting, expected_cpc_eur}\n"
+            "2. meta_ads: {budget_daily_eur, audiences[], creative_concepts[], placements[], expected_cpm_eur}\n"
+            "3. total_budget_30d_eur: numero\n"
+            "4. expected_results: {impressions, clicks, conversions}\n"
+            "5. recommendations: [lista 3 raccomandazioni]\n\n"
+            "Rispondi SOLO con JSON valido."
+        )
+
+        try:
+            raw = self.call_claude(plan_prompt, max_tokens=2000, model="claude-sonnet-4-6")
+            # Pulisci JSON
+            cleaned = raw.strip()
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            plan = json.loads(cleaned.strip())
+        except Exception as e:
+            logger.error("[CMO] plan_paid_ads parse error: %s", e)
+            plan = {"error": "Impossibile generare piano", "raw": raw[:500] if 'raw' in dir() else ""}
+
+        # Salva in chief_decisions
+        try:
+            supabase.table("chief_decisions").insert({
+                "chief_domain": "marketing",
+                "decision_type": "paid_ads_plan",
+                "summary": "Piano Paid Ads " + brand,
+                "full_text": json.dumps(plan, ensure_ascii=False)[:5000],
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] save paid_ads decision: %s", e)
+
+        # Invia report al topic
+        report_parts = [
+            "Progetto: " + brand,
+            "",
+        ]
+        if isinstance(plan, dict) and "error" not in plan:
+            ga = plan.get("google_ads", {})
+            ma = plan.get("meta_ads", {})
+            report_parts.append("GOOGLE ADS")
+            report_parts.append("Budget giornaliero: " + str(ga.get("budget_daily_eur", "N/A")) + " EUR")
+            report_parts.append("Keywords: " + ", ".join(ga.get("keywords", [])[:5]))
+            report_parts.append("CPC stimato: " + str(ga.get("expected_cpc_eur", "N/A")) + " EUR")
+            report_parts.append("")
+            report_parts.append("META ADS")
+            report_parts.append("Budget giornaliero: " + str(ma.get("budget_daily_eur", "N/A")) + " EUR")
+            report_parts.append("Audience: " + ", ".join(ma.get("audiences", [])[:3]))
+            report_parts.append("CPM stimato: " + str(ma.get("expected_cpm_eur", "N/A")) + " EUR")
+            report_parts.append("")
+            report_parts.append("Budget totale 30gg: " + str(plan.get("total_budget_30d_eur", "N/A")) + " EUR")
+        else:
+            report_parts.append("Errore nella generazione del piano.")
+
+        msg = fmt("cmo", "Piano Paid Ads", "\n".join(report_parts))
+        if thread_id:
+            self._send_report_to_topic_id(thread_id, msg)
+        else:
+            self._send_report_to_topic(msg)
+
+        logger.info("[CMO] plan_paid_ads completato per %s", brand)
+        return {"status": "ok", "project_id": project_id, "plan": plan}

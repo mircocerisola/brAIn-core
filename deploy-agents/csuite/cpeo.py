@@ -1044,3 +1044,122 @@ def post_task_learning(
         "delta": delta,
         "lesson": lesson_text,
     }
+
+
+# ------------------------------------------------------------------
+# v5.34 FIX 11: Version tracking + improvement log (module-level)
+# ------------------------------------------------------------------
+
+def track_version(service_name, version_tag="", revision="",
+                  changes_summary="", files_changed=None):
+    """Registra un nuovo deploy in brain_versions."""
+    try:
+        supabase.table("brain_versions").insert({
+            "service_name": service_name,
+            "version_tag": version_tag,
+            "revision": revision,
+            "deployed_at": now_rome().isoformat(),
+            "changes_summary": changes_summary[:2000],
+            "files_changed": json.dumps(files_changed or []),
+            "deployed_by": "system",
+        }).execute()
+        logger.info("[CPeO] version tracked: %s %s %s", service_name, version_tag, revision)
+    except Exception as e:
+        logger.warning("[CPeO] track_version error: %s", e)
+
+
+def log_improvement(version_from, version_to, improvement_type,
+                    description, metrics_before=None, metrics_after=None):
+    """Registra un miglioramento nel improvement_log."""
+    try:
+        supabase.table("improvement_log").insert({
+            "version_from": version_from,
+            "version_to": version_to,
+            "improvement_type": improvement_type,
+            "description": description[:2000],
+            "metrics_before": json.dumps(metrics_before or {}),
+            "metrics_after": json.dumps(metrics_after or {}),
+            "created_at": now_rome().isoformat(),
+        }).execute()
+        logger.info("[CPeO] improvement logged: %s->%s %s", version_from, version_to, improvement_type)
+    except Exception as e:
+        logger.warning("[CPeO] log_improvement error: %s", e)
+
+
+def generate_weekly_improvement_report() -> Dict[str, Any]:
+    """Report settimanale: versioni deployate + miglioramenti + metriche.
+    Scheduled: domenica alle 10:00.
+    """
+    from datetime import timedelta
+    logger.info("[CPeO] weekly improvement report: inizio")
+
+    week_ago = (now_rome() - timedelta(days=7)).isoformat()
+
+    # 1. Versioni deployate questa settimana
+    versions = []
+    try:
+        r = supabase.table("brain_versions") \
+            .select("service_name,version_tag,revision,deployed_at,changes_summary") \
+            .gte("deployed_at", week_ago) \
+            .order("deployed_at", desc=True).execute()
+        versions = r.data or []
+    except Exception as e:
+        logger.warning("[CPeO] weekly versions query: %s", e)
+
+    # 2. Miglioramenti registrati
+    improvements = []
+    try:
+        r = supabase.table("improvement_log") \
+            .select("version_from,version_to,improvement_type,description") \
+            .gte("created_at", week_ago) \
+            .order("created_at", desc=True).execute()
+        improvements = r.data or []
+    except Exception as e:
+        logger.warning("[CPeO] weekly improvements query: %s", e)
+
+    # 3. Metriche performance (errori, costi)
+    error_count = 0
+    total_cost = 0.0
+    try:
+        r = supabase.table("agent_logs") \
+            .select("status,cost_usd") \
+            .gte("created_at", week_ago).execute()
+        for row in (r.data or []):
+            if row.get("status") == "error":
+                error_count += 1
+            total_cost += float(row.get("cost_usd") or 0)
+    except Exception:
+        pass
+
+    # 4. Costruisci report
+    lines = []
+    lines.append("Deploy questa settimana: " + str(len(versions)))
+    for v in versions[:5]:
+        lines.append(
+            "  " + v.get("service_name", "?") + " " +
+            (v.get("revision") or "")[:12] +
+            (" — " + (v.get("changes_summary") or "")[:60] if v.get("changes_summary") else "")
+        )
+    lines.append("")
+    lines.append("Miglioramenti registrati: " + str(len(improvements)))
+    for imp in improvements[:5]:
+        lines.append(
+            "  [" + (imp.get("improvement_type") or "?") + "] " +
+            (imp.get("description") or "")[:80]
+        )
+    lines.append("")
+    lines.append("Errori totali: " + str(error_count))
+    lines.append("Costo totale: " + str(round(total_cost, 2)) + " USD")
+
+    report = "\U0001f331 CPeO\nReport Settimanale Miglioramenti\n\n" + "\n".join(lines)
+
+    _send_people(report)
+
+    logger.info("[CPeO] weekly improvement report completato")
+    return {
+        "status": "ok",
+        "versions_deployed": len(versions),
+        "improvements_logged": len(improvements),
+        "error_count": error_count,
+        "total_cost_usd": round(total_cost, 2),
+    }

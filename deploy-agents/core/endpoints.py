@@ -1187,3 +1187,121 @@ async def run_flush_bos_endpoint(request):
         return web.json_response({"status": "ok", "sent": len(sent), "details": sent})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+# ============================================================
+# v5.34 — Nuovi endpoint
+# ============================================================
+
+async def run_cto_phoenix_snapshot_endpoint(request):
+    """POST /cto/phoenix-snapshot — CTO scansiona architettura e salva indice."""
+    try:
+        from csuite.cto import CTO
+        cto = CTO()
+        result = cto.generate_phoenix_snapshot()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cto_github_webhook_endpoint(request):
+    """POST /cto/github-webhook — riceve push events da GitHub."""
+    try:
+        data = await request.json()
+        from csuite.cto import CTO
+        cto = CTO()
+        result = cto.handle_github_webhook(data)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cto_security_report_endpoint(request):
+    """POST /cto/security-report — genera report sicurezza."""
+    try:
+        from csuite.cto import CTO
+        cto = CTO()
+        result = cto.generate_security_report()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cto_prompt_with_arch_endpoint(request):
+    """POST /cto/prompt-with-arch — genera prompt tecnico con contesto architettura."""
+    try:
+        data = await request.json()
+        task_description = data.get("task_description", "")
+        context = data.get("context", "")
+        if not task_description:
+            return web.json_response({"error": "task_description obbligatorio"}, status=400)
+        from csuite.cto import CTO
+        cto = CTO()
+        result = cto.generate_prompt_with_architecture(task_description, context)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cso_auto_pipeline_endpoint(request):
+    """POST /cso/auto-pipeline — auto-score, auto-archive, auto-generate."""
+    try:
+        from csuite.cso import CSO
+        cso = CSO()
+        result = cso.auto_pipeline()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cmo_paid_ads_endpoint(request):
+    """POST /cmo/paid-ads — genera piano Google Ads + Meta Ads."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite.cmo import CMO
+        cmo = CMO()
+        result = cmo.plan_paid_ads(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_clo_daily_legal_scan_endpoint(request):
+    """POST /clo/daily-legal-scan — scan giornaliero normativo."""
+    try:
+        from csuite.clo import CLO
+        clo = CLO()
+        result = clo.daily_legal_scan()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cpeo_version_track_endpoint(request):
+    """POST /cpeo/version-track — registra deploy."""
+    try:
+        data = await request.json()
+        from csuite.cpeo import track_version
+        track_version(
+            service_name=data.get("service_name", ""),
+            version_tag=data.get("version_tag", ""),
+            revision=data.get("revision", ""),
+            changes_summary=data.get("changes_summary", ""),
+            files_changed=data.get("files_changed"),
+        )
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cpeo_weekly_improvement_endpoint(request):
+    """POST /cpeo/weekly-improvement — report settimanale miglioramenti."""
+    try:
+        from csuite.cpeo import generate_weekly_improvement_report
+        result = generate_weekly_improvement_report()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
