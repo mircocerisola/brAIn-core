@@ -3079,7 +3079,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    #LEGAL AGENT callbacks (MACRO-TASK 2)    elif data.startswith("legal_read:"):
+    # LEGAL AGENT callbacks (MACRO-TASK 2)
+    elif data.startswith("legal_read:"):
         # Mostra report legale
         parts = data.split(":")
         project_id = int(parts[1])
@@ -3136,7 +3137,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"[LEGAL_BLOCK] {e}")
 
-    #SMOKE TEST callbacks (MACRO-TASK 3)    elif data.startswith("smoke_approve:"):
+    # SMOKE TEST callbacks (MACRO-TASK 3)
+    elif data.startswith("smoke_approve:"):
         parts = data.split(":")
         project_id = int(parts[1])
         smoke_id = int(parts[2]) if len(parts) > 2 else 0
@@ -3230,7 +3232,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if AGENTS_RUNNER_URL:
             threading.Thread(target=_run_smoke_from_proposal, daemon=True).start()
 
-    #LEAN PIPELINE: CSO Smoke Test Design callbacks    elif data.startswith("smoke_design_approve:"):
+    # LEAN PIPELINE: CSO Smoke Test Design callbacks
+    elif data.startswith("smoke_design_approve:"):
         project_id = int(data.split(":")[1])
         await query.answer("Avvio smoke test...")
         def _run_smoke_design_approved():
@@ -3370,7 +3373,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
-    #CAMBIO METODO SMOKE TEST    elif data.startswith("smoke_design_method:"):
+    # CAMBIO METODO SMOKE TEST
+    elif data.startswith("smoke_design_method:"):
         project_id = int(data.split(":")[1])
         await query.answer()
         _method_markup = {
@@ -3422,7 +3426,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.warning(f"[SMOKE_METHOD] re-design: {e}")
         threading.Thread(target=_rerun_smoke_design, daemon=True).start()
 
-    #SMOKE TEST DATA VIEWS    elif data.startswith("smoke_prospects:"):
+    # SMOKE TEST DATA VIEWS
+    elif data.startswith("smoke_prospects:"):
         parts = data.split(":")
         project_id = int(parts[1])
         smoke_id = int(parts[2]) if len(parts) > 2 else 0
@@ -3564,7 +3569,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
-    #RESTAURANT REPOSITION callbacks    elif data.startswith("restaurant_option_a:"):
+    # RESTAURANT REPOSITION callbacks
+    elif data.startswith("restaurant_option_a:"):
         project_id = int(data.split(":")[1])
         await query.answer("Opzione A scelta!")
         try:
@@ -3708,7 +3714,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("build_modify:"):
         await query.answer("Scrivi il feedback nel topic del progetto.")
 
-    #REPORT ON-DEMAND callbacks    elif data == "report_cost_ondemand":
+    # REPORT ON-DEMAND callbacks
+    elif data == "report_cost_ondemand":
         await query.answer("Generazione report costi...")
         _token_rc = os.getenv("TELEGRAM_BOT_TOKEN")
         _cid_rc = chat_id
@@ -3736,7 +3743,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 )
         threading.Thread(target=_gen_activ_cb, daemon=True).start()
 
-    #MARKETING callbacks    elif data.startswith("mkt_report:"):
+    # MARKETING callbacks
+    elif data.startswith("mkt_report:"):
         project_id = int(data.split(":")[1]) if data.split(":")[1] else None
         await query.answer("Generazione report marketing...")
         def _mkt_report_cb():
@@ -4032,7 +4040,8 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    #CODE ACTION APPROVAL callbacks (v5.17: CTO gestisce tutto)    elif data.startswith("code_approve:"):
+    # CODE ACTION APPROVAL callbacks (v5.17: CTO gestisce tutto)
+    elif data.startswith("code_approve:"):
         _ca_task_id = int(data.split(":")[1])
         await query.answer("Approvato!")
         try:
@@ -4484,7 +4493,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
 
-    #VOCALE — trascrivi PRIMA di qualsiasi altra logica    if update.message and update.message.voice:
+    # VOCALE: trascrivi PRIMA di qualsiasi altra logica
+    if update.message and update.message.voice:
         await update.message.chat.send_action("typing")
         try:
             _vf = await context.bot.get_file(update.message.voice.file_id)
@@ -4567,7 +4577,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=_regenerate_prompt, daemon=True).start()
         return
 
-    #TRAINING FEEDBACK PENDING (CPeO v5.25)    if chat_id in _session_context and _session_context[chat_id].get("awaiting_training_feedback"):
+    # TRAINING FEEDBACK PENDING (CPeO v5.25)
+    if chat_id in _session_context and _session_context[chat_id].get("awaiting_training_feedback"):
         _tf_plan_id = _session_context[chat_id].pop("awaiting_training_feedback")
         _tf_feedback = msg
         def _handle_training_feedback():
@@ -4626,7 +4637,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=_handle_training_feedback, daemon=True).start()
         return
 
-    #ACTIVE SESSION — carica contesto progetto attivo    _active_proj_ctx = None
+    # ACTIVE SESSION: carica contesto progetto attivo
+    _active_proj_ctx = None
     try:
         _sess = _load_active_session(chat_id)
         if _sess:
@@ -4655,8 +4667,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as _ae:
         logger.warning(f"[ACTIVE_SESSION] load in handle_message: {_ae}")
 
-    #FORUM TOPIC ROUTING    thread_id = update.message.message_thread_id if update.message else None
-    #WARMUP BUFFER DA DB (post-restart recovery)    if thread_id:
+    # FORUM TOPIC ROUTING
+    thread_id = update.message.message_thread_id if update.message else None
+    # WARMUP BUFFER DA DB (post-restart recovery)
+    if thread_id:
         _warmup_topic_buffer(chat_id, thread_id)
     if thread_id:
         project = lookup_project_by_topic_id(thread_id)
@@ -4735,7 +4749,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lower_msg = msg.strip().lower()
 
-    #C-SUITE ROUTING    _CSUITE_KEYWORDS = {
+    # C-SUITE ROUTING
+    _CSUITE_KEYWORDS = {
         "cso": "strategy", "strategia": "strategy", "pivot": "strategy",
         "cfo": "finance", "costi": "finance", "budget": "finance", "burn rate": "finance",
         "cmo": "marketing", "growth": "marketing", "conversione": "marketing",
@@ -4803,7 +4818,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).start()
         return
 
-    #MARKETING ROUTING    _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
+    # MARKETING ROUTING
+    _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
 
     if lower_msg in _BRAND_TRIGGERS or lower_msg.startswith("crea brand identity"):
         await update.message.reply_text(
@@ -4845,7 +4861,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    #FIX 2/3: ROUTING REPORT ON-DEMAND    _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
+    # FIX 2/3: ROUTING REPORT ON-DEMAND
+    _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
     _REPORT_ACTIV_TRIGGERS = {"report attività", "attività", "report attivita", "attivita", "status", "stato sistema", "report activity", "activity"}
     _REPORT_GENERIC_TRIGGERS = {"report", "report brAIn", "report brain", "dashboard"}
 
@@ -4889,7 +4906,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    #COMANDI CODA AZIONI    if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
+    # COMANDI CODA AZIONI
+    if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
         n = count_pending_actions(chat_id)
         if n == 0:
             await update.message.reply_text(
@@ -4951,7 +4969,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    #RISPOSTA A AZIONE IN CORSO    if chat_id in _current_action:
+    # RISPOSTA A AZIONE IN CORSO
+    if chat_id in _current_action:
         handled, reply_text = handle_action_response(chat_id, msg)
         if handled:
             if reply_text:
@@ -5214,7 +5233,8 @@ async def main():
     await tg_app.initialize()
     await tg_app.start()
 
-    #STARTUP: recovery progetti bloccati in smoke/build    def _startup_pipeline_recovery():
+    # STARTUP: recovery progetti bloccati in smoke/build
+    def _startup_pipeline_recovery():
         """Recovery post-restart: riprende smoke test o build per progetti in pipeline attiva."""
         try:
             # Progetti CSO in attesa smoke test design
@@ -5252,7 +5272,8 @@ async def main():
             logger.warning(f"[STARTUP_RECOVERY] {e}")
     threading.Thread(target=_startup_pipeline_recovery, daemon=True).start()
 
-    #STARTUP: manda opzioni riposizionamento a progetti che hanno saltato smoke test    def _startup_restaurant_reposition():
+    # STARTUP: manda opzioni riposizionamento a progetti che hanno saltato smoke test
+    def _startup_restaurant_reposition():
         """Trova progetti in build che hanno saltato lo smoke test e manda le opzioni."""
         try:
             r = supabase.table("projects").select("id,name,pipeline_step,pipeline_territory") \
