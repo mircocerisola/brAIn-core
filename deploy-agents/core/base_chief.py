@@ -40,7 +40,8 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
         "file_allowed": [],
         "tables_allowed": ["problems", "solutions", "solution_scores", "bos_archive",
                            "pipeline_thresholds", "chief_memory", "chief_decisions",
-                           "smoke_tests", "smoke_test_prospects", "smoke_test_events"],
+                           "smoke_tests", "smoke_test_prospects", "smoke_test_events",
+                           "chief_pending_tasks"],
         "tables_forbidden": [],
     },
     "coo": {
@@ -48,7 +49,8 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
         "tables_allowed": ["agent_logs", "agent_events", "action_queue", "scan_schedule",
                            "projects", "project_metrics", "kpi_daily", "smoke_tests",
                            "smoke_test_prospects", "smoke_test_events",
-                           "chief_memory", "chief_decisions", "project_assets"],
+                           "chief_memory", "chief_decisions", "project_assets",
+                           "chief_pending_tasks", "coo_project_tasks"],
         "tables_forbidden": ["solutions", "brand_assets", "org_config", "code_tasks"],
     },
     "cto": {
@@ -59,25 +61,29 @@ SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
     "cmo": {
         "file_allowed": ["marketing/", "deploy-agents/marketing/"],
         "tables_allowed": ["brand_assets", "marketing_reports", "smoke_test_prospects",
-                           "chief_memory", "chief_decisions", "project_assets"],
+                           "chief_memory", "chief_decisions", "project_assets",
+                           "chief_pending_tasks"],
         "tables_forbidden": ["agent_logs", "org_config", "scan_sources", "solutions", "projects", "code_tasks"],
     },
     "cfo": {
         "file_allowed": ["finance/", "deploy-agents/finance/"],
         "tables_allowed": ["finance_metrics", "kpi_daily", "exchange_rates",
-                           "chief_memory", "chief_decisions", "manager_revenue_share"],
+                           "chief_memory", "chief_decisions", "manager_revenue_share",
+                           "chief_pending_tasks"],
         "tables_forbidden": ["agent_logs", "org_config", "scan_sources", "projects", "code_tasks"],
     },
     "clo": {
         "file_allowed": ["execution/legal_agent.py", "ethics/"],
         "tables_allowed": ["legal_reviews", "ethics_violations", "authorization_matrix",
-                           "chief_memory", "chief_decisions"],
+                           "chief_memory", "chief_decisions",
+                           "chief_pending_tasks"],
         "tables_forbidden": ["agent_logs", "org_config", "scan_sources", "solutions", "brand_assets", "code_tasks"],
     },
     "cpeo": {
         "file_allowed": ["memory/"],
         "tables_allowed": ["project_members", "org_knowledge", "capability_log",
-                           "training_materials", "training_plans", "chief_memory", "chief_decisions"],
+                           "training_materials", "training_plans", "chief_memory", "chief_decisions",
+                           "chief_pending_tasks"],
         "tables_forbidden": ["agent_logs", "org_config", "scan_sources", "solutions", "brand_assets", "code_tasks"],
     },
 }
@@ -548,6 +554,12 @@ class BaseChief(BaseAgent):
             topic_summary = self._load_topic_summary(topic_scope_id or "")
             if topic_summary:
                 system += "\n\n=== CONTESTO CONVERSAZIONE ===\n" + topic_summary
+
+        # v5.35: inietta task pendenti nel contesto
+        pending_tasks = self._load_pending_tasks()
+        pending_ctx = self._format_pending_tasks_context(pending_tasks)
+        if pending_ctx:
+            system += "\n\n" + pending_ctx
 
         # FIX 4: inietta dati live dal dominio (FIX 2 v5.11: limit 2000 chars, include errors)
         try:
@@ -1261,6 +1273,93 @@ class BaseChief(BaseAgent):
             logger.info(f"[{self.name}] Capability '{capability.get('name')}' assessed")
         except Exception as e:
             logger.warning(f"[{self.name}] receive_capability_update error: {e}")
+
+    # ============================================================
+    # v5.35 — TASK MANAGEMENT: pending tasks per Chief
+    # ============================================================
+
+    # Frasi vietate nelle risposte ai task — promettono output futuro
+    _TASK_FORBIDDEN_PHRASES = [
+        "sto cercando", "sto lavorando", "ci sto lavorando",
+        "ti aggiorno dopo", "ti faccio sapere", "appena ho novita",
+        "ci lavoro", "lo faccio", "me ne occupo",
+        "risposta in elaborazione", "ti aggiorno",
+        "ci penso io", "sto analizzando", "lo verifico",
+    ]
+
+    def _load_pending_tasks(self) -> List[Dict]:
+        """Carica task pendenti per questo Chief da chief_pending_tasks."""
+        try:
+            r = supabase.table("chief_pending_tasks").select("*") \
+                .eq("chief_id", self.chief_id) \
+                .eq("status", "pending") \
+                .order("created_at").limit(20).execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning("[%s] _load_pending_tasks error: %s", self.name, e)
+            return []
+
+    def _save_task(self, task_description: str, task_number: int = 1,
+                   topic_id: int = None, project_slug: str = "",
+                   source: str = "mirco") -> Optional[int]:
+        """Salva un task ricevuto in chief_pending_tasks. Ritorna ID."""
+        try:
+            r = supabase.table("chief_pending_tasks").insert({
+                "chief_id": self.chief_id,
+                "topic_id": topic_id,
+                "project_slug": project_slug,
+                "task_description": task_description[:1000],
+                "task_number": task_number,
+                "status": "pending",
+                "source": source,
+                "created_at": now_rome().isoformat(),
+            }).execute()
+            if r.data:
+                return r.data[0].get("id")
+        except Exception as e:
+            logger.warning("[%s] _save_task error: %s", self.name, e)
+        return None
+
+    def _complete_task(self, task_id: int, output_text: str = "") -> None:
+        """Marca task come FATTO con output."""
+        try:
+            supabase.table("chief_pending_tasks").update({
+                "status": "done",
+                "output_text": output_text[:2000] if output_text else "",
+                "completed_at": now_rome().isoformat(),
+            }).eq("id", task_id).execute()
+        except Exception as e:
+            logger.warning("[%s] _complete_task error: %s", self.name, e)
+
+    def _block_task(self, task_id: int, reason: str, blocked_by: str = "mirco") -> None:
+        """Marca task come BLOCCATO con motivo."""
+        try:
+            supabase.table("chief_pending_tasks").update({
+                "status": "blocked",
+                "blocked_reason": reason[:500],
+                "blocked_by": blocked_by,
+                "completed_at": now_rome().isoformat(),
+            }).eq("id", task_id).execute()
+        except Exception as e:
+            logger.warning("[%s] _block_task error: %s", self.name, e)
+
+    def _format_pending_tasks_context(self, tasks: List[Dict]) -> str:
+        """Formatta task pendenti come contesto per il system prompt."""
+        if not tasks:
+            return ""
+        lines = ["TASK PENDENTI DA COMPLETARE (rispondi a OGNUNO con output concreto):"]
+        for t in tasks:
+            lines.append(
+                "  Task #" + str(t.get("task_number", "?"))
+                + " (id=" + str(t.get("id", "?")) + "): "
+                + (t.get("task_description") or "?")[:200]
+            )
+        return "\n".join(lines)
+
+    def _contains_task_forbidden(self, response: str) -> bool:
+        """Controlla se la risposta contiene frasi vietate per i task."""
+        lower = response.lower()
+        return any(phrase in lower for phrase in self._TASK_FORBIDDEN_PHRASES)
 
     def save_decision(self, decision_type: str, summary: str, full_text: str = "") -> None:
         """Salva una decisione/raccomandazione in chief_decisions."""

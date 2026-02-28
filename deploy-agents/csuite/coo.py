@@ -132,6 +132,22 @@ class COO(BaseChief):
             ctx["project_tasks"] = r.data or []
         except Exception as e:
             ctx["project_tasks"] = f"errore lettura DB: {e}"
+        # v5.35: TODO list COO
+        try:
+            r = supabase.table("coo_project_tasks").select(
+                "id,project_slug,task_description,priority,owner_chief,status,blocked_by"
+            ).neq("status", "fatto").order("priority").execute()
+            ctx["todo_list"] = r.data or []
+        except Exception as e:
+            ctx["todo_list"] = f"errore lettura DB: {e}"
+        # v5.35: task pendenti di tutti i Chief
+        try:
+            r = supabase.table("chief_pending_tasks").select(
+                "id,chief_id,task_description,status,created_at"
+            ).eq("status", "pending").order("created_at").limit(20).execute()
+            ctx["chief_pending_tasks"] = r.data or []
+        except Exception as e:
+            ctx["chief_pending_tasks"] = f"errore lettura DB: {e}"
         return ctx
 
 
@@ -1260,6 +1276,7 @@ class COO(BaseChief):
                         topic_scope_id=None, project_scope_id=None,
                         recent_messages=None):
         """Override: COO con context awareness completo.
+        v5.35: task management + TODO list integrata.
         v5.33: legge history, pending actions, pipeline. Esegue deleghe reali.
         """
         # Estrai thread_id
@@ -1283,9 +1300,33 @@ class COO(BaseChief):
         project = self._get_project_from_topic(thread_id)
         pipeline_text = self._load_pipeline_status(project) if project else ""
 
+        # v5.35: carica TODO list per contesto
+        todo_context = ""
+        project_slug = ""
+        if project:
+            project_slug = project.get("slug") or project.get("name", "")
+            todo_tasks = self._load_todo_list(project_slug)
+            if todo_tasks:
+                todo_context = (
+                    "TODO LIST CANTIERE " + project_slug.upper() + ":\n"
+                    + self._format_todo_list(todo_tasks)
+                )
+
         # 4. Costruisci contesto arricchito
         enriched_context = self._build_enriched_context(
             history, pending, pipeline_text, user_context,
+        )
+        if todo_context:
+            enriched_context += "\n\n" + todo_context
+
+        # v5.35: aggiungi regole task management al contesto
+        enriched_context += (
+            "\n\nREGOLE TASK COO (TASSATIVE):\n"
+            "- Quando rispondi a Mirco su un cantiere, SEMPRE includi la TODO list aggiornata\n"
+            "- Ogni task deve avere: stato (DA FARE/FATTO/BLOCCATO), proprietario, priorita\n"
+            "- Non esistono task 'in corso'. Un task e DA FARE o FATTO o BLOCCATO\n"
+            "- Se un Chief non produce output concreto, scala a Mirco\n"
+            "- Formato risposta: TODO list + delta (cosa e cambiato) + bottleneck + prossima azione"
         )
 
         # 5. Chiama parent answer_question con contesto arricchito
@@ -1310,6 +1351,22 @@ class COO(BaseChief):
                     project_scope_id=project_scope_id,
                     recent_messages=recent_messages,
                 )
+
+        # v5.35: controlla frasi vietate task-specific
+        if self._contains_task_forbidden(response):
+            logger.info("[COO] Task forbidden phrase detected, regenerating...")
+            enriched_context += (
+                "\n\nATTENZIONE: La tua risposta conteneva frasi vietate come "
+                "'sto lavorando', 'ci lavoro', 'ti aggiorno'. "
+                "RISCRIVI producendo output concreto ORA. Se non puoi, scrivi BLOCCATO con motivo."
+            )
+            response = super().answer_question(
+                question, user_context=enriched_context,
+                project_context=project_context,
+                topic_scope_id=topic_scope_id,
+                project_scope_id=project_scope_id,
+                recent_messages=recent_messages,
+            )
 
         # 7. Update project state se in un cantiere
         if project:
@@ -1838,3 +1895,158 @@ class COO(BaseChief):
             pass
 
         return "\n".join(gathered) if gathered else ""
+
+    # ============================================================
+    # v5.35 — TODO LIST MANAGEMENT (coo_project_tasks)
+    # ============================================================
+
+    def _load_todo_list(self, project_slug=None):
+        """Carica TODO list da coo_project_tasks. Se project_slug dato, filtra."""
+        try:
+            q = supabase.table("coo_project_tasks").select("*") \
+                .order("priority").order("created_at")
+            if project_slug:
+                q = q.eq("project_slug", project_slug)
+            r = q.execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning("[COO] _load_todo_list error: %s", e)
+            return []
+
+    def _add_todo_task(self, project_slug, task_description, owner_chief,
+                       priority="P1", project_id=None):
+        """Aggiunge task alla TODO list. Ritorna ID."""
+        try:
+            r = supabase.table("coo_project_tasks").insert({
+                "project_slug": project_slug,
+                "project_id": project_id,
+                "task_description": task_description[:1000],
+                "priority": priority,
+                "owner_chief": owner_chief,
+                "status": "da_fare",
+                "created_at": now_rome().isoformat(),
+            }).execute()
+            if r.data:
+                return r.data[0].get("id")
+        except Exception as e:
+            logger.warning("[COO] _add_todo_task error: %s", e)
+        return None
+
+    def _update_todo_status(self, task_id, new_status, output_text="",
+                            blocked_reason="", blocked_by=""):
+        """Aggiorna stato task nella TODO list."""
+        try:
+            data = {"status": new_status}
+            if new_status == "fatto":
+                data["completed_at"] = now_rome().isoformat()
+                data["output_text"] = output_text[:2000] if output_text else ""
+            elif new_status == "bloccato":
+                data["blocked_reason"] = blocked_reason[:500]
+                data["blocked_by"] = blocked_by
+            supabase.table("coo_project_tasks").update(data) \
+                .eq("id", task_id).execute()
+        except Exception as e:
+            logger.warning("[COO] _update_todo_status error: %s", e)
+
+    def _assign_task_to_chief(self, task_id, task_description, target_chief,
+                               project_slug="", thread_id=None):
+        """Assegna task a un Chief via agent_to_agent_call con istruzioni precise."""
+        # Salva in chief_pending_tasks per il target
+        try:
+            supabase.table("chief_pending_tasks").insert({
+                "chief_id": target_chief,
+                "topic_id": thread_id,
+                "project_slug": project_slug,
+                "task_description": task_description[:1000],
+                "task_number": 1,
+                "status": "pending",
+                "source": "coo",
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[COO] _assign_task save error: %s", e)
+
+        # Chiama il Chief
+        result = agent_to_agent_call(
+            from_chief_id="coo",
+            to_chief_id=target_chief,
+            task=task_description,
+            context="Progetto: " + project_slug if project_slug else "",
+        )
+
+        # Se ha prodotto output concreto, marca come fatto
+        if result.get("status") == "ok":
+            response = result.get("response", "")
+            if isinstance(response, dict):
+                response = json.dumps(response, ensure_ascii=False, default=str)
+            self._update_todo_status(task_id, "fatto", output_text=str(response)[:500])
+            return {"status": "fatto", "output": str(response)[:500]}
+
+        # Se fallito, marca come bloccato
+        error = result.get("error", "Chief non disponibile")
+        self._update_todo_status(task_id, "bloccato",
+                                blocked_reason=str(error)[:200],
+                                blocked_by=target_chief)
+        return {"status": "bloccato", "reason": str(error)[:200]}
+
+    def _format_todo_list(self, tasks):
+        """Formatta TODO list per il messaggio Telegram."""
+        if not tasks:
+            return "Nessun task attivo."
+
+        da_fare = [t for t in tasks if t.get("status") == "da_fare"]
+        fatto = [t for t in tasks if t.get("status") == "fatto"]
+        bloccato = [t for t in tasks if t.get("status") == "bloccato"]
+
+        lines = []
+
+        if bloccato:
+            for t in bloccato:
+                lines.append(
+                    "\U0001f534 " + (t.get("priority") or "P1") + " "
+                    + (t.get("owner_chief") or "?").upper() + ": "
+                    + (t.get("task_description") or "?")[:60]
+                    + " — BLOCCATO DA " + (t.get("blocked_by") or "?"))
+
+        if da_fare:
+            for t in da_fare:
+                lines.append(
+                    "\u26AA " + (t.get("priority") or "P1") + " "
+                    + (t.get("owner_chief") or "?").upper() + ": "
+                    + (t.get("task_description") or "?")[:60])
+
+        if fatto:
+            for t in fatto[-3:]:  # solo ultimi 3 fatti
+                lines.append(
+                    "\u2705 " + (t.get("owner_chief") or "?").upper() + ": "
+                    + (t.get("task_description") or "?")[:60])
+
+        return "\n".join(lines) if lines else "Nessun task attivo."
+
+    def _format_todo_response(self, project_slug, delta="", bottleneck="", next_action=""):
+        """Formatta risposta COO con TODO list + delta + bottleneck + next action."""
+        tasks = self._load_todo_list(project_slug)
+
+        parts = [self._format_todo_list(tasks)]
+
+        if delta:
+            parts.append("Aggiornamento: " + delta)
+        if bottleneck:
+            parts.append("Bottleneck: " + bottleneck)
+        if next_action:
+            parts.append("Prossima azione: " + next_action)
+
+        return "\n\n".join(parts)
+
+    def _escalate_to_mirco(self, task_description, chief_id, reason, thread_id=None):
+        """Scala a Mirco: il Chief non ha prodotto output concreto."""
+        msg = fmt("coo", "Escalation a Mirco",
+                 "\U0001f534 " + chief_id.upper() + " non ha prodotto output per:\n"
+                 + task_description[:200] + "\n\n"
+                 "Motivo: " + reason[:200] + "\n"
+                 "Proposta: assegnare manualmente o riformulare il task.")
+
+        if thread_id:
+            self._send_to_topic(thread_id, msg)
+        else:
+            self.notify_mirco(msg, level="warning")
