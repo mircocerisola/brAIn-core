@@ -1268,6 +1268,7 @@ class BaseChief(BaseAgent):
         "ci lavoro", "lo faccio", "me ne occupo",
         "risposta in elaborazione", "ti aggiorno",
         "ci penso io", "sto analizzando", "lo verifico",
+        "riprova tra poco", "monitoro",
     ]
 
     def _load_pending_tasks(self) -> List[Dict]:

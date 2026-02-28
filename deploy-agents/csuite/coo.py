@@ -109,8 +109,9 @@ class COO(BaseChief):
             return ("products_live", r.data or [])
 
         def _q_kpis():
-            r = supabase.table("kpi_daily").select("project_id,metric_name,value,recorded_at") \
-                .order("recorded_at", desc=True).limit(20).execute()
+            r = supabase.table("kpi_daily").select(
+                "date,problems_found,avg_problem_score,bos_generated,active_cantieri,total_cost_eur,api_calls,recorded_at"
+            ).order("recorded_at", desc=True).limit(20).execute()
             return ("recent_kpis", r.data or [])
 
         def _q_logs():

@@ -452,9 +452,26 @@ class CTO(BaseChief):
 
         def _monitor():
             _elapsed = 0
+            _max_minutes = 120  # Timeout: 2 ore max
             while True:
                 time.sleep(300)  # 5 minuti
                 _elapsed += 5
+
+                # Timeout: se supera 2 ore, marca come errore ed esci
+                if _elapsed >= _max_minutes:
+                    logger.warning("[CTO] Monitor timeout dopo %d min per task #%d", _elapsed, _tid)
+                    try:
+                        supabase.table("code_tasks").update({
+                            "status": "error",
+                        }).eq("id", _tid).execute()
+                    except Exception:
+                        pass
+                    _self._send_telegram(_cid, _thid, fmt("cto",
+                        "Timeout",
+                        "Task #" + str(_tid) + " interrotto dopo " + str(_elapsed) + " min"
+                    ))
+                    _self._dequeue_next_task()
+                    break
 
                 try:
                     r = supabase.table("code_tasks").select(

@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
+from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger, _claude_managed
 from core.templates import now_rome
 
 
@@ -102,19 +102,24 @@ class BaseAgent:
         if temperature is not None:
             kwargs["temperature"] = temperature
 
-        for attempt in range(self.max_retries):
-            try:
-                resp = claude.messages.create(**kwargs)
-                text = resp.content[0].text if resp.content else ""
-                self._log_api_call(mdl, resp.usage)
-                return text
-            except Exception as e:
-                if attempt < self.max_retries - 1:
-                    # v5.36: jitter nel retry backoff
-                    wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(wait)
-                else:
-                    raise
+        # Setta flag per far passare il wrapper senza doppio retry/logging
+        _claude_managed.active = True
+        try:
+            for attempt in range(self.max_retries):
+                try:
+                    resp = claude.messages.create(**kwargs)
+                    text = resp.content[0].text if resp.content else ""
+                    self._log_api_call(mdl, resp.usage)
+                    return text
+                except Exception as e:
+                    if attempt < self.max_retries - 1:
+                        # v5.36: jitter nel retry backoff
+                        wait = self.retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                        time.sleep(wait)
+                    else:
+                        raise
+        finally:
+            _claude_managed.active = False
         return ""
 
     def _log_api_call(self, model, usage):
