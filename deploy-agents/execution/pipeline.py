@@ -11,6 +11,8 @@ from core.templates import now_rome
 import requests as _requests
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 
+SEP = ""
+
 
 # ── Pipeline steps — ordine OBBLIGATORIO sequenziale bloccante ────────────────
 
