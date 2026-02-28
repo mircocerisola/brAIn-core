@@ -1,7 +1,6 @@
 """CTO — Chief Technology Officer. Dominio: infrastruttura, codice, deploy, sicurezza tecnica.
+v5.32: build_landing_from_brief() — riceve brief CMO, genera HTML, screenshot, card approvazione.
 v5.18: Claude Code headless in Cloud Run Job. CTO triggera job, monitora output_log da DB.
-       execute_approved_task: status=ready, trigger job, monitor loop 5min.
-       interrupt_task: status=interrupt_requested. Zero brain_runner locale.
 """
 import json
 import re
@@ -712,6 +711,209 @@ class CTO(BaseChief):
 
         logger.info("[CTO] Task #%d annullato da Mirco, COO notificato", task_id)
         return {"status": "cancelled", "task_id": task_id}
+
+    #
+    # v5.32: BUILD LANDING DA BRIEF CMO
+    #
+
+    def build_landing_from_brief(self, project_id, brief=None, thread_id=None):
+        """Riceve brief design dal CMO, genera HTML, screenshot, card approvazione Mirco."""
+        logger.info("[CTO] build_landing_from_brief: project #%d", project_id)
+
+        # Leggi brief da project_assets se non passato
+        if not brief:
+            try:
+                r = supabase.table("project_assets").select("content") \
+                    .eq("project_id", project_id).eq("asset_type", "landing_brief").execute()
+                if r.data and r.data[0].get("content"):
+                    brief = json.loads(r.data[0]["content"])
+            except Exception as e:
+                logger.warning("[CTO] read landing_brief: %s", e)
+
+        if not brief:
+            return {"error": "brief non trovato per project #" + str(project_id)}
+
+        # Leggi dati progetto
+        brand = ""
+        email = ""
+        domain_name = ""
+        description = ""
+        if not thread_id:
+            try:
+                r = supabase.table("projects").select(
+                    "brand_name,name,brand_email,brand_domain,topic_id,description"
+                ).eq("id", project_id).execute()
+                if r.data:
+                    p = r.data[0]
+                    brand = p.get("brand_name") or p.get("name", "")
+                    email = p.get("brand_email") or brief.get("email", "")
+                    domain_name = p.get("brand_domain") or brief.get("domain", "")
+                    description = p.get("description") or ""
+                    thread_id = thread_id or p.get("topic_id")
+            except Exception:
+                pass
+
+        if not brand:
+            brand = brief.get("brand", "Progetto")
+
+        # Notifica partenza
+        if thread_id:
+            self._send_telegram_to_topic(thread_id,
+                fmt("cto", "Build landing HTML",
+                    "Sto generando la landing page per " + brand + " dal brief CMO."))
+
+        # Genera HTML da brief
+        palette = brief.get("palette", {})
+        hero = brief.get("hero", {})
+        sections = brief.get("sections", [])
+        fonts = brief.get("fonts", {})
+        style_notes = brief.get("style_notes", "")
+
+        sections_text = ""
+        for sec in sections:
+            sections_text += (
+                "\n- Sezione '" + sec.get("title", "") + "' "
+                "(tipo: " + sec.get("type", "generic") + "): "
+                + ", ".join(sec.get("items", []))
+            )
+
+        html_prompt = (
+            "Sei un web developer senior. Genera una landing page HTML completa, SINGOLO FILE.\n"
+            "Brand: " + brand + "\n"
+            "Email contatto: " + email + "\n"
+            "Dominio: " + domain_name + "\n"
+            "Descrizione: " + (description or "Prodotto SaaS") + "\n\n"
+            "BRIEF DESIGN (dal CMO):\n"
+            "Palette: primary=" + palette.get("primary", "#0D1117")
+            + " accent=" + palette.get("accent", "#52B788")
+            + " bg=" + palette.get("bg", "#ffffff") + "\n"
+            "Font heading: " + fonts.get("heading", "Inter") + "\n"
+            "Font body: " + fonts.get("body", "Inter") + "\n"
+            "Hero headline: " + hero.get("headline", brand) + "\n"
+            "Hero subheadline: " + hero.get("subheadline", "") + "\n"
+            "Hero CTA: " + hero.get("cta_text", "Richiedi Demo") + "\n"
+            "Sezioni:" + sections_text + "\n"
+            "Stile: " + style_notes[:300] + "\n\n"
+            "REQUISITI TECNICI:\n"
+            "- CSS inline, responsive mobile-first\n"
+            "- Meta SEO + Open Graph\n"
+            "- Animazioni CSS sottili (fade-in, hover)\n"
+            "- Font: Google Fonts " + fonts.get("heading", "Inter") + "\n"
+            "- NESSUN brand brAIn visibile\n"
+            "- Deve sembrare una landing professionale startup tech europea 2025\n"
+            "- Rispondi SOLO con il codice HTML completo, nient'altro."
+        )
+
+        try:
+            html = self.call_claude(html_prompt, model="claude-sonnet-4-6", max_tokens=8000)
+        except Exception as e:
+            logger.warning("[CTO] build_landing HTML generation: %s", e)
+            return {"error": str(e)}
+
+        # Salva HTML
+        try:
+            supabase.table("projects").update({"landing_html": html}).eq("id", project_id).execute()
+        except Exception:
+            pass
+        try:
+            supabase.table("project_assets").upsert({
+                "project_id": project_id,
+                "asset_type": "landing_html",
+                "content": html,
+                "filename": brand.lower().replace(" ", "-") + "-landing.html",
+                "updated_at": now_rome().isoformat(),
+            }).execute()
+        except Exception:
+            pass
+
+        # Screenshot HTML → PNG
+        screenshot_path = None
+        try:
+            from utils.html_screenshot import html_to_screenshot
+            screenshot_path = html_to_screenshot(
+                html, width=1200, height=900,
+                filename_prefix="landing_" + str(project_id)
+            )
+        except Exception as e:
+            logger.warning("[CTO] screenshot error: %s", e)
+
+        # Invia preview + card [Approva Deploy][Modifica]
+        if thread_id:
+            self._send_landing_preview(project_id, brand, html, screenshot_path, thread_id)
+
+        logger.info("[CTO] Landing HTML generata (%d chars) + screenshot per project #%d",
+                    len(html or ""), project_id)
+        return {"status": "ok", "project_id": project_id, "html_length": len(html or "")}
+
+    def _send_landing_preview(self, project_id, brand, html, screenshot_path, topic_id):
+        """Invia preview landing (screenshot + HTML doc) con bottoni."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+
+            # Invia screenshot se disponibile
+            if screenshot_path:
+                caption = fmt("cto", "Preview landing " + brand,
+                              "HTML generato (" + str(len(html or "")) + " chars)\n"
+                              "Approvi per il deploy?")
+                markup = {"inline_keyboard": [[
+                    {"text": "\u2705 Approva deploy", "callback_data": "landing_deploy_approve:" + str(project_id)},
+                    {"text": "\u270f\ufe0f Modifica", "callback_data": "landing_deploy_modify:" + str(project_id)},
+                ]]}
+                data_payload = {
+                    "chat_id": group_id,
+                    "caption": caption,
+                    "reply_markup": json.dumps(markup),
+                }
+                if topic_id:
+                    data_payload["message_thread_id"] = topic_id
+                with open(screenshot_path, "rb") as f:
+                    _requests.post(
+                        "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendPhoto",
+                        data=data_payload,
+                        files={"photo": f},
+                        timeout=30,
+                    )
+
+            # Invia anche HTML come documento
+            import tempfile
+            filename = brand.lower().replace(" ", "-") + "-landing.html"
+            tmp_path = tempfile.gettempdir() + "/" + filename
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.write(html or "")
+            doc_data = {"chat_id": group_id, "caption": "File HTML landing " + brand}
+            if topic_id:
+                doc_data["message_thread_id"] = topic_id
+            with open(tmp_path, "rb") as f:
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendDocument",
+                    data=doc_data,
+                    files={"document": (filename, f, "text/html")},
+                    timeout=15,
+                )
+        except Exception as e:
+            logger.warning("[CTO] send_landing_preview: %s", e)
+
+    def _send_telegram_to_topic(self, topic_id, text):
+        """Helper: invia messaggio a uno specifico topic."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+            _requests.post(
+                "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.warning("[CTO] send_telegram_to_topic: %s", e)
 
     #
     # GENERA PROMPT TECNICI PER ALTRI CHIEF

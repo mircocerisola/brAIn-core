@@ -712,6 +712,95 @@ def _extract_chiefs_from_message(message: str) -> List[str]:
 
 
 #
+# TASK 4 (v5.32): daily_legal_updates — ricerca aggiornamenti normativi per CLO
+#
+
+def daily_legal_updates() -> Dict[str, Any]:
+    """Ricerca giornaliera aggiornamenti normativi (GDPR, AI Act, ePrivacy) via Perplexity.
+    Invia risultati al topic CLO e salva in org_knowledge.
+    """
+    start = now_rome()
+    logger.info("[CPeO] Avvio daily_legal_updates")
+
+    queries = [
+        "GDPR aggiornamenti nuove decisioni garante privacy Italia Europa ultimi 7 giorni " + start.strftime("%Y"),
+        "AI Act EU implementazione nuove regole obblighi aziende AI " + start.strftime("%Y"),
+        "ePrivacy cookie consent digital services act novita Europa " + start.strftime("%Y"),
+    ]
+
+    results_text = []
+    for query in queries:
+        result = search_perplexity(query, max_tokens=1000)
+        if result:
+            results_text.append(result)
+        time.sleep(1)
+
+    if not results_text:
+        logger.warning("[CPeO] daily_legal_updates: nessun risultato Perplexity")
+        return {"status": "error", "error": "nessun risultato"}
+
+    # Sintetizza con Haiku
+    combined = "\n\n".join(results_text)
+    summary_prompt = (
+        "Sei il CPeO di brAIn. Hai raccolto aggiornamenti normativi per il CLO.\n"
+        "Sintetizza in max 15 righe i punti piu' importanti e azionabili.\n"
+        "Focus: GDPR, AI Act, ePrivacy, obblighi per aziende AI-native in Europa.\n"
+        "Formato: lista numerata, italiano, zero fuffa.\n\n"
+        "Ricerca:\n" + combined[:5000]
+    )
+
+    try:
+        summary = claude.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=600,
+            messages=[{"role": "user", "content": summary_prompt}],
+        ).content[0].text.strip()
+    except Exception as e:
+        logger.warning("[CPeO] legal summary: %s", e)
+        summary = combined[:1000]
+
+    # Salva in org_knowledge
+    try:
+        supabase.table("org_knowledge").insert({
+            "title": "Legal Update " + start.strftime("%Y-%m-%d"),
+            "content": summary,
+            "category": "legal",
+            "source": "cpeo_daily_legal",
+        }).execute()
+    except Exception as e:
+        logger.warning("[CPeO] org_knowledge insert: %s", e)
+
+    # Invia al topic CLO
+    _send_to_clo_topic(
+        "\U0001f331 CPeO\n"
+        "Aggiornamento normativo " + start.strftime("%d/%m/%Y") + "\n\n"
+        + summary
+    )
+
+    logger.info("[CPeO] daily_legal_updates completato")
+    return {"status": "ok", "summary_length": len(summary)}
+
+
+def _send_to_clo_topic(text):
+    """Invia messaggio nel topic #legal (CLO)."""
+    try:
+        r = supabase.table("org_config").select("value").eq("key", "chief_topic_clo").execute()
+        topic_id = int(r.data[0]["value"]) if r.data else None
+        r2 = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+        group_id = int(r2.data[0]["value"]) if r2.data else None
+        if not topic_id or not group_id or not TELEGRAM_BOT_TOKEN:
+            return
+        import requests as _req
+        _req.post(
+            "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+            json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning("[CPeO] send_to_clo_topic: %s", e)
+
+
+#
 # COACHING SETTIMANALE (esistente)
 #
 

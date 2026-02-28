@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements_cc.txt -r requirements_agents.txt
 COPY deploy-agents/core ./core
 COPY deploy-agents/csuite ./csuite
 COPY deploy-agents/intelligence ./intelligence
+COPY deploy-agents/utils ./utils
 
 # Entry point command-center
 COPY deploy/command_center_unified.py .

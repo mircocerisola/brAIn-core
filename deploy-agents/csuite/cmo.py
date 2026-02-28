@@ -1,6 +1,5 @@
 """CMO — Chief Marketing Officer. Dominio: marketing, brand, growth, conversion.
-v5.27: format_cmo_message, answer_question override con keyword trigger,
-       generate_bozza_visiva riscritta (1200x675, gradient, 3 card).
+v5.32: CMO non scrive MAI codice. Flow landing: research → mockup image → card approvazione → brief CTO.
 """
 import json
 import re
@@ -19,7 +18,7 @@ try:
 except ImportError:
     _HAS_PILLOW = False
 
-# Keyword che triggerano generate_bozza_visiva
+# Keyword che triggerano design_landing_concept
 _BOZZA_KEYWORDS = ["bozza", "landing", "visiva", "design", "mockup", "wireframe", "pagina"]
 
 
@@ -90,16 +89,9 @@ class CMO(BaseChief):
         return response
 
     def _handle_bozza_request(self, question, project_scope_id=None):
-        """Gestisce richiesta bozza: estrai project, genera PNG, rispondi."""
-        if not _HAS_PILLOW:
-            logger.warning("[CMO] Pillow non disponibile per bozza")
-            return fmt("cmo", "Bozza non disponibile",
-                       "Pillow non installato nel container.")
-
-        # Cerca project_id dal contesto o dal messaggio
+        """Gestisce richiesta bozza/landing: estrai project, lancia design_landing_concept."""
+        # Cerca project_id
         project_id = None
-        project_name = ""
-        tagline = ""
         thread_id = None
 
         if project_scope_id:
@@ -108,51 +100,38 @@ class CMO(BaseChief):
             except (ValueError, TypeError):
                 pass
 
-        # Se non abbiamo project_id, cerca il progetto attivo piu recente
         if not project_id:
             try:
-                r = supabase.table("projects").select(
-                    "id,name,brand_name"
-                ).not_.in_("status", "archived,killed,failed") \
+                r = supabase.table("projects").select("id") \
+                    .not_.in_("status", "archived,killed,failed") \
                     .order("created_at", desc=True).limit(1).execute()
                 if r.data:
                     project_id = r.data[0]["id"]
             except Exception as e:
                 logger.warning("[CMO] lookup project: %s", e)
 
-        # Carica dati progetto
         if project_id:
             try:
-                r = supabase.table("projects").select(
-                    "id,name,brand_name,topic_id"
-                ).eq("id", project_id).execute()
+                r = supabase.table("projects").select("topic_id") \
+                    .eq("id", project_id).execute()
                 if r.data:
-                    p = r.data[0]
-                    project_name = p.get("brand_name") or p.get("name", "Progetto")
-                    thread_id = p.get("topic_id")
-            except Exception as e:
-                logger.warning("[CMO] load project data: %s", e)
+                    thread_id = r.data[0].get("topic_id")
+            except Exception:
+                pass
 
-        if not project_name:
-            # Estrai dal messaggio
-            project_name = self._extract_project_name(question)
+        if not project_id:
+            return fmt("cmo", "Nessun progetto attivo",
+                       "Non ho trovato un progetto attivo per generare il concept.")
 
-        if not tagline:
-            tagline = "La soluzione intelligente"
-
-        logger.info("[CMO] Genero bozza: project_id=%s, name=%s", project_id, project_name)
-
-        result = self.generate_bozza_visiva(project_name, tagline, thread_id, project_id)
+        logger.info("[CMO] Avvio design_landing_concept: project_id=%s", project_id)
+        result = self.design_landing_concept(project_id, thread_id)
 
         if result.get("status") == "ok":
-            return fmt("cmo",
-                "Bozza visiva generata",
-                "Progetto: " + project_name + "\n"
-                "File: " + result.get("path", ""))
+            return fmt("cmo", "Concept landing in lavorazione",
+                       "Ho inviato il mockup nel topic del progetto con card di approvazione.")
         else:
-            return fmt("cmo",
-                "Errore bozza visiva",
-                result.get("error", "errore sconosciuto"))
+            return fmt("cmo", "Errore concept",
+                       result.get("error", "errore sconosciuto"))
 
     def _extract_project_name(self, question):
         """Estrai nome progetto dal messaggio (dopo 'per' o 'di')."""
@@ -330,9 +309,9 @@ class CMO(BaseChief):
 
         return sections
 
-    def generate_landing_page_html(self, project_id, thread_id=None):
-        """Genera HTML landing page via Claude per un progetto smoke test.
-        v5.30: ricerca web autonoma Perplexity PRIMA di generare. Zero domande a Mirco.
+    def design_landing_concept(self, project_id, thread_id=None):
+        """v5.32: CMO NON scrive codice. Flow: ricerca → brief design → mockup immagine → card approvazione.
+        Dopo approvazione Mirco, il brief va al CTO che scrive l'HTML.
         """
         from csuite.utils import web_search
 
@@ -348,102 +327,202 @@ class CMO(BaseChief):
 
         brand = project.get("brand_name") or project.get("name", "")
         email = project.get("brand_email") or ""
-        domain = project.get("brand_domain") or ""
+        domain_name = project.get("brand_domain") or ""
         description = project.get("description") or ""
         topic_id = thread_id or project.get("topic_id")
 
-        # Notifica: cerco riferimenti online prima di generare
+        # Notifica: sto ricercando
         if topic_id:
             self._send_report_to_topic_id(topic_id,
-                fmt("cmo", "Landing in lavorazione",
-                    "Cerco riferimenti visivi online per landing SaaS simili. 2-3 minuti."))
+                fmt("cmo", "Landing concept in lavorazione",
+                    "Cerco riferimenti e best practice online. 2-3 minuti."))
 
-        # Ricerca web autonoma: riferimenti visivi + stile
+        # FASE 1: Ricerca online via Perplexity
         ref_search = web_search(
-            "migliori landing page SaaS " + brand + " design moderno accattivante esempi 2025",
+            "migliori landing page SaaS " + brand + " design moderno 2025 esempi",
             "cmo"
         )
         style_search = web_search(
-            "best converting SaaS landing page design technology Italy 2025",
+            "best converting SaaS landing page design trends 2025 technology Italy",
             "cmo"
         )
 
-        prompt = (
-            "Sei un designer web esperto in landing page SaaS ad alta conversione.\n"
+        # FASE 2: Genera brief design via Claude (NO codice, solo strategia)
+        brief_prompt = (
+            "Sei il CMO di brAIn, esperto in marketing e brand identity.\n"
+            "NON scrivere MAI codice (HTML, CSS, JS). Zero.\n"
+            "Genera un BRIEF DI DESIGN per una landing page.\n\n"
             "Brand: " + brand + "\n"
             "Email: " + email + "\n"
-            "Dominio: " + domain + "\n"
+            "Dominio: " + domain_name + "\n"
             "Descrizione: " + (description or "Prodotto SaaS innovativo") + "\n\n"
-            "Riferimenti visivi trovati online:\n" + ref_search + "\n\n"
-            "Stile ricercato:\n" + style_search + "\n\n"
-            "Crea una landing page HTML completa, SINGOLO FILE, con:\n"
-            "- CSS inline moderno e accattivante (NON basic, NON template)\n"
-            "- Design ispirato ai migliori SaaS 2025: hero potente, gerarchia visiva chiara\n"
-            "- Colori: sfondo scuro #0D1117 o bianco puro, accent verde #52B788\n"
-            "- Hero: headline grande e diretta, subheadline, CTA principale verde\n"
-            "- 3 pain point del target con icone\n"
-            "- Come funziona: 3 step visivi\n"
-            "- CTA prominente (contattaci / richiedi demo)\n"
-            "- Footer con " + email + "\n"
-            "- Mobile responsive, meta tags SEO + Open Graph\n"
-            "- Animazioni CSS sottili (fade-in, hover)\n"
-            "- Font: Inter o sistema\n"
-            "- NESSUN brand 'brAIn' visibile, solo il brand del prodotto\n"
-            "- Deve sembrare una landing professionale di una startup tech europea 2025\n"
-            "- Rispondi SOLO con il codice HTML completo, nient'altro."
+            "Riferimenti trovati:\n" + ref_search + "\n\n"
+            "Trend design:\n" + style_search + "\n\n"
+            "Il brief deve includere (formato JSON):\n"
+            '{"palette": {"primary": "#hex", "secondary": "#hex", "accent": "#hex", "bg": "#hex"},\n'
+            ' "fonts": {"heading": "nome font", "body": "nome font"},\n'
+            ' "hero": {"headline": "testo", "subheadline": "testo", "cta_text": "testo"},\n'
+            ' "sections": [\n'
+            '   {"title": "...", "type": "pain_points|features|how_it_works|testimonials|cta",\n'
+            '    "items": ["item1", "item2", "item3"]}\n'
+            ' ],\n'
+            ' "style_notes": "descrizione stile visivo in 2 frasi",\n'
+            ' "footer": {"email": "...", "links": ["Privacy", "Terms"]}\n'
+            "}\n\n"
+            "Rispondi SOLO con il JSON, nient'altro."
         )
 
         try:
-            html = self.call_claude(prompt, model="claude-sonnet-4-6", max_tokens=8000)
+            brief_raw = self.call_claude(brief_prompt, model="claude-sonnet-4-6", max_tokens=2000)
         except Exception as e:
-            logger.warning("[CMO] generate_landing_page_html error: %s", e)
+            logger.warning("[CMO] design_landing_concept brief error: %s", e)
             return {"error": str(e)}
 
-        # Salva in projects.landing_html (fallback)
-        try:
-            supabase.table("projects").update({
-                "landing_html": html,
-            }).eq("id", project_id).execute()
-        except Exception as e:
-            logger.warning("[CMO] save landing_html: %s", e)
+        # Parsa il brief JSON
+        brief = self._parse_brief_json(brief_raw)
+        if not brief:
+            brief = {
+                "palette": {"primary": "#0D1117", "accent": "#52B788", "bg": "#ffffff"},
+                "hero": {"headline": brand, "subheadline": description[:100], "cta_text": "Richiedi Demo"},
+                "sections": [],
+                "style_notes": brief_raw[:500] if brief_raw else "",
+            }
 
-        # Salva in project_assets
+        # Salva brief in project_assets
         try:
             supabase.table("project_assets").upsert({
                 "project_id": project_id,
-                "asset_type": "landing_html",
-                "content": html,
-                "filename": brand.lower().replace(" ", "-") + "-landing.html",
+                "asset_type": "landing_brief",
+                "content": json.dumps(brief),
+                "filename": brand.lower().replace(" ", "-") + "-brief.json",
                 "updated_at": now_rome().isoformat(),
             }).execute()
         except Exception as e:
-            logger.warning("[CMO] save project_assets: %s", e)
+            logger.warning("[CMO] save landing_brief: %s", e)
 
-        # Invia come documento Telegram
-        if topic_id:
-            self._send_landing_document(project_id, brand, html, topic_id)
+        # FASE 3: Genera mockup immagine (AI o Pillow fallback)
+        mockup_path = self._generate_landing_mockup(brand, brief, project_id)
 
-        # Crea agent_event per CTO
-        try:
-            supabase.table("agent_events").insert({
-                "event_type": "landing_ready_for_deploy",
-                "agent_from": "cmo",
-                "agent_to": "cto",
-                "payload": json.dumps({
-                    "project_id": project_id,
-                    "brand": brand,
-                    "html_length": len(html or ""),
-                }),
-                "created_at": now_rome().isoformat(),
-            }).execute()
-        except Exception as e:
-            logger.warning("[CMO] landing_ready event: %s", e)
+        # FASE 4: Invia mockup + card approvazione a Mirco
+        if topic_id and mockup_path:
+            self._send_landing_approval_card(project_id, brand, brief, mockup_path, topic_id)
+        elif topic_id:
+            # Nessun mockup: invia solo il brief testuale
+            self._send_report_to_topic_id(topic_id,
+                fmt("cmo", "Brief landing " + brand,
+                    "Palette: " + str(brief.get("palette", {})) + "\n"
+                    "Hero: " + str(brief.get("hero", {}).get("headline", "")) + "\n"
+                    "Stile: " + str(brief.get("style_notes", ""))[:200]))
 
-        # Post-task learning
         self._log_bozza_learning(project_id)
+        logger.info("[CMO] Landing concept generato per project #%d", project_id)
+        return {"status": "ok", "project_id": project_id, "brief": brief}
 
-        logger.info("[CMO] Landing HTML generata per project #%d (%d chars)", project_id, len(html or ""))
-        return {"status": "ok", "project_id": project_id, "html_length": len(html or "")}
+    def _parse_brief_json(self, raw_text):
+        """Estrae JSON dal testo Claude (rimuove markdown fences se presenti)."""
+        if not raw_text:
+            return None
+        clean = raw_text.strip()
+        if clean.startswith("```"):
+            lines = clean.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            clean = "\n".join(lines)
+        try:
+            return json.loads(clean)
+        except json.JSONDecodeError:
+            # Cerca JSON nel testo
+            m = re.search(r'\{[\s\S]+\}', clean)
+            if m:
+                try:
+                    return json.loads(m.group(0))
+                except json.JSONDecodeError:
+                    pass
+        return None
+
+    def _generate_landing_mockup(self, brand, brief, project_id):
+        """Genera mockup landing via image generation API. Fallback Pillow."""
+        # Prova image generation API
+        try:
+            from utils.image_generation import generate_image
+            hero = brief.get("hero", {})
+            headline = hero.get("headline", brand)
+            subheadline = hero.get("subheadline", "")
+            palette = brief.get("palette", {})
+            style = brief.get("style_notes", "modern SaaS")
+
+            img_prompt = (
+                "Professional SaaS landing page mockup for '" + brand + "'. "
+                "Hero section with headline '" + headline + "'. "
+                + ("Subheadline: '" + subheadline + "'. " if subheadline else "")
+                + "Color palette: " + str(palette) + ". "
+                "Style: " + style[:200] + ". "
+                "Clean, modern design. Desktop browser view. High quality UI mockup."
+            )
+            path = generate_image(img_prompt, size="1792x1024",
+                                  filename_prefix="landing_" + str(project_id))
+            if path:
+                logger.info("[CMO] Mockup AI generato: %s", path)
+                return path
+        except Exception as e:
+            logger.warning("[CMO] image generation fallback: %s", e)
+
+        # Fallback: Pillow bozza visiva
+        if _HAS_PILLOW:
+            hero = brief.get("hero", {})
+            result = self.generate_bozza_visiva(
+                brand,
+                hero.get("subheadline", "La soluzione intelligente"),
+                project_id=project_id,
+            )
+            return result.get("path")
+        return None
+
+    def _send_landing_approval_card(self, project_id, brand, brief, mockup_path, topic_id):
+        """Invia mockup + card con bottoni [Approva][Modifica][Rifai]."""
+        if not TELEGRAM_BOT_TOKEN:
+            return
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return
+            group_id = int(group_r.data[0]["value"])
+
+            hero = brief.get("hero", {})
+            caption = fmt("cmo", "Concept landing " + brand,
+                "Headline: " + hero.get("headline", brand) + "\n"
+                "CTA: " + hero.get("cta_text", "Richiedi Demo") + "\n"
+                "Stile: " + str(brief.get("style_notes", ""))[:100] + "\n\n"
+                "Approvi questo concept?")
+
+            markup = {"inline_keyboard": [[
+                {"text": "\u2705 Approva", "callback_data": "landing_approve:" + str(project_id)},
+                {"text": "\u270f\ufe0f Modifica", "callback_data": "landing_modify:" + str(project_id)},
+                {"text": "\U0001f504 Rifai", "callback_data": "landing_redo:" + str(project_id)},
+            ]]}
+
+            data_payload = {
+                "chat_id": group_id,
+                "caption": caption,
+                "reply_markup": json.dumps(markup),
+            }
+            if topic_id:
+                data_payload["message_thread_id"] = topic_id
+
+            with open(mockup_path, "rb") as f:
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendPhoto",
+                    data=data_payload,
+                    files={"photo": f},
+                    timeout=30,
+                )
+            logger.info("[CMO] Landing approval card inviata (proj=%d)", project_id)
+        except Exception as e:
+            logger.warning("[CMO] send_landing_approval_card: %s", e)
+
+    def generate_landing_page_html(self, project_id, thread_id=None):
+        """DEPRECATED v5.32: usa design_landing_concept(). Mantiene backward compat."""
+        logger.info("[CMO] generate_landing_page_html DEPRECATED -> design_landing_concept")
+        return self.design_landing_concept(project_id, thread_id)
 
     def _send_landing_document(self, project_id, brand, html, topic_id):
         """Invia landing HTML come documento Telegram."""
@@ -714,6 +793,73 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] publish_landing_brief: %s", e)
             return {"error": str(e)}
+
+    #
+    # TELEGRAM HELPERS
+    #
+
+    def handle_landing_approve(self, project_id):
+        """Callback: Mirco approva concept landing → invia brief al CTO."""
+        logger.info("[CMO] Landing concept approvato per project #%d", project_id)
+
+        # Leggi brief salvato
+        brief = {}
+        try:
+            r = supabase.table("project_assets").select("content") \
+                .eq("project_id", project_id).eq("asset_type", "landing_brief").execute()
+            if r.data and r.data[0].get("content"):
+                brief = json.loads(r.data[0]["content"])
+        except Exception as e:
+            logger.warning("[CMO] handle_landing_approve read brief: %s", e)
+
+        # Leggi dati progetto
+        brand = ""
+        topic_id = None
+        try:
+            r = supabase.table("projects").select("brand_name,name,topic_id,brand_email,brand_domain") \
+                .eq("id", project_id).execute()
+            if r.data:
+                brand = r.data[0].get("brand_name") or r.data[0].get("name", "")
+                topic_id = r.data[0].get("topic_id")
+                brief["email"] = r.data[0].get("brand_email") or ""
+                brief["domain"] = r.data[0].get("brand_domain") or ""
+        except Exception:
+            pass
+
+        # Invia brief al CTO via agent_events
+        try:
+            supabase.table("agent_events").insert({
+                "event_type": "landing_brief_approved",
+                "agent_from": "cmo",
+                "agent_to": "cto",
+                "payload": json.dumps({
+                    "project_id": project_id,
+                    "brand": brand,
+                    "brief": brief,
+                }),
+                "created_at": now_rome().isoformat(),
+            }).execute()
+        except Exception as e:
+            logger.warning("[CMO] landing_brief_approved event: %s", e)
+
+        # Conferma a Mirco
+        if topic_id:
+            self._send_report_to_topic_id(topic_id,
+                fmt("cmo", "Concept approvato",
+                    "Brief inviato al CTO per la realizzazione HTML.\n"
+                    "Il CTO ti inviera' una preview quando pronta."))
+
+        return {"status": "ok", "project_id": project_id}
+
+    def handle_landing_modify(self, project_id, feedback=""):
+        """Callback: Mirco vuole modifiche al concept landing."""
+        logger.info("[CMO] Landing modify richiesta per project #%d", project_id)
+        return {"status": "awaiting_feedback", "project_id": project_id}
+
+    def handle_landing_redo(self, project_id):
+        """Callback: Mirco chiede di rifare il concept landing da zero."""
+        logger.info("[CMO] Landing redo per project #%d", project_id)
+        return self.design_landing_concept(project_id)
 
     #
     # TELEGRAM HELPERS

@@ -761,6 +761,79 @@ async def run_post_task_learning_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+# ── v5.32: CLO Legal + CTO Landing + CPeO Legal Updates ──────
+
+
+async def run_clo_generate_legal_docs_endpoint(request):
+    """POST /clo/generate-legal-docs — {project_id} — genera documenti legali obbligatori."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite.clo import CLO
+        clo = CLO()
+        result = clo.generate_legal_documents(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_clo_legal_gate_endpoint(request):
+    """POST /clo/legal-gate — {project_id} — verifica se documenti legali OK."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite.clo import CLO
+        clo = CLO()
+        result = clo.legal_gate_check(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cto_build_landing_endpoint(request):
+    """POST /cto/build-landing — {project_id} — CTO genera HTML da brief CMO."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite.cto import CTO
+        cto = CTO()
+        result = cto.build_landing_from_brief(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cmo_design_landing_endpoint(request):
+    """POST /cmo/design-landing — {project_id} — CMO concept landing (ricerca + mockup)."""
+    try:
+        data = await request.json()
+        project_id = int(data.get("project_id", 0))
+        if not project_id:
+            return web.json_response({"error": "project_id obbligatorio"}, status=400)
+        from csuite.cmo import CMO
+        cmo = CMO()
+        result = cmo.design_landing_concept(project_id)
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def run_cpeo_legal_updates_endpoint(request):
+    """POST /cpeo/legal-updates — ricerca aggiornamenti normativi per CLO."""
+    try:
+        from csuite.cpeo import daily_legal_updates
+        result = daily_legal_updates()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 # ── Memory endpoints ──────────────────────────────────────────
 
 

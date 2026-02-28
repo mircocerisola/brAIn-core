@@ -44,6 +44,10 @@ from core.endpoints import (
     run_cpeo_gap_profile_endpoint, run_post_task_learning_endpoint,
     # Memory
     run_memory_create_episode_endpoint, run_memory_extract_facts_endpoint, run_memory_cleanup_endpoint,
+    # v5.32: CLO Legal + CTO Landing + CMO Design + CPeO Legal Updates
+    run_clo_generate_legal_docs_endpoint, run_clo_legal_gate_endpoint,
+    run_cto_build_landing_endpoint, run_cmo_design_landing_endpoint,
+    run_cpeo_legal_updates_endpoint,
     # Admin
     run_founder_pipeline_endpoint, run_resend_spec_endpoint, run_cleanup_old_topics_endpoint,
     run_health_check_endpoint,
@@ -155,6 +159,13 @@ async def main():
     app.router.add_post("/cpeo/gap-profile", run_cpeo_gap_profile_endpoint)
     app.router.add_post("/cpeo/post-task-learning", run_post_task_learning_endpoint)
     app.router.add_post("/cpeo/training-request", run_cpeo_training_request_endpoint)
+    app.router.add_post("/cpeo/legal-updates", run_cpeo_legal_updates_endpoint)
+
+    # v5.32: CLO Legal + CTO Landing + CMO Design
+    app.router.add_post("/clo/generate-legal-docs", run_clo_generate_legal_docs_endpoint)
+    app.router.add_post("/clo/legal-gate", run_clo_legal_gate_endpoint)
+    app.router.add_post("/cto/build-landing", run_cto_build_landing_endpoint)
+    app.router.add_post("/cmo/design-landing", run_cmo_design_landing_endpoint)
 
     # Memory (L2 + L3)
     app.router.add_post("/memory/create-episode", run_memory_create_episode_endpoint)

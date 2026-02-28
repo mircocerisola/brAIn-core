@@ -4286,6 +4286,105 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 json=_tcl_payload, timeout=10,
             )
 
+    # ── LANDING CONCEPT CALLBACKS (CMO v5.32) ──
+    elif data.startswith("landing_approve:"):
+        _la_pid = int(data.split(":")[1])
+        await query.answer("Concept approvato!")
+        def _handle_landing_approve():
+            if _CSUITE_DIRECT:
+                _cmo = _csuite_get_chief("marketing")
+                if _cmo:
+                    _cmo.handle_landing_approve(_la_pid)
+        threading.Thread(target=_handle_landing_approve, daemon=True).start()
+
+    elif data.startswith("landing_modify:"):
+        _lm_pid = int(data.split(":")[1])
+        await query.answer("Scrivi le modifiche come prossimo messaggio.")
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_landing_modify"] = _lm_pid
+
+    elif data.startswith("landing_redo:"):
+        _lr_pid = int(data.split(":")[1])
+        await query.answer("Rigenero concept...")
+        def _handle_landing_redo():
+            if _CSUITE_DIRECT:
+                _cmo = _csuite_get_chief("marketing")
+                if _cmo:
+                    _cmo.handle_landing_redo(_lr_pid)
+        threading.Thread(target=_handle_landing_redo, daemon=True).start()
+
+    # ── LANDING DEPLOY CALLBACKS (CTO v5.32) ──
+    elif data.startswith("landing_deploy_approve:"):
+        _lda_pid = int(data.split(":")[1])
+        await query.answer("Landing approvata per deploy!")
+        _token_lda = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_lda:
+            _lda_payload = {"chat_id": chat_id, "text": "\u2705 Landing approvata. Pronta per deploy."}
+            if thread_id:
+                _lda_payload["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_lda}/sendMessage",
+                json=_lda_payload, timeout=10,
+            )
+
+    elif data.startswith("landing_deploy_modify:"):
+        _ldm_pid = int(data.split(":")[1])
+        await query.answer("Scrivi le modifiche come prossimo messaggio.")
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_landing_deploy_modify"] = _ldm_pid
+
+    # ── LEGAL DOCS CALLBACKS (CLO v5.32) ──
+    elif data.startswith("legal_docs_approve:"):
+        _lda2_pid = int(data.split(":")[1])
+        await query.answer("Documenti legali approvati!")
+        def _handle_legal_docs_approve():
+            if _CSUITE_DIRECT:
+                _clo = _csuite_get_chief("legal")
+                if _clo:
+                    _clo.handle_legal_docs_approve(_lda2_pid)
+        threading.Thread(target=_handle_legal_docs_approve, daemon=True).start()
+
+    elif data.startswith("legal_docs_view:"):
+        _ldv_pid = int(data.split(":")[1])
+        await query.answer("Caricamento documenti...")
+        def _handle_legal_docs_view():
+            if _CSUITE_DIRECT:
+                _clo = _csuite_get_chief("legal")
+                if _clo:
+                    _clo.handle_legal_docs_view(_ldv_pid, thread_id)
+        threading.Thread(target=_handle_legal_docs_view, daemon=True).start()
+
+    elif data.startswith("legal_docs_modify:"):
+        _ldm2_pid = int(data.split(":")[1])
+        await query.answer("Scrivi le modifiche come prossimo messaggio.")
+        if chat_id not in _session_context:
+            _session_context[chat_id] = {}
+        _session_context[chat_id]["awaiting_legal_modify"] = _ldm2_pid
+
+    # ── CODE CANCEL PREVIEW (CTO v5.22) ──
+    elif data.startswith("code_cancel_preview:"):
+        _ccp_tid = int(data.split(":")[1])
+        await query.answer("Annullato.")
+        if _CSUITE_DIRECT:
+            _cto = _csuite_get_chief("tech")
+            if _cto:
+                _cto.handle_cancel_preview(_ccp_tid)
+
+    # ── CODE NEW (CTO) ──
+    elif data.startswith("code_new:"):
+        await query.answer()
+        _token_cn = os.getenv("TELEGRAM_BOT_TOKEN")
+        if _token_cn:
+            _cn_payload = {"chat_id": chat_id, "text": "Invia il prossimo task CTO nel topic."}
+            if thread_id:
+                _cn_payload["message_thread_id"] = thread_id
+            http_requests.post(
+                f"https://api.telegram.org/bot{_token_cn}/sendMessage",
+                json=_cn_payload, timeout=10,
+            )
+
     else:
         await query.answer()
 
