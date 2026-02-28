@@ -4,6 +4,17 @@ from datetime import timedelta
 from core.base_chief import BaseChief
 from core.config import supabase, logger
 from core.templates import now_rome
+from csuite.cultura import CULTURA_BRAIN
+from csuite.utils import detect_web_search, web_search, fmt
+
+
+CFO_SEARCH_TRIGGERS = [
+    "quanto costa", "qual è il prezzo", "piano max", "piano pro",
+    "include", "abbonamento", "pricing", "crediti api",
+    "piano anthropic", "piano supabase", "piano gcp",
+    "confronta", "quale conviene", "vai a vedere",
+    "cerca online", "controlla online", "verifica",
+]
 
 
 class CFO(BaseChief):
@@ -226,3 +237,29 @@ class CFO(BaseChief):
         except Exception:
             pass
         return anomalies
+
+    def answer_question(self, question, user_context=None, project_context=None,
+                        topic_scope_id=None, project_scope_id=None, recent_messages=None):
+        """CFO override: auto-search per domande su pricing/costi servizi esterni."""
+        msg_lower = question.lower()
+        needs_search = any(t in msg_lower for t in CFO_SEARCH_TRIGGERS)
+        # Se serve ricerca e non c'e' gia' un trigger web generico
+        if needs_search and not detect_web_search(question):
+            logger.info("[CFO] Auto pricing search trigger: %s", question[:80])
+            self._send_to_chief_topic(
+                fmt("cfo", "Ricerca prezzi", "Sto verificando online: " + question[:80] + "...")
+            )
+            search_result = web_search(question, "cfo")
+            pricing_context = (
+                "RISULTATO RICERCA PREZZI/SERVIZI:\n" + search_result
+                + "\n\nAnalizza questi dati e rispondi a Mirco con cifre precise."
+            )
+            if user_context:
+                user_context = user_context + "\n\n" + pricing_context
+            else:
+                user_context = pricing_context
+        return super().answer_question(
+            question, user_context=user_context, project_context=project_context,
+            topic_scope_id=topic_scope_id, project_scope_id=project_scope_id,
+            recent_messages=recent_messages,
+        )

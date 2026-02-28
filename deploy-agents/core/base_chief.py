@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.base_agent import BaseAgent
 from core.templates import now_rome
+from csuite.cultura import CULTURA_BRAIN
 
 
 # ============================================================
@@ -243,7 +244,7 @@ class BaseChief(BaseAgent):
             if _time.time() - ts < self._BASE_PROMPT_TTL:
                 return prompt_text
 
-        parts: List[str] = []
+        parts: List[str] = [CULTURA_BRAIN]
 
         # 1. Profilo Chief
         profile_text = ""
@@ -395,9 +396,29 @@ class BaseChief(BaseAgent):
         """Risponde a una domanda nel proprio dominio usando system prompt dinamico.
         FIX 4: inietta get_domain_context() live prima di rispondere.
         FIX 5: usa modello ottimale via _select_model().
+        v5.29: web search via Perplexity se Mirco chiede di cercare online.
         """
         if self.is_circuit_open():
             return f"[{self.name}] Sistema temporaneamente non disponibile. Riprova tra qualche minuto."
+
+        # v5.29: web search trigger — cerca online se Mirco lo chiede
+        from csuite.utils import detect_web_search, web_search, fmt
+        search_query = detect_web_search(question)
+        if search_query:
+            logger.info("[%s] Web search trigger: %s", self.name, search_query[:80])
+            self._send_to_chief_topic(
+                fmt(self.chief_id, "Ricerca online", "Sto cercando: " + search_query[:80] + "...")
+            )
+            search_result = web_search(search_query, self.chief_id)
+            # Inietta il risultato nel contesto per Claude
+            web_context = (
+                "RISULTATO RICERCA WEB:\n" + search_result
+                + "\n\nUsa queste informazioni per rispondere a Mirco in modo diretto."
+            )
+            if user_context:
+                user_context = user_context + "\n\n" + web_context
+            else:
+                user_context = web_context
 
         system = self.build_system_prompt(
             project_context=project_context,

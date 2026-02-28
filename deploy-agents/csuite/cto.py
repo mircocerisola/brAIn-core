@@ -13,6 +13,7 @@ from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from core.base_chief import BaseChief
+from csuite.cultura import CULTURA_BRAIN
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome, format_time_rome
 from csuite.utils import fmt

@@ -8,6 +8,7 @@ import tempfile
 import requests as _requests
 from typing import Any, Dict, List, Optional
 from core.base_chief import BaseChief
+from csuite.cultura import CULTURA_BRAIN
 from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
 from csuite.utils import fmt, fmt_task_received

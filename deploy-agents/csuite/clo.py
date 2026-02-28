@@ -1,6 +1,7 @@
 """CLO — Chief Legal Officer. Dominio: legale, compliance, contratti, rischi normativi."""
 from core.base_chief import BaseChief
 from core.config import supabase, logger
+from csuite.cultura import CULTURA_BRAIN
 
 
 class CLO(BaseChief):
