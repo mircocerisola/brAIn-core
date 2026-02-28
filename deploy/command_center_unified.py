@@ -2836,6 +2836,22 @@ async def handle_project_message(update, project):
 
     # 8. Fallback: routing C-Suite con contesto cantiere
     if _is_mirco or _is_collab:
+        # v5.31: COO intervention triggers — controlla se Mirco e' frustrato
+        if _CSUITE_DIRECT and _is_mirco:
+            try:
+                _coo_obj = _csuite_get_chief("ops")
+                if _coo_obj and hasattr(_coo_obj, "handle_interruption"):
+                    _ploop_int = asyncio.get_running_loop()
+                    _tid_int = thread_id
+                    _msg_int = msg
+                    def _coo_interrupt():
+                        return _coo_obj.handle_interruption(_tid_int, _msg_int, thread_id=_tid_int)
+                    _did_intervene = await _ploop_int.run_in_executor(None, _coo_interrupt)
+                    if _did_intervene:
+                        return
+            except Exception as _ie:
+                logger.warning(f"[COO_INTERVENTION] {_ie}")
+
         # Costruisci project_context
         spec_excerpt = (project.get("spec_human_md") or project.get("spec_md") or "")[:2000]
         project_context = (
@@ -2845,14 +2861,23 @@ async def handle_project_message(update, project):
             f"SPEC (estratto): {spec_excerpt}"
         )
 
-        # Classifica richiesta con Haiku → Chief domain
-        _classify_prompt = (
-            f"Sei un sistema di routing per il C-Suite di brAIn.\n"
-            f"Contesto cantiere: {name} ({project_status})\n"
-            f"Messaggio: \"{msg}\"\n\n"
-            f"In quale dominio Chief rientra questa richiesta?\n"
-            f"Rispondi SOLO con una di queste parole: cso|coo|cto|cmo|cfo|clo|cpeo"
-        )
+        # v5.31: conversation_state — riusa Chief attivo se presente (skip Haiku)
+        _chief_id = None
+        if _CSUITE_DIRECT and thread_id:
+            try:
+                _coo_state = _csuite_get_chief("ops")
+                if _coo_state and hasattr(_coo_state, "get_active_chief_for_topic"):
+                    _ploop_st = asyncio.get_running_loop()
+                    _tid_st = thread_id
+                    def _get_active():
+                        return _coo_state.get_active_chief_for_topic(_tid_st)
+                    _active_chief = await _ploop_st.run_in_executor(None, _get_active)
+                    if _active_chief:
+                        _chief_id = _active_chief
+                        logger.info(f"[ROUTING] conversation_state: topic={thread_id} -> {_chief_id}")
+            except Exception as _se:
+                logger.warning(f"[ROUTING] conversation_state check: {_se}")
+
         _chief_domain_map = {
             "cso": "strategy", "coo": "ops", "cto": "tech",
             "cmo": "marketing", "cfo": "finance", "clo": "legal", "cpeo": "people",
@@ -2861,18 +2886,43 @@ async def handle_project_message(update, project):
             "cso": "CSO", "coo": "COO", "cto": "CTO",
             "cmo": "CMO", "cfo": "CFO", "clo": "CLO", "cpeo": "CPeO",
         }
-        try:
-            _claude_client = __import__("anthropic").Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-            _cr = _claude_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=10,
-                messages=[{"role": "user", "content": _classify_prompt}],
+
+        # Se nessun Chief attivo da conversation_state, classifica con Haiku
+        if not _chief_id:
+            _classify_prompt = (
+                f"Sei un sistema di routing per il C-Suite di brAIn.\n"
+                f"Contesto cantiere: {name} ({project_status})\n"
+                f"Messaggio: \"{msg}\"\n\n"
+                f"In quale dominio Chief rientra questa richiesta?\n"
+                f"Rispondi SOLO con una di queste parole: cso|coo|cto|cmo|cfo|clo|cpeo"
             )
-            _chief_id = _cr.content[0].text.strip().lower().split("|")[0].strip()
-            if _chief_id not in _chief_domain_map:
-                _chief_id = "coo"  # fallback operativo
-        except Exception:
-            _chief_id = "coo"
+            try:
+                _claude_client = __import__("anthropic").Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+                _cr = _claude_client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=10,
+                    messages=[{"role": "user", "content": _classify_prompt}],
+                )
+                _chief_id = _cr.content[0].text.strip().lower().split("|")[0].strip()
+                if _chief_id not in _chief_domain_map:
+                    _chief_id = "coo"
+            except Exception:
+                _chief_id = "coo"
+
+        # v5.31: aggiorna conversation_state dopo routing
+        if _CSUITE_DIRECT and thread_id and _chief_id:
+            try:
+                _coo_set = _csuite_get_chief("ops")
+                if _coo_set and hasattr(_coo_set, "set_active_chief"):
+                    _ploop_set = asyncio.get_running_loop()
+                    _tid_set = thread_id
+                    _cid_set = _chief_id
+                    _slug_set = project.get("slug", "")
+                    def _set_active():
+                        return _coo_set.set_active_chief(_tid_set, _cid_set, project_slug=_slug_set)
+                    await _ploop_set.run_in_executor(None, _set_active)
+            except Exception as _sse:
+                logger.warning(f"[ROUTING] set_active_chief: {_sse}")
 
         _domain_target = _chief_domain_map.get(_chief_id, "ops")
         _chief_display = _chief_name_map.get(_chief_id, "COO")
@@ -2935,10 +2985,7 @@ async def handle_project_message(update, project):
                 _proj_chief_name = _chief_display
 
         if _proj_answer:
-            card = (
-                f"\U0001f464 {_proj_chief_name}\n"
-                f"{_proj_answer[:1200]}"
-            )
+            card = _proj_answer[:1200]
             _token = os.getenv("TELEGRAM_BOT_TOKEN")
             if _token:
                 payload = {"chat_id": chat_id, "text": card}
@@ -4714,8 +4761,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     json={
                         "chat_id": chat_id,
                         "message_thread_id": thread_id,
-                        "text": f"\U0001f464 *{_chief_t.name}*\n\n{_answer_t[:3800]}",
-                        "parse_mode": "Markdown",
+                        "text": _answer_t[:3800],
                     },
                     timeout=15,
                 )
@@ -4797,7 +4843,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # v5.13: skip se CTO ha gia' inviato CODEACTION card
                 if "<<CODEACTION_SENT>>" not in str(_answer):
                     await update.message.reply_text(
-                        f"\U0001f9e0 *{chief.name}*\n\n{_answer[:3800]}", parse_mode="Markdown"
+                        _answer[:3800]
                     )
                 _topic_buffer_add(chat_id, 0, _answer[:200], role="bot")
             else:
@@ -4809,8 +4855,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "topic_scope_id": _scope_cs, "recent_messages": _recent_cs,
             })
             if result and result.get("answer"):
-                _answer_text = f"\U0001f9e0 *{result.get('chief', 'Chief')}*\n\n{result['answer']}"
-                await update.message.reply_text(_answer_text[:4000], parse_mode="Markdown")
+                await update.message.reply_text(result["answer"][:4000])
                 _topic_buffer_add(chat_id, 0, result["answer"][:200], role="bot")
 
         threading.Thread(

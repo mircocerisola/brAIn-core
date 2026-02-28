@@ -1,4 +1,5 @@
 """COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue.
+v5.31: conversation_state helpers, handle_interruption, complete_task_and_handoff.
 v5.28: orchestrate, delegate_to_chief, handle_domain_setup_flow.
 v5.23: send_daily_brain_snapshot (Drive + email + Supabase), rename_cantiere.
 """
@@ -17,6 +18,17 @@ from csuite.cultura import CULTURA_BRAIN
 from core.config import supabase, claude, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
 from csuite.utils import fmt
+
+
+COO_INTERVENTION_TRIGGERS = [
+    "perche si intromette", "perché si intromette",
+    "chi ha risposto", "non era per te",
+    "confuso", "basta", "troppi messaggi",
+    "stai zitto", "silenzio", "non ti ho chiesto",
+    "rispondete tutti", "rispondete in troppi",
+]
+
+CONVERSATION_TIMEOUT_MINUTES = 30
 
 
 class COO(BaseChief):
@@ -1097,3 +1109,104 @@ class COO(BaseChief):
             self._send_to_topic(thread_id, text)
 
         return {"completed": completed, "pending": pending}
+
+    #
+    # CONVERSATION STATE — routing intelligente per topic (v5.31)
+    #
+
+    def set_active_chief(self, topic_id, chief_id, project_slug="", context=""):
+        """Imposta il Chief attivo per un topic. Upsert su conversation_state."""
+        try:
+            supabase.table("conversation_state").upsert({
+                "topic_id": int(topic_id),
+                "active_chief": chief_id,
+                "last_message_at": now_rome().isoformat(),
+                "project_slug": project_slug or "",
+                "context": context or "",
+            }).execute()
+            logger.info("[COO] Active chief set: topic=%s chief=%s", topic_id, chief_id)
+        except Exception as e:
+            logger.warning("[COO] set_active_chief error: %s", e)
+
+    def get_active_chief_for_topic(self, topic_id):
+        """Restituisce il chief_id attivo per il topic, o None se scaduto/assente."""
+        try:
+            r = supabase.table("conversation_state").select("active_chief,last_message_at") \
+                .eq("topic_id", int(topic_id)).execute()
+            if not r.data:
+                return None
+            row = r.data[0]
+            chief = row.get("active_chief")
+            last_msg = row.get("last_message_at", "")
+            if not chief or not last_msg:
+                return None
+            from dateutil.parser import parse as parse_dt
+            last_dt = parse_dt(last_msg)
+            now = now_rome()
+            elapsed = (now - last_dt).total_seconds() / 60.0
+            if elapsed > CONVERSATION_TIMEOUT_MINUTES:
+                self.clear_active_chief(topic_id)
+                logger.info("[COO] Conversation timeout: topic=%s chief=%s (%.0f min)", topic_id, chief, elapsed)
+                return None
+            return chief
+        except Exception as e:
+            logger.warning("[COO] get_active_chief_for_topic error: %s", e)
+            return None
+
+    def clear_active_chief(self, topic_id):
+        """Rimuove il Chief attivo per il topic."""
+        try:
+            supabase.table("conversation_state").delete() \
+                .eq("topic_id", int(topic_id)).execute()
+            logger.info("[COO] Active chief cleared: topic=%s", topic_id)
+        except Exception as e:
+            logger.warning("[COO] clear_active_chief error: %s", e)
+
+    def handle_interruption(self, topic_id, user_message, thread_id=None):
+        """COO interviene se Mirco segnala confusione/intromissione."""
+        lower = user_message.lower()
+        triggered = any(t in lower for t in COO_INTERVENTION_TRIGGERS)
+        if not triggered:
+            return False
+
+        active = self.get_active_chief_for_topic(topic_id)
+        text = fmt("coo", "Ordine ristabilito",
+                   "Ho capito il problema. D'ora in poi risponde solo "
+                   + (active.upper() if active else "il Chief assegnato")
+                   + " in questo topic.\n"
+                   "Se vuoi cambiare, dimmelo.")
+        target = thread_id or topic_id
+        if target:
+            self._send_to_topic(target, text)
+        logger.info("[COO] Interruption handled: topic=%s trigger in message", topic_id)
+        return True
+
+    def complete_task_and_handoff(self, topic_id, from_chief, to_chief, task_summary="", thread_id=None):
+        """Handoff esplicito: from_chief finisce, to_chief prende il controllo."""
+        self.set_active_chief(topic_id, to_chief, context="handoff da " + from_chief)
+
+        try:
+            supabase.table("agent_events").insert({
+                "agent_from": from_chief,
+                "agent_to": to_chief,
+                "event_type": "handoff",
+                "payload": json.dumps({
+                    "topic_id": int(topic_id),
+                    "task_summary": task_summary or "",
+                }),
+                "status": "pending",
+            }).execute()
+        except Exception as e:
+            logger.warning("[COO] handoff event insert error: %s", e)
+
+        from csuite.utils import CHIEF_ICONS, CHIEF_NAMES
+        to_icon = CHIEF_ICONS.get(to_chief, "")
+        to_name = CHIEF_NAMES.get(to_chief, to_chief.upper())
+        text = fmt("coo", "Passaggio consegne",
+                   from_chief.upper() + " ha completato.\n"
+                   "Ora prosegue " + to_icon + " " + to_name + ".")
+        target = thread_id or topic_id
+        if target:
+            self._send_to_topic(target, text)
+        logger.info("[COO] Handoff: %s -> %s topic=%s", from_chief, to_chief, topic_id)
+        return {"from": from_chief, "to": to_chief, "topic_id": topic_id}
