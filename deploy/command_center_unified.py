@@ -2887,7 +2887,16 @@ async def handle_project_message(update, project):
             "cmo": "CMO", "cfo": "CFO", "clo": "CLO", "cpeo": "CPeO",
         }
 
-        # Se nessun Chief attivo da conversation_state, classifica con Haiku
+        # Menzione esplicita di un Chief nel messaggio: routing diretto (skip Haiku)
+        if not _chief_id:
+            _msg_lower = msg.strip().lower()
+            for _cid_check in _chief_domain_map:
+                if _cid_check in _msg_lower:
+                    _chief_id = _cid_check
+                    logger.info(f"[ROUTING] menzione esplicita: '{_cid_check}' nel messaggio -> {_chief_id}")
+                    break
+
+        # Se nessun Chief attivo e nessuna menzione, classifica con Haiku
         if not _chief_id:
             _classify_prompt = (
                 f"Sei un sistema di routing per il C-Suite di brAIn.\n"
