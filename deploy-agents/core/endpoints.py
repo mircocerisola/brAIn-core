@@ -555,6 +555,25 @@ async def run_cso_relaunch_smoke_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_coo_project_daily_endpoint(request):
+    """POST /coo/project-daily — {project_id} opzionale — report giornaliero cantiere."""
+    try:
+        data = await request.json()
+        project_id = data.get("project_id")
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        if project_id:
+            result = coo.send_project_daily_report(int(project_id))
+            return web.json_response({"status": "ok", "report": result})
+        else:
+            result = coo.send_all_project_daily_reports()
+            return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

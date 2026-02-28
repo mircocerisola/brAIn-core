@@ -1,6 +1,8 @@
 """COO — Chief Operations & Revenue Officer. Dominio: operazioni, cantieri, pipeline, prodotto, revenue."""
+import requests as _requests
+from datetime import timedelta
 from core.base_chief import BaseChief
-from core.config import supabase
+from core.config import supabase, TELEGRAM_BOT_TOKEN, logger
 from core.templates import now_rome
 
 
@@ -67,14 +69,15 @@ class COO(BaseChief):
     def _daily_report_emoji(self) -> str:
         return "\u2699\ufe0f"
 
-    def _get_daily_report_sections(self, since_24h: str) -> list:
-        """COO: azioni queue, log agenti, task completati — ultime 24h."""
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
+        """COO: azioni queue, log agenti, task completati — giorno precedente."""
         sections = []
 
-        # 1. Azioni queue create nelle ultime 24h
+        # 1. Azioni queue create (giorno precedente)
         try:
             r = supabase.table("action_queue").select("id,action_type,title,status") \
-                .gte("created_at", since_24h).order("created_at", desc=True).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).execute()
             if r.data:
                 by_status = {}
                 for a in r.data:
@@ -85,10 +88,10 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] action_queue error: %s", e)
 
-        # 2. Log agenti nelle ultime 24h
+        # 2. Log agenti (giorno precedente)
         try:
             r = supabase.table("agent_logs").select("agent_id,action,status,cost_usd") \
-                .gte("created_at", since_24h).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             if r.data:
                 by_agent = {}
                 errors = 0
@@ -104,10 +107,11 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] agent_logs error: %s", e)
 
-        # 3. Progetti aggiornati nelle ultime 24h
+        # 3. Progetti aggiornati (giorno precedente)
         try:
             r = supabase.table("projects").select("id,name,pipeline_step,status") \
-                .gte("updated_at", since_24h).neq("status", "archived").execute()
+                .gte("updated_at", ieri_inizio).lt("updated_at", ieri_fine) \
+                .neq("status", "archived").execute()
             if r.data:
                 proj_lines = "\n".join(
                     f"  {row.get('name','?')[:40]} → {row.get('pipeline_step') or row.get('status','?')}"
@@ -117,10 +121,10 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] projects error: %s", e)
 
-        # 4. KPI registrati nelle ultime 24h
+        # 4. KPI registrati (giorno precedente)
         try:
             r = supabase.table("kpi_daily").select("project_id,metric_name,value") \
-                .gte("recorded_at", since_24h).limit(10).execute()
+                .gte("recorded_at", ieri_inizio).lt("recorded_at", ieri_fine).limit(10).execute()
             if r.data:
                 kpi_lines = "\n".join(
                     f"  #{row.get('project_id','?')} {row.get('metric_name','?')}: {row.get('value','?')}"
@@ -131,6 +135,180 @@ class COO(BaseChief):
             logger.warning("[COO] kpi_daily error: %s", e)
 
         return sections
+
+    # ============================================================
+    # FIX 5: AUTO-OPEN TOPIC #cantiere per progetto
+    # ============================================================
+
+    def ensure_project_topic(self, project_id, project_name=""):
+        """Crea topic Telegram per il progetto se non esiste. Salva topic_id in projects."""
+        try:
+            r = supabase.table("projects").select("id,name,topic_id").eq("id", project_id).execute()
+            if not r.data:
+                return None
+            project = r.data[0]
+            if project.get("topic_id"):
+                return project["topic_id"]
+            name = project_name or project.get("name", "Progetto")
+        except Exception as e:
+            logger.warning("[COO] ensure_project_topic read: %s", e)
+            return None
+
+        if not TELEGRAM_BOT_TOKEN:
+            return None
+
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if not group_r.data:
+                return None
+            group_id = int(group_r.data[0]["value"])
+
+            resp = _requests.post(
+                "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/createForumTopic",
+                json={
+                    "chat_id": group_id,
+                    "name": "\U0001f3d7 " + name[:60],
+                },
+                timeout=10,
+            )
+            data = resp.json()
+            if data.get("ok") and data.get("result", {}).get("message_thread_id"):
+                new_topic_id = data["result"]["message_thread_id"]
+                supabase.table("projects").update({
+                    "topic_id": new_topic_id,
+                }).eq("id", project_id).execute()
+                logger.info("[COO] Topic creato per project #%d: thread_id=%d", project_id, new_topic_id)
+                return new_topic_id
+        except Exception as e:
+            logger.warning("[COO] ensure_project_topic create: %s", e)
+        return None
+
+    # ============================================================
+    # FIX 8: REPORT GIORNALIERO PROGETTO nel #cantiere
+    # ============================================================
+
+    def send_project_daily_report(self, project_id):
+        """Invia report giornaliero di un progetto nel suo topic #cantiere."""
+        now = now_rome()
+        oggi_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        ieri_dt = oggi_start - timedelta(days=1)
+        ieri_inizio = ieri_dt.isoformat()
+        ieri_fine = oggi_start.isoformat()
+        sep = "\u2500" * 15
+
+        # Carica progetto
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,pipeline_step,status,topic_id"
+            ).eq("id", project_id).execute()
+            if not r.data:
+                return None
+            project = r.data[0]
+        except Exception as e:
+            logger.warning("[COO] project_daily_report read: %s", e)
+            return None
+
+        if project.get("status") == "archived":
+            return None
+
+        topic_id = project.get("topic_id")
+        if not topic_id:
+            topic_id = self.ensure_project_topic(project_id, project.get("name", ""))
+        if not topic_id:
+            return None
+
+        brand = project.get("brand_name") or project.get("name", "Progetto")
+        step = project.get("pipeline_step") or project.get("status", "?")
+
+        # Raccogli dati giorno precedente
+        sections = []
+
+        # Prospect aggiunti ieri
+        try:
+            r = supabase.table("smoke_test_prospects").select("id,status") \
+                .eq("project_id", project_id) \
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
+            if r.data:
+                sections.append("\U0001f465 " + str(len(r.data)) + " nuovi prospect")
+        except Exception:
+            pass
+
+        # Code tasks completati ieri
+        try:
+            r = supabase.table("code_tasks").select("id,title,status") \
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
+            done_tasks = [t for t in (r.data or []) if t.get("status") == "done"]
+            if done_tasks:
+                task_lines = "\n".join("  " + (t.get("title") or "?")[:50] for t in done_tasks[:3])
+                sections.append("\u2705 " + str(len(done_tasks)) + " task completati\n" + task_lines)
+        except Exception:
+            pass
+
+        # Azioni in coda per questo progetto
+        try:
+            r = supabase.table("action_queue").select("id,title,status") \
+                .eq("project_id", project_id).eq("status", "pending").execute()
+            if r.data:
+                sections.append("\u23f3 " + str(len(r.data)) + " azioni pending")
+        except Exception:
+            pass
+
+        if not sections:
+            sections.append("Nessuna attivita' ieri")
+
+        # Costruisci messaggio
+        giorno = self._GIORNI_IT[ieri_dt.weekday()]
+        mese = self._MESI_IT[ieri_dt.month]
+        header_date = str(ieri_dt.day) + " " + mese
+
+        lines = [
+            "\U0001f3d7 " + brand + " \u2014 " + header_date,
+            sep,
+            "\U0001f4cd Step: " + step,
+        ]
+        for s in sections:
+            lines.append(s)
+        lines.append(sep)
+
+        text = "\n".join(lines)
+
+        # Invia nel topic del progetto
+        if not TELEGRAM_BOT_TOKEN:
+            return text
+        try:
+            group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
+            if group_r.data:
+                group_id = int(group_r.data[0]["value"])
+                _requests.post(
+                    "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
+                    json={
+                        "chat_id": group_id,
+                        "message_thread_id": topic_id,
+                        "text": text,
+                    },
+                    timeout=10,
+                )
+                logger.info("[COO] Project daily report inviato project #%d", project_id)
+        except Exception as e:
+            logger.warning("[COO] send_project_daily_report telegram: %s", e)
+
+        return text
+
+    def send_all_project_daily_reports(self):
+        """Invia report giornaliero per TUTTI i progetti attivi con topic."""
+        try:
+            r = supabase.table("projects").select("id") \
+                .neq("status", "archived").not_.is_("topic_id", "null").execute()
+            reports = []
+            for project in (r.data or []):
+                report = self.send_project_daily_report(project["id"])
+                if report:
+                    reports.append(project["id"])
+            logger.info("[COO] Daily reports inviati per %d progetti", len(reports))
+            return {"status": "ok", "projects_reported": reports}
+        except Exception as e:
+            logger.warning("[COO] send_all_project_daily_reports: %s", e)
+            return {"error": str(e)}
 
     def check_anomalies(self):
         anomalies = []

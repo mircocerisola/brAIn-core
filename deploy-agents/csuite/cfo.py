@@ -92,13 +92,19 @@ class CFO(BaseChief):
         return ctx
 
 
-    def get_costs_breakdown(self, hours=24):
-        """Breakdown costi real-time per Chief e per Progetto da agent_logs."""
-        since = (now_rome() - timedelta(hours=hours)).isoformat()
+    def get_costs_breakdown(self, hours=24, since=None, until=None):
+        """Breakdown costi real-time per Chief e per Progetto da agent_logs.
+        Se since/until forniti, usa quelli. Altrimenti rolling hours.
+        """
+        if since is None:
+            since = (now_rome() - timedelta(hours=hours)).isoformat()
         try:
-            r = supabase.table("agent_logs").select(
+            q = supabase.table("agent_logs").select(
                 "agent_id,project_id,model_used,cost_usd,tokens_input,tokens_output"
-            ).gte("created_at", since).execute()
+            ).gte("created_at", since)
+            if until:
+                q = q.lt("created_at", until)
+            r = q.execute()
         except Exception as e:
             logger.warning("[CFO] get_costs_breakdown error: %s", e)
             return {"total_usd": 0, "total_eur": 0, "by_chief": [], "by_project": [], "hours": hours}
@@ -149,12 +155,12 @@ class CFO(BaseChief):
     def _daily_report_emoji(self) -> str:
         return "\U0001f4b6"
 
-    def _get_daily_report_sections(self, since_24h: str) -> list:
-        """CFO: costi API, breakdown per agente/modello/progetto, anomalie — ultime 24h."""
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
+        """CFO: costi API, breakdown per agente/modello/progetto, anomalie — giorno precedente."""
         sections = []
 
-        # Usa get_costs_breakdown per dati completi
-        breakdown = self.get_costs_breakdown(hours=24)
+        # Usa get_costs_breakdown per dati completi (giorno solare precedente)
+        breakdown = self.get_costs_breakdown(since=ieri_inizio, until=ieri_fine)
 
         if breakdown.get("by_chief"):
             top_agents = breakdown["by_chief"][:5]
@@ -187,10 +193,11 @@ class CFO(BaseChief):
             )
             sections.append(f"\U0001f6a8 ANOMALIE\n{anom_lines}")
 
-        # 3. Finance metrics recenti (create nelle ultime 24h)
+        # 3. Finance metrics recenti (giorno precedente)
         try:
             r = supabase.table("finance_metrics").select("metric_name,value,created_at") \
-                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).limit(5).execute()
             if r.data:
                 fm_lines = "\n".join(
                     f"  {row.get('metric_name','?')}: {row.get('value','')}"

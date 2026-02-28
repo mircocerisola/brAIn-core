@@ -351,38 +351,25 @@ class CTO(BaseChief):
                 output_log = task.get("output_log") or ""
                 output_final = task.get("output") or ""
 
-                # Task terminato
+                # Task terminato — card compatta 4 righe + bottoni
                 if status in ("done", "error", "interrupted"):
-                    text_out = output_final or output_log
-                    out_lines = [l for l in text_out.split("\n")
-                                 if "--dangerously-skip-permissions" not in l]
-                    last_lines = "\n".join(out_lines[-10:])[:1000]
+                    icons = {"done": "\u2705", "error": "\u274c", "interrupted": "\U0001f6d1"}
+                    labels = {"done": "Completato", "error": "Fallito", "interrupted": "Interrotto"}
+                    icon = icons.get(status, "\u2705")
+                    label = labels.get(status, "Completato")
 
-                    if status == "done":
-                        self._send_telegram(_cid, _thid,
-                            "\u2705 Prompt completato\n"
-                            + sep + "\n"
-                            "\U0001f4cb " + _ttl + "\n"
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
-                            "\U0001f4ac Output:\n"
-                            + last_lines + "\n"
-                            + sep)
-                    elif status == "interrupted":
-                        self._send_telegram(_cid, _thid,
-                            "\U0001f6d1 Task interrotto\n"
-                            + sep + "\n"
-                            "\U0001f4cb " + _ttl + "\n"
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
-                            + sep)
-                    else:
-                        self._send_telegram(_cid, _thid,
-                            "\u274c Prompt fallito\n"
-                            + sep + "\n"
-                            "\U0001f4cb " + _ttl + "\n"
-                            "\u23f1\ufe0f Durata: " + str(_elapsed) + " min\n"
-                            "\u26a0\ufe0f Output:\n"
-                            + last_lines + "\n"
-                            + sep)
+                    completion_text = (
+                        icon + " " + label + "\n"
+                        + sep + "\n"
+                        + "\U0001f4cb " + _ttl + " \u00b7 " + str(_elapsed) + " min\n"
+                        + sep
+                    )
+                    completion_markup = {"inline_keyboard": [[
+                        {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
+                        {"text": "\U0001f195 Nuovo task", "callback_data": "code_new:" + str(_tid)},
+                    ]]}
+                    self._send_telegram(_cid, _thid, completion_text,
+                                        reply_markup=completion_markup)
                     break
 
                 # Ancora in esecuzione — aggiornamento 4 righe

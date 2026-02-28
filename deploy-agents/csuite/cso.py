@@ -117,14 +117,15 @@ class CSO(BaseChief):
     def _daily_report_emoji(self) -> str:
         return "\U0001f30d"
 
-    def _get_daily_report_sections(self, since_24h: str) -> list:
-        """CSO: problemi scansionati, soluzioni generate, smoke test avviati — ultime 24h."""
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
+        """CSO: problemi scansionati, soluzioni generate, smoke test avviati — giorno precedente."""
         sections = []
 
-        # 1. Nuovi problemi nelle ultime 24h
+        # 1. Nuovi problemi (giorno precedente)
         try:
             r = supabase.table("problems").select("id,title,weighted_score,status") \
-                .gte("created_at", since_24h).order("weighted_score", desc=True).limit(5).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("weighted_score", desc=True).limit(5).execute()
             if r.data:
                 pr_lines = "\n".join(
                     f"  [{row.get('status','?')}] {(row.get('title') or '')[:50]} (score {row.get('weighted_score','?')})"
@@ -134,10 +135,11 @@ class CSO(BaseChief):
         except Exception as e:
             logger.warning("[CSO] problems error: %s", e)
 
-        # 2. Soluzioni generate nelle ultime 24h
+        # 2. Soluzioni generate (giorno precedente)
         try:
             r = supabase.table("solutions").select("id,title,status,bos_score") \
-                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).limit(5).execute()
             if r.data:
                 sol_lines = "\n".join(
                     f"  [{row.get('status','?')}] {(row.get('title') or '')[:50]}"
@@ -147,10 +149,10 @@ class CSO(BaseChief):
         except Exception as e:
             logger.warning("[CSO] solutions error: %s", e)
 
-        # 3. Smoke test avviati nelle ultime 24h
+        # 3. Smoke test avviati (giorno precedente)
         try:
             r = supabase.table("smoke_test_prospects").select("project_id,status") \
-                .gte("created_at", since_24h).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             if r.data:
                 by_proj = {}
                 for p in r.data:
@@ -161,9 +163,10 @@ class CSO(BaseChief):
         except Exception as e:
             logger.warning("[CSO] smoke_test_prospects error: %s", e)
 
-        # 4. Anomalie pipeline (check_anomalies già filtra per settimana, qui usiamo 24h)
+        # 4. Anomalie pipeline (giorno precedente)
         try:
-            r = supabase.table("problems").select("id").gte("created_at", since_24h).execute()
+            r = supabase.table("problems").select("id") \
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             count_24h = len(r.data or [])
             if count_24h < 3:
                 sections.append(
@@ -372,35 +375,39 @@ class CSO(BaseChief):
         return {"status": "ok", "project_id": project_id, "prospects_saved": saved}
 
     def _send_smoke_card(self, project_id, brand_name, n_prospect, topic_id):
-        """Invia card compatta smoke test nel topic cantiere."""
+        """Invia card compatta smoke test nel topic #cantiere con template standard."""
         try:
+            from core.templates import format_smoke_test_card, smoke_test_buttons
             group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
             if not group_r.data:
                 return
             group_id = int(group_r.data[0]["value"])
-            sep = "\u2500" * 15
-            text = (
-                "\U0001f52c SMOKE TEST \u2014 " + brand_name + "\n"
-                + sep + "\n"
-                + "\U0001f465 " + str(n_prospect) + " prospect con email confermata\n"
-                + "\U0001f3af Metodo: cold outreach B2B\n"
-                + "\U0001f4cd Lombardia e Piemonte\n"
-                + sep
+
+            # Usa topic cantiere (non il topic CSO)
+            cantiere_r = supabase.table("org_config").select("value").eq("key", "chief_topic_cantiere").execute()
+            target_topic = int(cantiere_r.data[0]["value"]) if cantiere_r.data else topic_id
+
+            text = format_smoke_test_card(
+                brand_name=brand_name,
+                obiettivo="Validazione mercato cold outreach B2B",
+                n_prospect=n_prospect,
+                durata=14,
+                budget="EUR 0 (outreach)",
+                kpi_successo="3+ risposte positive",
             )
-            markup = {"inline_keyboard": [[
-                {"text": "\u2705 Avvia outreach", "callback_data": "smoke_design_approve:" + str(project_id)},
-                {"text": "\U0001f4c4 Dettaglio", "callback_data": "smoke_detail:" + str(project_id)},
-            ]]}
+            markup = smoke_test_buttons(project_id)
+
             _requests.post(
                 "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
                 json={
                     "chat_id": group_id,
-                    "message_thread_id": topic_id,
+                    "message_thread_id": target_topic,
                     "text": text,
                     "reply_markup": markup,
                 },
                 timeout=10,
             )
+            logger.info("[CSO] Smoke card inviata in #cantiere per project #%d", project_id)
         except Exception as e:
             logger.warning("[CSO] send_smoke_card error: %s", e)
 

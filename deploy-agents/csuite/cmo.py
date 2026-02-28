@@ -148,14 +148,14 @@ class CMO(BaseChief):
     def _daily_report_emoji(self) -> str:
         return "\U0001f4e2"
 
-    def _get_daily_report_sections(self, since_24h: str) -> list:
-        """CMO: prospect nuovi, smoke test events, brand activity — ultime 24h."""
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
+        """CMO: prospect nuovi, smoke test events, brand activity — giorno precedente."""
         sections = []
 
-        # 1. Nuovi prospect nelle ultime 24h
+        # 1. Nuovi prospect (giorno precedente)
         try:
             r = supabase.table("smoke_test_prospects").select("id,name,channel,status") \
-                .gte("created_at", since_24h).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             if r.data:
                 n = len(r.data)
                 by_channel = {}
@@ -167,10 +167,11 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] prospects error: %s", e)
 
-        # 2. Smoke test events nelle ultime 24h
+        # 2. Smoke test events (giorno precedente)
         try:
             r = supabase.table("smoke_test_events").select("event_type,project_id,created_at") \
-                .gte("created_at", since_24h).order("created_at", desc=True).limit(10).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).limit(10).execute()
             if r.data:
                 ev_lines = "\n".join(
                     f"  {ev.get('event_type','?')} (proj #{ev.get('project_id','?')})"
@@ -180,10 +181,11 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] smoke_test_events error: %s", e)
 
-        # 3. Marketing reports nelle ultime 24h
+        # 3. Marketing reports (giorno precedente)
         try:
             r = supabase.table("marketing_reports").select("project_id,channel,recorded_at") \
-                .gte("recorded_at", since_24h).order("recorded_at", desc=True).limit(5).execute()
+                .gte("recorded_at", ieri_inizio).lt("recorded_at", ieri_fine) \
+                .order("recorded_at", desc=True).limit(5).execute()
             if r.data:
                 rep_lines = "\n".join(
                     f"  proj #{row.get('project_id','?')} | {row.get('channel','?')}"
@@ -193,10 +195,10 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] marketing_reports error: %s", e)
 
-        # 4. Brand assets creati nelle ultime 24h
+        # 4. Brand assets creati (giorno precedente)
         try:
             r = supabase.table("brand_assets").select("brand_name,project_id,status") \
-                .gte("created_at", since_24h).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             if r.data:
                 ba_lines = "\n".join(
                     f"  {row.get('brand_name','?')} (proj #{row.get('project_id','?')})"
@@ -207,6 +209,56 @@ class CMO(BaseChief):
             logger.warning("[CMO] brand_assets error: %s", e)
 
         return sections
+
+    def generate_landing_page_html(self, project_id):
+        """Genera HTML landing page via Claude per un progetto smoke test. Salva in projects.landing_html."""
+        try:
+            r = supabase.table("projects").select(
+                "id,name,brand_name,brand_email,brand_domain,smoke_test_method"
+            ).eq("id", project_id).execute()
+            if not r.data:
+                return {"error": "progetto non trovato"}
+            project = r.data[0]
+        except Exception as e:
+            return {"error": str(e)}
+
+        brand = project.get("brand_name") or project.get("name", "")
+        email = project.get("brand_email") or ""
+        domain = project.get("brand_domain") or ""
+
+        prompt = (
+            "Genera una landing page HTML completa e moderna per uno smoke test.\n"
+            "Brand: " + brand + "\n"
+            "Email: " + email + "\n"
+            "Dominio: " + domain + "\n\n"
+            "Requisiti:\n"
+            "- HTML singolo file con CSS inline (no file esterni)\n"
+            "- Responsive, mobile-first\n"
+            "- Header con logo testuale, hero section con value proposition\n"
+            "- CTA prominente (contattaci / richiedi demo)\n"
+            "- 3 benefici chiave con icone emoji\n"
+            "- Footer con email contatto\n"
+            "- Palette: colori moderni e professionali\n"
+            "- NESSUN brand 'brAIn' visibile, solo il brand del prodotto\n"
+            "- Rispondi SOLO con il codice HTML completo, nient'altro."
+        )
+
+        try:
+            html = self.call_claude(prompt, model="claude-sonnet-4-6", max_tokens=4000)
+        except Exception as e:
+            logger.warning("[CMO] generate_landing_page_html error: %s", e)
+            return {"error": str(e)}
+
+        # Salva in projects
+        try:
+            supabase.table("projects").update({
+                "landing_html": html,
+            }).eq("id", project_id).execute()
+        except Exception as e:
+            logger.warning("[CMO] save landing_html: %s", e)
+
+        logger.info("[CMO] Landing HTML generata per project #%d (%d chars)", project_id, len(html or ""))
+        return {"status": "ok", "project_id": project_id, "html_length": len(html or "")}
 
     def _send_report_to_topic(self, text):
         """Invia report al Forum Topic #marketing."""

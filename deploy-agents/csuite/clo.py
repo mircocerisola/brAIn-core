@@ -1,6 +1,6 @@
 """CLO — Chief Legal Officer. Dominio: legale, compliance, contratti, rischi normativi."""
 from core.base_chief import BaseChief
-from core.config import supabase
+from core.config import supabase, logger
 
 
 class CLO(BaseChief):
@@ -52,15 +52,16 @@ class CLO(BaseChief):
     def _daily_report_emoji(self) -> str:
         return "\u2696\ufe0f"
 
-    def _get_daily_report_sections(self, since_24h: str) -> list:
-        """CLO: ethics violations, legal reviews, compliance log — ultime 24h."""
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
+        """CLO: ethics violations, legal reviews, compliance log — giorno precedente."""
         sections = []
 
-        # 1. Ethics violations nelle ultime 24h
+        # 1. Ethics violations (giorno precedente)
         try:
             r = supabase.table("ethics_violations").select(
                 "project_id,principle_id,severity,blocked,resolved"
-            ).gte("created_at", since_24h).order("created_at", desc=True).execute()
+            ).gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).execute()
             if r.data:
                 blocked = sum(1 for v in r.data if v.get("blocked"))
                 unresolved = sum(1 for v in r.data if not v.get("resolved"))
@@ -75,11 +76,12 @@ class CLO(BaseChief):
         except Exception as e:
             logger.warning("[CLO] ethics_violations error: %s", e)
 
-        # 2. Legal reviews nelle ultime 24h
+        # 2. Legal reviews (giorno precedente)
         try:
             r = supabase.table("legal_reviews").select(
                 "project_id,status,risks_found,created_at"
-            ).gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+            ).gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).limit(5).execute()
             if r.data:
                 lr_lines = "\n".join(
                     f"  proj #{row.get('project_id','?')} | {row.get('status','?')} | rischi: {row.get('risks_found','?')}"
@@ -89,11 +91,12 @@ class CLO(BaseChief):
         except Exception as e:
             logger.warning("[CLO] legal_reviews error: %s", e)
 
-        # 3. Log ethics monitor nelle ultime 24h
+        # 3. Log ethics monitor (giorno precedente)
         try:
             r = supabase.table("agent_logs").select("action,status,error") \
                 .eq("agent_id", "ethics_monitor") \
-                .gte("created_at", since_24h).order("created_at", desc=True).limit(5).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine) \
+                .order("created_at", desc=True).limit(5).execute()
             if r.data:
                 errors = [l for l in r.data if l.get("status") == "error"]
                 em_lines = "\n".join(

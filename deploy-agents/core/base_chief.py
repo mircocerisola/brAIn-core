@@ -778,63 +778,64 @@ class BaseChief(BaseAgent):
         9: "settembre", 10: "ottobre", 11: "novembre", 12: "dicembre"
     }
 
-    def _format_daily_header(self) -> str:
-        """Ritorna stringa 'Giovedì 27 febbraio 2026 — ore 08:00'."""
-        now = now_rome()
-        giorno = self._GIORNI_IT[now.weekday()]
-        mese = self._MESI_IT[now.month]
-        return f"{giorno} {now.day} {mese} {now.year} — ore {now.strftime('%H:%M')}"
+    def _format_daily_header(self, date=None) -> str:
+        """Ritorna stringa 'Giovedì 27 febbraio 2026'. Se date=None usa ieri."""
+        dt = date or now_rome()
+        giorno = self._GIORNI_IT[dt.weekday()]
+        mese = self._MESI_IT[dt.month]
+        return f"{giorno} {dt.day} {mese} {dt.year}"
 
     def _daily_report_emoji(self) -> str:
         """Override nelle sottoclassi per emoji personalizzata."""
         return "📊"
 
-    def _get_daily_report_sections(self, since_24h: str) -> List[str]:
+    def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> List[str]:
         """
         Override nelle sottoclassi per sezioni domain-specific.
         Ritorna lista di stringhe (sezioni già formattate).
-        Omette sezioni vuote — ritorna [] se nessun dato nelle 24h.
+        ieri_inizio/ieri_fine: ISO datetime range [inizio, fine) del giorno solare precedente.
         """
         return []
 
     def generate_daily_report(self) -> Optional[str]:
         """
-        Report giornaliero 08:00 — copre SOLO le ultime 24 ore.
-        Range: now_rome() - 24h → now_rome().
-        Tutte le query Supabase filtrano created_at >= since_24h.
-        Se nelle ultime 24h non c'è nulla, ritorna None senza inviare.
-        Si apre con 'Giovedì 27 febbraio 2026 — ore 08:00'.
-        Si chiude con totale speso 24h vs budget giornaliero.
+        Report giornaliero 08:00 — copre il GIORNO SOLARE PRECEDENTE.
+        Range: ieri 00:00:00 → oggi 00:00:00 (Europe/Rome), estremo destro escluso.
+        Si apre con 'Rapporto di ieri — Giovedì 27 febbraio 2026'.
+        Si chiude con totale speso ieri vs budget giornaliero.
         """
         now = now_rome()
-        since_24h = (now - timedelta(hours=24)).isoformat()
+        oggi_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        ieri_dt = oggi_start - timedelta(days=1)
+        ieri_inizio = ieri_dt.isoformat()
+        ieri_fine = oggi_start.isoformat()
         sep = "\u2500" * 15
         budget_giornaliero_eur = 33.0  # €1000/mese ÷ 30
 
-        # Costi API ultime 24h (comuni a tutti i Chief)
-        cost_24h_eur = 0.0
+        # Costi API giorno precedente (comuni a tutti i Chief)
+        cost_ieri_eur = 0.0
         try:
             r = supabase.table("agent_logs").select("cost_usd") \
-                .gte("created_at", since_24h).execute()
+                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
             total_usd = sum(float(row.get("cost_usd") or 0) for row in (r.data or []))
-            cost_24h_eur = round(total_usd * 0.92, 2)
+            cost_ieri_eur = round(total_usd * 0.92, 2)
         except Exception as e:
             logger.warning(f"[{self.name}] generate_daily_report costs error: {e}")
 
-        # Sezioni domain-specific (ultimi 24h)
+        # Sezioni domain-specific (giorno precedente)
         sections = []
         try:
-            sections = self._get_daily_report_sections(since_24h)
+            sections = self._get_daily_report_sections(ieri_inizio, ieri_fine)
         except Exception as e:
             logger.warning(f"[{self.name}] generate_daily_report sections error: {e}")
 
-        # Se nessun dato nelle 24h → ometti il report
-        if not sections and cost_24h_eur == 0.0:
-            logger.info(f"[{self.name}] generate_daily_report: nessun dato nelle ultime 24h, skip")
+        # Se nessun dato ieri → ometti il report
+        if not sections and cost_ieri_eur == 0.0:
+            logger.info(f"[{self.name}] generate_daily_report: nessun dato ieri, skip")
             return None
 
-        header = self._format_daily_header()
-        budget_pct = round(cost_24h_eur / budget_giornaliero_eur * 100) if budget_giornaliero_eur > 0 else 0
+        header = self._format_daily_header(ieri_dt)
+        budget_pct = round(cost_ieri_eur / budget_giornaliero_eur * 100) if budget_giornaliero_eur > 0 else 0
 
         lines = [
             f"{self._daily_report_emoji()} {self.name} \u2014 {header}",
@@ -844,7 +845,7 @@ class BaseChief(BaseAgent):
             lines.append(section)
         lines.extend([
             sep,
-            f"\U0001f4b6 TOTALE 24H: \u20ac{cost_24h_eur:.2f} / \u20ac{budget_giornaliero_eur:.0f} budget ({budget_pct}%)",
+            f"\U0001f4b6 IERI: \u20ac{cost_ieri_eur:.2f} / \u20ac{budget_giornaliero_eur:.0f} budget ({budget_pct}%)",
         ])
 
         text = "\n".join(lines)
