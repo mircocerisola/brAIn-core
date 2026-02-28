@@ -574,6 +574,19 @@ async def run_coo_project_daily_endpoint(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def run_coo_accelerator_endpoint(request):
+    """POST /coo/accelerator — controlla task cantieri aperti, invia reminder."""
+    try:
+        from csuite import get_chief
+        coo = get_chief("ops")
+        if not coo:
+            return web.json_response({"error": "COO non trovato"}, status=500)
+        result = coo.accelerate_open_cantieri()
+        return web.json_response(result)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def run_ethics_check_endpoint(request):
     """POST /ethics/check — {project_id} — valuta etica progetto"""
     try:

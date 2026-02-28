@@ -184,11 +184,29 @@ class COO(BaseChief):
         return None
 
     # ============================================================
-    # FIX 8: REPORT GIORNALIERO PROGETTO nel #cantiere
+    # STEP 5: REPORT GIORNALIERO MIGLIORATO nel #cantiere
     # ============================================================
 
+    def _get_project_tasks(self, project_id):
+        """Carica tutti i task di un progetto."""
+        try:
+            r = supabase.table("project_tasks").select("*") \
+                .eq("project_id", project_id).order("priority").execute()
+            return r.data or []
+        except Exception as e:
+            logger.warning("[COO] _get_project_tasks: %s", e)
+            return []
+
+    def _progress_bar(self, done, total):
+        """Genera barra progresso: [====----] 3/6"""
+        if total == 0:
+            return "[--------] 0/0"
+        filled = round(done / total * 8)
+        bar = "\u2588" * filled + "\u2591" * (8 - filled)
+        return "[" + bar + "] " + str(done) + "/" + str(total)
+
     def send_project_daily_report(self, project_id):
-        """Invia report giornaliero di un progetto nel suo topic #cantiere."""
+        """Invia report giornaliero di un progetto nel suo topic #cantiere (solo cantieri aperti)."""
         now = now_rome()
         oggi_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         ieri_dt = oggi_start - timedelta(days=1)
@@ -199,7 +217,7 @@ class COO(BaseChief):
         # Carica progetto
         try:
             r = supabase.table("projects").select(
-                "id,name,brand_name,pipeline_step,status,topic_id"
+                "id,name,brand_name,pipeline_step,status,topic_id,cantiere_status"
             ).eq("id", project_id).execute()
             if not r.data:
                 return None
@@ -209,6 +227,8 @@ class COO(BaseChief):
             return None
 
         if project.get("status") == "archived":
+            return None
+        if project.get("cantiere_status") != "open":
             return None
 
         topic_id = project.get("topic_id")
@@ -220,44 +240,21 @@ class COO(BaseChief):
         brand = project.get("brand_name") or project.get("name", "Progetto")
         step = project.get("pipeline_step") or project.get("status", "?")
 
-        # Raccogli dati giorno precedente
-        sections = []
+        # Carica task del progetto
+        tasks = self._get_project_tasks(project_id)
+        done_tasks = [t for t in tasks if t.get("status") == "completed"]
+        progress_tasks = [t for t in tasks if t.get("status") == "in_progress"]
+        mirco_tasks = [t for t in tasks if t.get("assigned_to") == "mirco" and t.get("status") != "completed"]
+        pending_tasks = [t for t in tasks if t.get("status") == "pending" and t.get("assigned_to") != "mirco"]
 
-        # Prospect aggiunti ieri
-        try:
-            r = supabase.table("smoke_test_prospects").select("id,status") \
-                .eq("project_id", project_id) \
-                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
-            if r.data:
-                sections.append("\U0001f465 " + str(len(r.data)) + " nuovi prospect")
-        except Exception:
-            pass
-
-        # Code tasks completati ieri
-        try:
-            r = supabase.table("code_tasks").select("id,title,status") \
-                .gte("created_at", ieri_inizio).lt("created_at", ieri_fine).execute()
-            done_tasks = [t for t in (r.data or []) if t.get("status") == "done"]
-            if done_tasks:
-                task_lines = "\n".join("  " + (t.get("title") or "?")[:50] for t in done_tasks[:3])
-                sections.append("\u2705 " + str(len(done_tasks)) + " task completati\n" + task_lines)
-        except Exception:
-            pass
-
-        # Azioni in coda per questo progetto
-        try:
-            r = supabase.table("action_queue").select("id,title,status") \
-                .eq("project_id", project_id).eq("status", "pending").execute()
-            if r.data:
-                sections.append("\u23f3 " + str(len(r.data)) + " azioni pending")
-        except Exception:
-            pass
-
-        if not sections:
-            sections.append("Nessuna attivita' ieri")
+        # Completati ieri
+        done_ieri = []
+        for t in done_tasks:
+            ca = t.get("completed_at") or ""
+            if ca >= ieri_inizio and ca < ieri_fine:
+                done_ieri.append(t)
 
         # Costruisci messaggio
-        giorno = self._GIORNI_IT[ieri_dt.weekday()]
         mese = self._MESI_IT[ieri_dt.month]
         header_date = str(ieri_dt.day) + " " + mese
 
@@ -265,40 +262,72 @@ class COO(BaseChief):
             "\U0001f3d7 " + brand + " \u2014 " + header_date,
             sep,
             "\U0001f4cd Step: " + step,
+            "\U0001f4ca " + self._progress_bar(len(done_tasks), len(tasks)),
         ]
-        for s in sections:
-            lines.append(s)
-        lines.append(sep)
 
+        if done_ieri:
+            lines.append("")
+            lines.append("\u2705 COMPLETATI IERI:")
+            for t in done_ieri:
+                lines.append("  " + t.get("title", "?")[:50])
+
+        if progress_tasks:
+            lines.append("")
+            lines.append("\U0001f7e1 IN CORSO:")
+            for t in progress_tasks:
+                lines.append("  " + t.get("assigned_to", "?").upper() + ": " + t.get("title", "?")[:45])
+
+        if mirco_tasks:
+            lines.append("")
+            lines.append("\U0001f534 ATTESA MIRCO:")
+            for t in mirco_tasks:
+                lines.append("  " + t.get("title", "?")[:50])
+
+        if pending_tasks:
+            lines.append("")
+            lines.append("\u26AA PROSSIMI:")
+            for t in pending_tasks[:2]:
+                lines.append("  " + t.get("assigned_to", "?").upper() + ": " + t.get("title", "?")[:45])
+
+        # Priorita' oggi
+        priority_today = None
+        for t in tasks:
+            if t.get("status") != "completed":
+                priority_today = t
+                break
+        if priority_today:
+            lines.append("")
+            lines.append("\U0001f3af PRIORITA' OGGI: " + priority_today.get("title", "?")[:40])
+
+        lines.append(sep)
         text = "\n".join(lines)
 
         # Invia nel topic del progetto
+        self._send_to_topic(topic_id, text)
+        logger.info("[COO] Project daily report inviato project #%d", project_id)
+        return text
+
+    def _send_to_topic(self, topic_id, text):
+        """Invia messaggio nel topic Telegram."""
         if not TELEGRAM_BOT_TOKEN:
-            return text
+            return
         try:
             group_r = supabase.table("org_config").select("value").eq("key", "telegram_group_id").execute()
             if group_r.data:
                 group_id = int(group_r.data[0]["value"])
                 _requests.post(
                     "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",
-                    json={
-                        "chat_id": group_id,
-                        "message_thread_id": topic_id,
-                        "text": text,
-                    },
+                    json={"chat_id": group_id, "message_thread_id": topic_id, "text": text},
                     timeout=10,
                 )
-                logger.info("[COO] Project daily report inviato project #%d", project_id)
         except Exception as e:
-            logger.warning("[COO] send_project_daily_report telegram: %s", e)
-
-        return text
+            logger.warning("[COO] _send_to_topic: %s", e)
 
     def send_all_project_daily_reports(self):
-        """Invia report giornaliero per TUTTI i progetti attivi con topic."""
+        """Invia report giornaliero per TUTTI i progetti con cantiere aperto."""
         try:
             r = supabase.table("projects").select("id") \
-                .neq("status", "archived").not_.is_("topic_id", "null").execute()
+                .eq("cantiere_status", "open").not_.is_("topic_id", "null").execute()
             reports = []
             for project in (r.data or []):
                 report = self.send_project_daily_report(project["id"])
@@ -309,6 +338,81 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] send_all_project_daily_reports: %s", e)
             return {"error": str(e)}
+
+    # ============================================================
+    # STEP 4: COO ACCELERATORE — check task + reminder
+    # ============================================================
+
+    def accelerate_open_cantieri(self):
+        """Controlla task di tutti i cantieri aperti, invia reminder se bloccati."""
+        try:
+            r = supabase.table("projects").select("id,name,brand_name,topic_id") \
+                .eq("cantiere_status", "open").not_.is_("topic_id", "null").execute()
+            results = []
+            for project in (r.data or []):
+                result = self._check_and_remind(project)
+                if result:
+                    results.append(result)
+            logger.info("[COO] Accelerator: %d cantieri controllati", len(results))
+            return {"status": "ok", "cantieri_checked": results}
+        except Exception as e:
+            logger.warning("[COO] accelerate_open_cantieri: %s", e)
+            return {"error": str(e)}
+
+    def _check_and_remind(self, project):
+        """Controlla task di un progetto e invia reminder per quelli bloccati."""
+        project_id = project["id"]
+        topic_id = project.get("topic_id")
+        brand = project.get("brand_name") or project.get("name", "Progetto")
+        tasks = self._get_project_tasks(project_id)
+        if not tasks:
+            return None
+
+        done = [t for t in tasks if t.get("status") == "completed"]
+        in_progress = [t for t in tasks if t.get("status") == "in_progress"]
+        pending = [t for t in tasks if t.get("status") == "pending"]
+
+        reminders = []
+        now = now_rome()
+
+        for t in in_progress:
+            # Se in_progress da piu' di 24h senza update
+            updated = t.get("updated_at") or t.get("created_at") or ""
+            if updated:
+                try:
+                    from dateutil.parser import parse as parse_dt
+                    age_h = (now - parse_dt(updated)).total_seconds() / 3600
+                    if age_h > 24:
+                        assignee = t.get("assigned_to", "?")
+                        reminders.append(
+                            "\u23f0 " + assignee.upper() + ": " + t.get("title", "?")[:40]
+                            + " (fermo da " + str(int(age_h)) + "h)"
+                        )
+                except Exception:
+                    pass
+
+        # Mirco task pending → reminder speciale
+        mirco_pending = [t for t in pending if t.get("assigned_to") == "mirco"]
+        for t in mirco_pending:
+            reminders.append(
+                "\U0001f534 MIRCO: " + t.get("title", "?")[:40] + " [da fare]"
+            )
+
+        if not reminders:
+            return {"project_id": project_id, "reminders": 0}
+
+        sep = "\u2500" * 15
+        text = (
+            "\u23f0 REMINDER " + brand + "\n"
+            + sep + "\n"
+            + self._progress_bar(len(done), len(tasks)) + "\n"
+            + "\n".join(reminders) + "\n"
+            + sep
+        )
+        if topic_id:
+            self._send_to_topic(topic_id, text)
+        logger.info("[COO] Reminder inviato project #%d (%d items)", project_id, len(reminders))
+        return {"project_id": project_id, "reminders": len(reminders)}
 
     def check_anomalies(self):
         anomalies = []
