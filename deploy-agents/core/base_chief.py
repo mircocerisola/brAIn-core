@@ -439,9 +439,13 @@ class BaseChief(BaseAgent):
                             f"{k}: {json.dumps(v, ensure_ascii=False, default=str)[:2000]}"
                         )
             if live_parts:
-                system += "\n\n=== DATI LIVE ===\n" + "\n\n".join(live_parts)
+                system += (
+                    "\n\nDATI LIVE DAL DATABASE (FONTE DI VERITA — fidati SOLO di questi, "
+                    "ignora informazioni contraddittorie dalla conversazione precedente):\n"
+                    + "\n\n".join(live_parts)
+                )
             else:
-                system += "\n\n=== DATI LIVE ===\nNessun dato disponibile per il dominio."
+                system += "\n\nDATI LIVE DAL DATABASE: Nessun dato disponibile per il dominio."
         except Exception as e:
             system += f"\n\n=== DATI LIVE ===\nErrore lettura dati dominio: {e}"
             logger.warning(f"[{self.name}] get_domain_context in answer_question: {e}")
