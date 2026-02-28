@@ -118,10 +118,19 @@ _send_topic_cache: dict = {}   # (group_id, topic_id, hash) → timestamp
 _SEND_DEDUP_TTL = 60
 
 
-def _send_to_topic(group_id, topic_id, text, reply_markup=None):
-    """Invia messaggio nel Forum Topic del progetto. Dedup 60s su stesso contenuto."""
+def _send_to_topic(group_id, topic_id, text, reply_markup=None, chief=None):
+    """Invia messaggio nel Forum Topic del progetto. Dedup 60s su stesso contenuto.
+    chief: se fornito (es. 'cto'), prepende identita' Chief al messaggio.
+    """
     if not TELEGRAM_BOT_TOKEN:
         return
+    if chief:
+        _CHIEF_ICONS = {
+            "cto": "\U0001f527", "coo": "\u2699\ufe0f", "cso": "\U0001f3af",
+            "cmo": "\U0001f3a8", "cfo": "\U0001f4ca", "clo": "\u2696\ufe0f", "cpeo": "\U0001f331",
+        }
+        _icon = _CHIEF_ICONS.get(chief, "")
+        text = _icon + " " + chief.upper() + "\n" + text
     # Dedup: skip se stesso contenuto mandato negli ultimi 60s
     import hashlib as _hashlib, time as _time
     h = _hashlib.md5((text or "")[:500].encode()).hexdigest()

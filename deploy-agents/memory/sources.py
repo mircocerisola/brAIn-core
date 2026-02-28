@@ -195,7 +195,7 @@ def run_sources_cleanup_weekly():
             try:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id_src, "text": src_msg, "reply_markup": src_reply_markup},
+                    json={"chat_id": chat_id_src, "text": "\u2699\ufe0f COO\n" + src_msg, "reply_markup": src_reply_markup},
                     timeout=10,
                 )
             except Exception as e:

@@ -456,7 +456,8 @@ Committa ogni file creato/modificato — mai lavorare in locale senza committare
     # Notifica breve: build avviato
     group_id = _get_telegram_group_id()
     _send_to_topic(group_id, topic_id,
-                   f"\U0001f6e0\ufe0f Build avviato per \"{name}\".\nGenerando codice MVP in corso...")
+                   f"\U0001f6e0\ufe0f Build avviato per \"{name}\".\nGenerando codice MVP in corso...",
+                   chief="cto")
 
     # Avvia build agent in background (non blocca)
     import threading as _threading_build
@@ -487,7 +488,7 @@ def _ensure_spec_and_repo(project_id, project, group_id):
 
     # FIX 1a: SPEC mancante → rigenera (max 1 tentativo, run_spec_generator si ri-locka da solo)
     if not spec_md:
-        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f SPEC mancante per {name} — rigenerazione in corso...")
+        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f SPEC mancante per {name} — rigenerazione in corso...", chief="cto")
         # Sblocca momentaneamente per permettere a spec_generator di ri-lockare
         try:
             supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
@@ -504,12 +505,12 @@ def _ensure_spec_and_repo(project_id, project, group_id):
             r = supabase.table("projects").select("spec_md").eq("id", project_id).execute()
             spec_md = (r.data[0].get("spec_md") or "") if r.data else ""
         if not spec_md:
-            _send_to_topic(group_id, topic_id, f"\u274c Build {name}: impossibile rigenerare SPEC. Contatta CTO.")
+            _send_to_topic(group_id, topic_id, f"\u274c Build {name}: impossibile rigenerare SPEC.", chief="cto")
             return None, None
 
     # FIX 2: repo GitHub mancante → crealo (o recupera quello esistente)
     if not github_repo:
-        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Repo GitHub mancante per {name} — ricerca/creazione in corso...")
+        _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Repo GitHub mancante per {name} — ricerca/creazione in corso...", chief="cto")
         repo_name = f"brain-{slug}"
         mirco_user = "mircocerisola"
 
@@ -605,7 +606,8 @@ def run_build_agent(project_id):
         f"\U0001f528 Build Fase 1 avviato per *{name}*\n"
         f"Stack: {stack_str}\n"
         f"Repo: {github_repo}\n"
-        f"Generazione codice struttura base in corso...")
+        f"Generazione codice struttura base in corso...",
+        chief="cto")
 
     # Genera solo Fase 1: struttura base
     spec_excerpt = spec_md[:5000]
@@ -637,7 +639,7 @@ def run_build_agent(project_id):
         tokens_out = response.usage.output_tokens
     except Exception as e:
         logger.error(f"[BUILD_AGENT] Claude error: {e}")
-        _send_to_topic(group_id, topic_id, f"\u274c Build {name} fallito: {e}")
+        _send_to_topic(group_id, topic_id, f"\u274c Build {name} fallito: {e}", chief="cto")
         try:
             supabase.table("projects").update({"pipeline_locked": False}).eq("id", project_id).execute()
         except Exception:
@@ -666,7 +668,7 @@ def run_build_agent(project_id):
         files_committed = 1
 
     # Notifica avanzamento: file committati
-    _send_to_topic(group_id, topic_id, f"\u2705 {files_committed} file committati su GitHub — salvataggio log in corso...")
+    _send_to_topic(group_id, topic_id, f"\u2705 {files_committed} file committati su GitHub — salvataggio log in corso...", chief="cto")
 
     # Salva log iterazione su GitHub
     ts = now_rome().strftime("%Y%m%d_%H")

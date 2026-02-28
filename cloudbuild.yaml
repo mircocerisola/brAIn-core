@@ -1,0 +1,69 @@
+steps:
+  # Step 1: Build agents-runner
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/agents-runner:latest'
+      - '-t'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/agents-runner:$SHORT_SHA'
+      - '-f'
+      - 'deploy-agents/Dockerfile'
+      - 'deploy-agents/'
+    id: 'build-agents'
+
+  # Step 2: Build command-center (in parallelo)
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/command-center:latest'
+      - '-t'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/command-center:$SHORT_SHA'
+      - '.'
+    id: 'build-cc'
+
+  # Step 3: Push agents-runner
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/agents-runner']
+    waitFor: ['build-agents']
+    id: 'push-agents'
+
+  # Step 4: Push command-center
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '--all-tags', 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/command-center']
+    waitFor: ['build-cc']
+    id: 'push-cc'
+
+  # Step 5: Deploy agents-runner
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'agents-runner'
+      - '--image'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/agents-runner:$SHORT_SHA'
+      - '--region'
+      - 'europe-west3'
+    waitFor: ['push-agents']
+    id: 'deploy-agents'
+
+  # Step 6: Deploy command-center
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'command-center'
+      - '--image'
+      - 'europe-west3-docker.pkg.dev/brain-core-487914/brain-repo/command-center:$SHORT_SHA'
+      - '--region'
+      - 'europe-west3'
+    waitFor: ['push-cc']
+    id: 'deploy-cc'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: '1200s'

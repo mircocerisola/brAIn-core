@@ -564,7 +564,7 @@ def enqueue_bos_action(problem_id, solution_id, problem_title, sol_title, sol_de
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id_direct, "text": msg, "reply_markup": bos_reply_markup},
+                json={"chat_id": chat_id_direct, "text": "\U0001f3af CSO\n" + msg, "reply_markup": bos_reply_markup},
                 timeout=10,
             )
         except Exception as e:

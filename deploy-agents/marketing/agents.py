@@ -29,7 +29,7 @@ def _mkt_notify(text, reply_markup=None):
     chat_id = get_telegram_chat_id()
     if not chat_id or not TELEGRAM_BOT_TOKEN:
         return
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    payload = {"chat_id": chat_id, "text": "\U0001f3a8 CMO\n" + text, "parse_mode": "Markdown"}
     if reply_markup:
         payload["reply_markup"] = reply_markup
     try:

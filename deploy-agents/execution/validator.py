@@ -184,7 +184,7 @@ Analizza e dai il verdetto."""
             try:
                 requests.post(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                    json={"chat_id": chat_id, "text": report_msg, "reply_markup": val_reply_markup},
+                    json={"chat_id": chat_id, "text": "\U0001f527 CTO\n" + report_msg, "reply_markup": val_reply_markup},
                     timeout=10,
                 )
             except Exception as e:
@@ -225,7 +225,7 @@ def continue_build_agent(project_id, feedback, current_phase):
     next_phase = current_phase + 1
 
     if not github_repo:
-        _send_to_topic(group_id, topic_id, f"\u274c Continue build {name}: repo mancante.")
+        _send_to_topic(group_id, topic_id, f"\u274c Continue build {name}: repo mancante.", chief="cto")
         return
 
     # Leggi file iterations/ da GitHub per contesto fasi precedenti
@@ -282,7 +282,7 @@ Genera il codice per la Fase {next_phase}."""
         tokens_out = response.usage.output_tokens
     except Exception as e:
         logger.error(f"[CONTINUE_BUILD] Claude error: {e}")
-        _send_to_topic(group_id, topic_id, f"\u274c Fase {next_phase} fallita: {e}")
+        _send_to_topic(group_id, topic_id, f"\u274c Fase {next_phase} fallita: {e}", chief="cto")
         return
 
     # Parse e commit dei file generati
@@ -351,7 +351,7 @@ Genera il codice per la Fase {next_phase}."""
                 {"text": "\u270f\ufe0f Modifica", "callback_data": f"build_modify:{project_id}:{next_phase}"},
             ]]
         }
-        _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup)
+        _send_to_topic(group_id, topic_id, result_msg, reply_markup=reply_markup, chief="cto")
 
     else:
         # Fase 4 = build completo → advance step + auto-smoke
@@ -379,7 +379,7 @@ Genera il codice per la Fase {next_phase}."""
             f"{sep}\n"
             f"\u2705 Avvio smoke test automatico..."
         )
-        _send_to_topic(group_id, topic_id, result_msg)
+        _send_to_topic(group_id, topic_id, result_msg, chief="cto")
 
         # Auto-trigger smoke test senza aspettare input Mirco
         try:
@@ -387,7 +387,7 @@ Genera il codice per la Fase {next_phase}."""
             run_smoke_test_setup(project_id)
         except Exception as e:
             logger.warning(f"[CONTINUE_BUILD] smoke trigger: {e}")
-            _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Smoke test non avviato: {e}")
+            _send_to_topic(group_id, topic_id, f"\u26a0\ufe0f Smoke test non avviato: {e}", chief="cto")
 
     logger.info(f"[CONTINUE_BUILD] Fase {next_phase} completata project={project_id}")
 

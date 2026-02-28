@@ -51,7 +51,7 @@ def run_legal_review(project_id):
 
     # Notifica avvio nel topic
     if group_id and topic_id:
-        _send_to_topic(group_id, topic_id, f"\u2696\ufe0f Review legale in corso per {name}...")
+        _send_to_topic(group_id, topic_id, f"\u2696\ufe0f Review legale in corso per {name}...", chief="clo")
 
     user_prompt = f"""Progetto: {name}
 Settore: {sector or "non specificato"}
@@ -150,7 +150,7 @@ Analizza i rischi legali per operare in Europa con questo progetto."""
         }
 
     if group_id and topic_id:
-        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup)
+        _send_to_topic(group_id, topic_id, msg, reply_markup=reply_markup, chief="clo")
 
     duration_ms = int((time.time() - start) * 1000)
     log_to_supabase("legal_agent", "legal_review", 2,
@@ -271,7 +271,7 @@ COMPLIANCE CHECK brAIn — [data]
             try:
                 requests.post(
                     f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": chat_id, "text": report},
+                    json={"chat_id": chat_id, "text": "\u2696\ufe0f CLO\n" + report},
                     timeout=15,
                 )
             except Exception as e:

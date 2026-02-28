@@ -142,7 +142,7 @@ def generate_cost_report_v2():
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id_report, "text": report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
+                json={"chat_id": chat_id_report, "text": "\U0001f4ca CFO\n" + report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
                 timeout=10,
             )
         except Exception as e:
@@ -243,7 +243,7 @@ def generate_activity_report_v2():
         try:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": chat_id_report, "text": report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
+                json={"chat_id": chat_id_report, "text": "\u2699\ufe0f COO\n" + report, "reply_markup": reply_markup, "parse_mode": "Markdown"},
                 timeout=10,
             )
         except Exception as e:

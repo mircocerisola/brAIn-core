@@ -26,7 +26,15 @@ def get_telegram_chat_id():
     return TELEGRAM_CHAT_ID
 
 
-def notify_telegram(message, level="info", source="agents_runner"):
+def notify_telegram(message, level="info", source="agents_runner", chief=None):
+    # Prependi identita' Chief se specificato
+    if chief:
+        _CHIEF_ICONS = {
+            "cto": "\U0001f527", "coo": "\u2699\ufe0f", "cso": "\U0001f3af",
+            "cmo": "\U0001f3a8", "cfo": "\U0001f4ca", "clo": "\u2696\ufe0f", "cpeo": "\U0001f331",
+        }
+        _icon = _CHIEF_ICONS.get(chief, "")
+        message = _icon + " " + chief.upper() + "\n" + message
     # Prova a inviare via command_center (notifiche intelligenti con coda)
     if COMMAND_CENTER_URL:
         try:
