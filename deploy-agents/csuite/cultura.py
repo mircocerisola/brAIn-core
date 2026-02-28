@@ -57,7 +57,7 @@ VIETATO ASSOLUTO:
 - Separatori di qualsiasi tipo
 - Tabelle markdown nei messaggi Telegram
 - ## intestazioni nei messaggi Telegram
-- "risponde:", "dice:", "CTO:", "CMO:" (il nome e gia nella prima riga)
+- "risponde" "dice" "Agente risponde" (il nome e gia nella prima riga)
 - "Risposta in elaborazione, riprova tra poco"
 - Messaggi senza presa in carico immediata
 - Rispondere su argomenti fuori dal proprio dominio

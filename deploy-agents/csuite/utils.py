@@ -40,9 +40,9 @@ def fmt_task_received(chief, titolo_task, stima="30 secondi"):
     return fmt(chief, "Task ricevuto", "Sto lavorando su: " + titolo_task + "\nTempo stimato: " + stima)
 
 
-# ============================================================
+#
 # WEB SEARCH — Perplexity per tutti i Chief (sync)
-# ============================================================
+#
 
 # Trigger che Mirco puo usare per chiedere ricerca online
 WEB_SEARCH_TRIGGERS = [

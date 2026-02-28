@@ -83,7 +83,7 @@ class COO(BaseChief):
 
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
-        """COO: azioni queue, log agenti, task completati — giorno precedente."""
+        """Azioni queue, log agenti, task completati — giorno precedente."""
         sections = []
 
         # 1. Azioni queue create (giorno precedente)
@@ -149,9 +149,9 @@ class COO(BaseChief):
 
         return sections
 
-    # ============================================================
+    #
     # FIX 5: AUTO-OPEN TOPIC #cantiere per progetto
-    # ============================================================
+    #
 
     def ensure_project_topic(self, project_id, project_name=""):
         """Crea topic Telegram per il progetto se non esiste. Salva topic_id in projects."""
@@ -196,9 +196,9 @@ class COO(BaseChief):
             logger.warning("[COO] ensure_project_topic create: %s", e)
         return None
 
-    # ============================================================
+    #
     # STEP 5: REPORT GIORNALIERO MIGLIORATO nel #cantiere
-    # ============================================================
+    #
 
     def _get_project_tasks(self, project_id):
         """Carica tutti i task di un progetto."""
@@ -211,9 +211,9 @@ class COO(BaseChief):
             return []
 
     def _progress_bar(self, done, total):
-        """Genera barra progresso: [====----] 3/6"""
+        """Genera barra progresso: [████░░░░] 3/6"""
         if total == 0:
-            return "[--------] 0/0"
+            return "[\u2591\u2591\u2591\u2591\u2591\u2591\u2591\u2591] 0/0"
         filled = round(done / total * 8)
         bar = "\u2588" * filled + "\u2591" * (8 - filled)
         return "[" + bar + "] " + str(done) + "/" + str(total)
@@ -351,9 +351,9 @@ class COO(BaseChief):
             logger.warning("[COO] send_all_project_daily_reports: %s", e)
             return {"error": str(e)}
 
-    # ============================================================
+    #
     # STEP 4: COO ACCELERATORE — check task + reminder
-    # ============================================================
+    #
 
     def accelerate_open_cantieri(self):
         """Controlla task di tutti i cantieri aperti, invia reminder se bloccati."""
@@ -465,9 +465,9 @@ class COO(BaseChief):
             pass
         return anomalies
 
-    # ============================================================
+    #
     # SNAPSHOT GIORNALIERO — Drive + Email + Supabase
-    # ============================================================
+    #
 
     def send_daily_brain_snapshot(self):
         """Genera snapshot giornaliero, salva su Drive (brAIn/Snapshots/), Supabase, email a Mirco."""
@@ -851,9 +851,9 @@ class COO(BaseChief):
         except Exception as e:
             logger.warning("[COO] Email send error: %s", e)
 
-    # ============================================================
+    #
     # RENAME CANTIERE — Supabase + Telegram topic
-    # ============================================================
+    #
 
     def rename_cantiere(self, project_id, nuovo_nome):
         """Rinomina progetto su Supabase e topic Telegram. Conferma solo se entrambi OK."""
@@ -940,9 +940,9 @@ class COO(BaseChief):
         else:
             return {"error": "Operazione fallita", "db": False, "telegram": False}
 
-    # ============================================================
+    #
     # ORCHESTRAZIONE — COO come coordinatore reale
-    # ============================================================
+    #
 
     HUMAN_ONLY_ACTIONS = [
         "comprare_dominio", "creare_account_esterno", "pagamento",

@@ -87,8 +87,7 @@ supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 AUTHORIZED_USER_ID = None
 
-# ---- CHAT HISTORY PERSISTENTE (Supabase) ----
-CHAT_HISTORY_TABLE = "chat_history"
+#CHAT HISTORY PERSISTENTE (Supabase)CHAT_HISTORY_TABLE = "chat_history"
 MAX_DB_MESSAGES = 10  # ultimi messaggi da caricare dal DB
 SUMMARY_INTERVAL = 20  # ogni N messaggi utente genera un riassunto
 USD_TO_EUR = 0.92
@@ -97,8 +96,7 @@ USD_TO_EUR = 0.92
 _session_context = {}  # chat_id -> {"last_problem_id":, "last_solution_id":, "last_shown_ids":, ...}
 _chat_history_available = None  # None=not checked yet, True/False
 
-# ---- TOPIC ROUTING HELPERS ----
-_cached_group_id = None
+#TOPIC ROUTING HELPERS_cached_group_id = None
 _cached_ops_topic_id = None
 _cached_strategy_topic_id = None
 
@@ -159,8 +157,7 @@ def _get_strategy_topic_id():
     return _cached_strategy_topic_id
 
 
-# ---- ACTIVE SESSION ----
-
+#ACTIVE SESSION
 def _save_active_session(user_id, context_type, project_id=None, solution_id=None):
     """Salva/aggiorna sessione attiva su Supabase (upsert per user_id)."""
     try:
@@ -330,8 +327,7 @@ def _extract_spec_modification(msgs):
             return text[:200]
     return "modifica discussa nel topic"
 
-# ---- NOTIFICHE INTELLIGENTI ----
-# Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
+#NOTIFICHE INTELLIGENTI# Quando Mirco ha mandato un messaggio negli ultimi 90s, le notifiche background vanno in coda.
 # Vengono inviate raggruppate dopo 2 minuti di silenzio. Solo CRITICAL interrompono.
 _last_mirco_message_time = 0.0  # timestamp ultimo messaggio di Mirco
 _notification_queue = []  # lista di messaggi in coda
@@ -339,13 +335,11 @@ _notification_lock = threading.Lock()
 MIRCO_ACTIVE_WINDOW = 120  # secondi (2 minuti)
 NOTIFICATION_BATCH_DELAY = 120  # secondi di silenzio prima di inviare coda
 
-# ---- CODA AZIONI PRIORITIZZATA ----
-ACTION_QUEUE_TABLE = "action_queue"
+#CODA AZIONI PRIORITIZZATAACTION_QUEUE_TABLE = "action_queue"
 _current_action = {}  # chat_id -> action dict (azione in attesa di risposta)
 _code_modify_pending = {}  # chat_id -> code_task_id (per FIX 3: modifica prompt codice)
 
-# ---- CODE AGENT ----
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+#CODE AGENTGITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 GITHUB_REPO = "mircocerisola/brAIn-core"
 GITHUB_API = "https://api.github.com"
 CODE_AGENT_MODEL = "claude-sonnet-4-6"
@@ -375,8 +369,7 @@ Per ogni file da creare o modificare, rispondi con JSON:
 {"files":[{"path":"agents/nome_file.py","content":"contenuto completo del file","action":"create o update"}],"summary":"cosa hai fatto in 2 frasi"}
 SOLO JSON."""
 
-# ---- VOICE TRANSCRIPTION (Whisper primary, Google Speech fallback) ----
-
+#VOICE TRANSCRIPTION (Whisper primary, Google Speech fallback)
 def _transcribe_whisper(audio_bytes: bytes) -> str | None:
     """Whisper-1 via OpenAI API. Richiede OPENAI_API_KEY."""
     key = os.getenv("OPENAI_API_KEY")
@@ -444,8 +437,7 @@ def transcribe_voice(audio_bytes: bytes) -> str | None:
     return _transcribe_google(audio_bytes)
 
 
-# ---- SYSTEM PROMPT ----
-
+#SYSTEM PROMPT
 def build_system_prompt(chat_id=None, conversation_summary=None, active_project_context=None):
     ctx = get_minimal_context()
     session = ""
@@ -628,8 +620,7 @@ def get_minimal_context():
         return ""
 
 
-# ---- TOOLS ----
-
+#TOOLS
 TOOLS = [
     {
         "name": "query_supabase",
@@ -1237,8 +1228,7 @@ def trigger_scan(topic=None, source_name=None, use_top=False, sector_filter=None
         return f"Errore scan: {e}"
 
 
-# ---- CODA AZIONI ----
-
+#CODA AZIONI
 def enqueue_action(user_id, action_type, title, description, payload=None,
                    priority=5, urgency=5, importance=5):
     """Inserisce un'azione nella coda. Ritorna l'ID dell'azione."""
@@ -1592,8 +1582,7 @@ def _send_next_action_delayed(chat_id):
         _send_notification_now("Nessuna altra azione in coda.")
 
 
-# ---- LOGGING ----
-
+#LOGGING
 def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
                      tokens_in=0, tokens_out=0, cost=0, duration_ms=0,
                      status="success", error=None):
@@ -1618,8 +1607,7 @@ def log_to_supabase(agent_id, action, input_summary, output_summary, model_used,
     threading.Thread(target=_log, daemon=True).start()
 
 
-# ---- CLAUDE (Sonnet 4.5 + tool_use) ----
-
+#CLAUDE (Sonnet 4.5 + tool_use)
 MODEL = "claude-sonnet-4-6"
 COST_INPUT_PER_M = 3.0
 COST_OUTPUT_PER_M = 15.0
@@ -2008,8 +1996,7 @@ def clean_reply(text):
     return text.strip()
 
 
-# ---- CARD FORMAT HELPERS (FIX 4) ----
-_SEP = ""
+#CARD FORMAT HELPERS (FIX 4)_SEP = ""
 
 
 def _make_card(emoji, title, context, body_lines, footer=None):
@@ -2105,7 +2092,7 @@ def flush_notification_queue():
     if len(messages) == 1:
         _send_notification_now(messages[0])
     else:
-        combined = f"NOTIFICHE ({len(messages)})\n\n" + "\n---\n".join(messages)
+        combined = f"NOTIFICHE ({len(messages)})\n\n" + "\n\n".join(messages)
         # Tronca se troppo lungo
         if len(combined) > 4000:
             combined = combined[:3990] + "\n..."
@@ -2128,8 +2115,7 @@ def _notification_flusher_loop():
 threading.Thread(target=_notification_flusher_loop, daemon=True).start()
 
 
-# ---- GITHUB API + CODE AGENT ----
-
+#GITHUB API + CODE AGENT
 def github_api(method, endpoint, data=None):
     """Helper per chiamate GitHub API."""
     if not GITHUB_TOKEN:
@@ -2186,8 +2172,7 @@ def github_commit_files(files, message):
     return True, committed
 
 
-# ---- LAYER 3: FORUM TOPICS + PROJECT MANAGEMENT ----
-
+#LAYER 3: FORUM TOPICS + PROJECT MANAGEMENT
 def lookup_project_by_topic_id(thread_id):
     """Cerca un progetto per topic_id nel DB. Ritorna il record o None."""
     try:
@@ -3094,8 +3079,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    # ---- LEGAL AGENT callbacks (MACRO-TASK 2) ----
-    elif data.startswith("legal_read:"):
+    #LEGAL AGENT callbacks (MACRO-TASK 2)    elif data.startswith("legal_read:"):
         # Mostra report legale
         parts = data.split(":")
         project_id = int(parts[1])
@@ -3152,8 +3136,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"[LEGAL_BLOCK] {e}")
 
-    # ---- SMOKE TEST callbacks (MACRO-TASK 3) ----
-    elif data.startswith("smoke_approve:"):
+    #SMOKE TEST callbacks (MACRO-TASK 3)    elif data.startswith("smoke_approve:"):
         parts = data.split(":")
         project_id = int(parts[1])
         smoke_id = int(parts[2]) if len(parts) > 2 else 0
@@ -3247,8 +3230,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         if AGENTS_RUNNER_URL:
             threading.Thread(target=_run_smoke_from_proposal, daemon=True).start()
 
-    # ---- LEAN PIPELINE: CSO Smoke Test Design callbacks ----
-    elif data.startswith("smoke_design_approve:"):
+    #LEAN PIPELINE: CSO Smoke Test Design callbacks    elif data.startswith("smoke_design_approve:"):
         project_id = int(data.split(":")[1])
         await query.answer("Avvio smoke test...")
         def _run_smoke_design_approved():
@@ -3388,8 +3370,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
-    # ---- CAMBIO METODO SMOKE TEST ----
-    elif data.startswith("smoke_design_method:"):
+    #CAMBIO METODO SMOKE TEST    elif data.startswith("smoke_design_method:"):
         project_id = int(data.split(":")[1])
         await query.answer()
         _method_markup = {
@@ -3441,8 +3422,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 logger.warning(f"[SMOKE_METHOD] re-design: {e}")
         threading.Thread(target=_rerun_smoke_design, daemon=True).start()
 
-    # ---- SMOKE TEST DATA VIEWS ----
-    elif data.startswith("smoke_prospects:"):
+    #SMOKE TEST DATA VIEWS    elif data.startswith("smoke_prospects:"):
         parts = data.split(":")
         project_id = int(parts[1])
         smoke_id = int(parts[2]) if len(parts) > 2 else 0
@@ -3584,8 +3564,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 payload["message_thread_id"] = thread_id
             http_requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
 
-    # ---- RESTAURANT REPOSITION callbacks ----
-    elif data.startswith("restaurant_option_a:"):
+    #RESTAURANT REPOSITION callbacks    elif data.startswith("restaurant_option_a:"):
         project_id = int(data.split(":")[1])
         await query.answer("Opzione A scelta!")
         try:
@@ -3729,8 +3708,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
     elif data.startswith("build_modify:"):
         await query.answer("Scrivi il feedback nel topic del progetto.")
 
-    # ---- REPORT ON-DEMAND callbacks ----
-    elif data == "report_cost_ondemand":
+    #REPORT ON-DEMAND callbacks    elif data == "report_cost_ondemand":
         await query.answer("Generazione report costi...")
         _token_rc = os.getenv("TELEGRAM_BOT_TOKEN")
         _cid_rc = chat_id
@@ -3758,8 +3736,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
                 )
         threading.Thread(target=_gen_activ_cb, daemon=True).start()
 
-    # ---- MARKETING callbacks ----
-    elif data.startswith("mkt_report:"):
+    #MARKETING callbacks    elif data.startswith("mkt_report:"):
         project_id = int(data.split(":")[1]) if data.split(":")[1] else None
         await query.answer("Generazione report marketing...")
         def _mkt_report_cb():
@@ -4055,8 +4032,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
             daemon=True,
         ).start()
 
-    # ---- CODE ACTION APPROVAL callbacks (v5.17: CTO gestisce tutto) ----
-    elif data.startswith("code_approve:"):
+    #CODE ACTION APPROVAL callbacks (v5.17: CTO gestisce tutto)    elif data.startswith("code_approve:"):
         _ca_task_id = int(data.split(":")[1])
         await query.answer("Approvato!")
         try:
@@ -4248,7 +4224,7 @@ def _run_code_agent_sync(chat_id, prompt):
             if any(fp.startswith(d) for d in key_dirs) and len(context_files) < 5:
                 content, _ = github_get_file(fp)
                 if content:
-                    context_files.append(f"--- {fp} ---\n{content[:3000]}")
+                    context_files.append(f"[{fp}]\n{content[:3000]}")
 
         context_text = "\n\n".join(context_files)
 
@@ -4443,8 +4419,7 @@ def _trigger_build_deploy_sync(chat_id, deploy_info):
             _send_telegram_sync(chat_id, f"Errore build {service}: {e}")
 
 
-# ---- TELEGRAM HANDLERS ----
-
+#TELEGRAM HANDLERS
 tg_app = None
 
 
@@ -4509,8 +4484,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
 
-    # ---- VOCALE — trascrivi PRIMA di qualsiasi altra logica ----
-    if update.message and update.message.voice:
+    #VOCALE — trascrivi PRIMA di qualsiasi altra logica    if update.message and update.message.voice:
         await update.message.chat.send_action("typing")
         try:
             _vf = await context.bot.get_file(update.message.voice.file_id)
@@ -4532,8 +4506,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Traccia ultimo messaggio per notifiche intelligenti
     _last_mirco_message_time = time.time()
 
-    # ---- CODE MODIFY PENDING (FIX 3 v5.11) ----
-    # Se Mirco sta rispondendo a "Cosa vuoi cambiare nel prompt?"
+    #CODE MODIFY PENDING (FIX 3 v5.11)    # Se Mirco sta rispondendo a "Cosa vuoi cambiare nel prompt?"
     if chat_id in _code_modify_pending:
         _cm_tid = _code_modify_pending.pop(chat_id)
         _cm_feedback = msg
@@ -4594,8 +4567,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=_regenerate_prompt, daemon=True).start()
         return
 
-    # ---- TRAINING FEEDBACK PENDING (CPeO v5.25) ----
-    if chat_id in _session_context and _session_context[chat_id].get("awaiting_training_feedback"):
+    #TRAINING FEEDBACK PENDING (CPeO v5.25)    if chat_id in _session_context and _session_context[chat_id].get("awaiting_training_feedback"):
         _tf_plan_id = _session_context[chat_id].pop("awaiting_training_feedback")
         _tf_feedback = msg
         def _handle_training_feedback():
@@ -4617,7 +4589,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"PIANO ORIGINALE:\n{(_tf_plan.get('plan_md') or '')[:3000]}\n\n"
                         f"FEEDBACK DI MIRCO SULLE FONTI:\n{_tf_feedback[:1000]}\n\n"
                         "Rispondi SOLO con il piano aggiornato completo, incorporando il feedback. "
-                        "Formato: markdown pulito, senza bold (**), senza separatori (---). Italiano."
+                        "Formato: markdown pulito, senza bold (**), senza separatori. Italiano."
                     )}],
                 )
                 _tf_new_plan = _tf_resp.content[0].text.strip()
@@ -4654,8 +4626,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         threading.Thread(target=_handle_training_feedback, daemon=True).start()
         return
 
-    # ---- ACTIVE SESSION — carica contesto progetto attivo ----
-    _active_proj_ctx = None
+    #ACTIVE SESSION — carica contesto progetto attivo    _active_proj_ctx = None
     try:
         _sess = _load_active_session(chat_id)
         if _sess:
@@ -4684,10 +4655,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as _ae:
         logger.warning(f"[ACTIVE_SESSION] load in handle_message: {_ae}")
 
-    # ---- FORUM TOPIC ROUTING ----
-    thread_id = update.message.message_thread_id if update.message else None
-    # ---- WARMUP BUFFER DA DB (post-restart recovery) ----
-    if thread_id:
+    #FORUM TOPIC ROUTING    thread_id = update.message.message_thread_id if update.message else None
+    #WARMUP BUFFER DA DB (post-restart recovery)    if thread_id:
         _warmup_topic_buffer(chat_id, thread_id)
     if thread_id:
         project = lookup_project_by_topic_id(thread_id)
@@ -4695,8 +4664,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_project_message(update, project)
             return
 
-    # ---- CHIEF TOPIC ROUTING (FIX 1) ----
-    # Il topic_id definisce il Chief senza ambiguità — nessuna classificazione Haiku
+    #CHIEF TOPIC ROUTING (FIX 1)    # Il topic_id definisce il Chief senza ambiguità — nessuna classificazione Haiku
     if thread_id and not _CSUITE_DIRECT:
         logger.warning(f"[CHIEF_ROUTING] _CSUITE_DIRECT=False thread_id={thread_id} — csuite non caricato")
     if thread_id and _CSUITE_DIRECT:
@@ -4767,8 +4735,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lower_msg = msg.strip().lower()
 
-    # ---- C-SUITE ROUTING ----
-    _CSUITE_KEYWORDS = {
+    #C-SUITE ROUTING    _CSUITE_KEYWORDS = {
         "cso": "strategy", "strategia": "strategy", "pivot": "strategy",
         "cfo": "finance", "costi": "finance", "budget": "finance", "burn rate": "finance",
         "cmo": "marketing", "growth": "marketing", "conversione": "marketing",
@@ -4836,8 +4803,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).start()
         return
 
-    # ---- MARKETING ROUTING ----
-    _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
+    #MARKETING ROUTING    _BRAND_TRIGGERS = {"crea brand", "brand identity", "brand brAIn", "crea brand identity brain", "crea brand identity brAIn"}
 
     if lower_msg in _BRAND_TRIGGERS or lower_msg.startswith("crea brand identity"):
         await update.message.reply_text(
@@ -4879,8 +4845,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ---- FIX 2/3: ROUTING REPORT ON-DEMAND ----
-    _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
+    #FIX 2/3: ROUTING REPORT ON-DEMAND    _REPORT_COST_TRIGGERS = {"report costi", "costi", "report cost", "cost report", "quanto stiamo spendendo", "costo"}
     _REPORT_ACTIV_TRIGGERS = {"report attività", "attività", "report attivita", "attivita", "status", "stato sistema", "report activity", "activity"}
     _REPORT_GENERIC_TRIGGERS = {"report", "report brAIn", "report brain", "dashboard"}
 
@@ -4924,8 +4889,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ---- COMANDI CODA AZIONI ----
-    if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
+    #COMANDI CODA AZIONI    if lower_msg in ("quante azioni", "quante azioni ho", "quante azioni ho in coda", "azioni in coda", "coda"):
         n = count_pending_actions(chat_id)
         if n == 0:
             await update.message.reply_text(
@@ -4987,8 +4951,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return
 
-    # ---- RISPOSTA A AZIONE IN CORSO ----
-    if chat_id in _current_action:
+    #RISPOSTA A AZIONE IN CORSO    if chat_id in _current_action:
         handled, reply_text = handle_action_response(chat_id, msg)
         if handled:
             if reply_text:
@@ -5087,8 +5050,7 @@ def is_authorized(update):
     return update.effective_user.id == AUTHORIZED_USER_ID
 
 
-# ---- HTTP ENDPOINTS ----
-
+#HTTP ENDPOINTS
 async def health_check(request):
     return web.Response(text="brAIn Command Center v3.0 OK", status=200)
 
@@ -5234,8 +5196,7 @@ async def handle_set_current_action(request):
         return web.Response(text=str(e), status=500)
 
 
-# ---- MAIN ----
-
+#MAIN
 async def main():
     global tg_app
 
@@ -5253,8 +5214,7 @@ async def main():
     await tg_app.initialize()
     await tg_app.start()
 
-    # ---- STARTUP: recovery progetti bloccati in smoke/build ----
-    def _startup_pipeline_recovery():
+    #STARTUP: recovery progetti bloccati in smoke/build    def _startup_pipeline_recovery():
         """Recovery post-restart: riprende smoke test o build per progetti in pipeline attiva."""
         try:
             # Progetti CSO in attesa smoke test design
@@ -5292,8 +5252,7 @@ async def main():
             logger.warning(f"[STARTUP_RECOVERY] {e}")
     threading.Thread(target=_startup_pipeline_recovery, daemon=True).start()
 
-    # ---- STARTUP: manda opzioni riposizionamento a progetti che hanno saltato smoke test ----
-    def _startup_restaurant_reposition():
+    #STARTUP: manda opzioni riposizionamento a progetti che hanno saltato smoke test    def _startup_restaurant_reposition():
         """Trova progetti in build che hanno saltato lo smoke test e manda le opzioni."""
         try:
             r = supabase.table("projects").select("id,name,pipeline_step,pipeline_territory") \

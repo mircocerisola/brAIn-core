@@ -79,9 +79,9 @@ class CPeO(BaseChief):
         return ctx
 
 
-# ============================================================
+#
 # HELPER TELEGRAM — topic #people
-# ============================================================
+#
 
 def _get_people_topic():
     """Ritorna (group_id, topic_id) per il topic #people."""
@@ -114,9 +114,9 @@ def _send_people(text, reply_markup=None):
         logger.warning("[CPeO] Telegram send: %s", e)
 
 
-# ============================================================
+#
 # TASK 1: create_training_plan(chief_name, topic)
-# ============================================================
+#
 
 def create_training_plan(chief_name: str, topic: str) -> Dict[str, Any]:
     """
@@ -174,7 +174,7 @@ def create_training_plan(chief_name: str, topic: str) -> Dict[str, Any]:
     # ── Phase B: Genera piano con Claude ──
     research_text = ""
     for s in sources:
-        research_text += "\n\n--- " + s["type"].upper() + " ---\n" + s["content"]
+        research_text += "\n\n" + s["type"].upper() + ":\n" + s["content"]
 
     chief_full = _CHIEF_NAMES.get(chief_id, chief_id.upper())
     plan_prompt = (
@@ -187,7 +187,7 @@ def create_training_plan(chief_name: str, topic: str) -> Dict[str, Any]:
         "3. MODULI (3-5 moduli): titolo + contenuto sintetico + esercizio pratico\n"
         "4. APPLICAZIONE: come applicare nel contesto brAIn\n"
         "5. KPI APPRENDIMENTO: come misurare se il Chief ha imparato\n\n"
-        "Formato: markdown pulito, senza bold (**), senza separatori (---). "
+        "Formato: markdown pulito, senza bold (**), senza separatori. "
         "Tono: diretto, pratico, zero fuffa. Italiano."
     )
 
@@ -340,9 +340,9 @@ def _drive_find_or_create(service, name, parent_id):
         return None
 
 
-# ============================================================
+#
 # CALLBACK HANDLERS per card training
-# ============================================================
+#
 
 def handle_training_approve(plan_id: int) -> Dict[str, Any]:
     """Approva piano: salva knowledge chunks in chief_knowledge."""
@@ -448,9 +448,9 @@ def handle_training_cancel(plan_id: int) -> Dict[str, Any]:
         return {"error": str(e)}
 
 
-# ============================================================
+#
 # FIX 3: compute_chief_gap_profile(chief_name)
-# ============================================================
+#
 
 _GAP_THRESHOLD = 20  # gap >= 20 punti → training
 
@@ -548,9 +548,9 @@ def compute_chief_gap_profile(chief_name: str) -> Dict[str, Any]:
     }
 
 
-# ============================================================
+#
 # TASK 2: daily_gap_analysis() — v5.26 basata su agent_capabilities
-# ============================================================
+#
 
 def daily_gap_analysis() -> Dict[str, Any]:
     """
@@ -605,9 +605,9 @@ def daily_gap_analysis() -> Dict[str, Any]:
     return {"status": "ok", "results": results_list, "training_proposed": training_proposed}
 
 
-# ============================================================
+#
 # TASK 3: handle_training_request(message, chief_names)
-# ============================================================
+#
 
 def handle_training_request(message: str, chief_names: Optional[List[str]] = None) -> Dict[str, Any]:
     """
@@ -711,9 +711,9 @@ def _extract_chiefs_from_message(message: str) -> List[str]:
     return found
 
 
-# ============================================================
+#
 # COACHING SETTIMANALE (esistente)
-# ============================================================
+#
 
 def coach_chiefs() -> Dict[str, Any]:
     """
@@ -856,9 +856,9 @@ def coach_chiefs() -> Dict[str, Any]:
     }
 
 
-# ============================================================
+#
 # FIX 4: post_task_learning — continuous learning
-# ============================================================
+#
 
 def post_task_learning(
     chief_name: str,

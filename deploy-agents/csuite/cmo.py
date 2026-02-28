@@ -60,9 +60,9 @@ class CMO(BaseChief):
             ctx["marketing_reports"] = []
         return ctx
 
-    # ============================================================
+    #
     # ANSWER_QUESTION — override con logging + keyword trigger
-    # ============================================================
+    #
 
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
@@ -166,9 +166,9 @@ class CMO(BaseChief):
                 return m.group(1).strip()
         return "Progetto"
 
-    # ============================================================
+    #
     # DATI MARKETING
-    # ============================================================
+    #
 
     def load_marketing_data(self):
         """Carica dati marketing reali da Supabase."""
@@ -247,7 +247,7 @@ class CMO(BaseChief):
             "- Seconda riga: titolo del report (es: Report Marketing)\n"
             "- Terza riga: vuota\n"
             "- Dalla quarta in poi: contenuto con dati concreti\n"
-            "- VIETATO: ** grassetto **, ## titoli, --- trattini, ___ separatori\n"
+            "- VIETATO: ** grassetto **, ## titoli, separatori di qualsiasi tipo\n"
             "- Se c'e' uno smoke test attivo, e' la sezione PRINCIPALE.\n"
             "- Mostra SOLO sezioni con dati reali. Zero fuffa."
         )
@@ -273,7 +273,7 @@ class CMO(BaseChief):
         return text
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
-        """CMO: prospect nuovi, smoke test events, brand activity."""
+        """Prospect nuovi, smoke test events, brand activity."""
         sections = []
 
         try:
@@ -332,11 +332,13 @@ class CMO(BaseChief):
 
     def generate_landing_page_html(self, project_id, thread_id=None):
         """Genera HTML landing page via Claude per un progetto smoke test.
-        v5.28: fmt_task_received, salva in project_assets, sendDocument, agent_event CTO.
+        v5.30: ricerca web autonoma Perplexity PRIMA di generare. Zero domande a Mirco.
         """
+        from csuite.utils import web_search
+
         try:
             r = supabase.table("projects").select(
-                "id,name,brand_name,brand_email,brand_domain,smoke_test_method,topic_id"
+                "id,name,brand_name,brand_email,brand_domain,smoke_test_method,topic_id,description"
             ).eq("id", project_id).execute()
             if not r.data:
                 return {"error": "progetto non trovato"}
@@ -347,32 +349,52 @@ class CMO(BaseChief):
         brand = project.get("brand_name") or project.get("name", "")
         email = project.get("brand_email") or ""
         domain = project.get("brand_domain") or ""
+        description = project.get("description") or ""
         topic_id = thread_id or project.get("topic_id")
 
-        # Notifica task ricevuto
+        # Notifica: cerco riferimenti online prima di generare
         if topic_id:
             self._send_report_to_topic_id(topic_id,
-                fmt_task_received("cmo", "Landing page " + brand, "60 secondi"))
+                fmt("cmo", "Landing in lavorazione",
+                    "Cerco riferimenti visivi online per landing SaaS simili. 2-3 minuti."))
+
+        # Ricerca web autonoma: riferimenti visivi + stile
+        ref_search = web_search(
+            "migliori landing page SaaS " + brand + " design moderno accattivante esempi 2025",
+            "cmo"
+        )
+        style_search = web_search(
+            "best converting SaaS landing page design technology Italy 2025",
+            "cmo"
+        )
 
         prompt = (
-            "Genera una landing page HTML completa e moderna per uno smoke test.\n"
+            "Sei un designer web esperto in landing page SaaS ad alta conversione.\n"
             "Brand: " + brand + "\n"
             "Email: " + email + "\n"
-            "Dominio: " + domain + "\n\n"
-            "Requisiti:\n"
-            "- HTML singolo file con CSS inline (no file esterni)\n"
-            "- Responsive, mobile-first\n"
-            "- Header con logo testuale, hero section con value proposition\n"
+            "Dominio: " + domain + "\n"
+            "Descrizione: " + (description or "Prodotto SaaS innovativo") + "\n\n"
+            "Riferimenti visivi trovati online:\n" + ref_search + "\n\n"
+            "Stile ricercato:\n" + style_search + "\n\n"
+            "Crea una landing page HTML completa, SINGOLO FILE, con:\n"
+            "- CSS inline moderno e accattivante (NON basic, NON template)\n"
+            "- Design ispirato ai migliori SaaS 2025: hero potente, gerarchia visiva chiara\n"
+            "- Colori: sfondo scuro #0D1117 o bianco puro, accent verde #52B788\n"
+            "- Hero: headline grande e diretta, subheadline, CTA principale verde\n"
+            "- 3 pain point del target con icone\n"
+            "- Come funziona: 3 step visivi\n"
             "- CTA prominente (contattaci / richiedi demo)\n"
-            "- 3 benefici chiave con icone emoji\n"
-            "- Footer con email contatto\n"
-            "- Palette: colori moderni e professionali\n"
+            "- Footer con " + email + "\n"
+            "- Mobile responsive, meta tags SEO + Open Graph\n"
+            "- Animazioni CSS sottili (fade-in, hover)\n"
+            "- Font: Inter o sistema\n"
             "- NESSUN brand 'brAIn' visibile, solo il brand del prodotto\n"
+            "- Deve sembrare una landing professionale di una startup tech europea 2025\n"
             "- Rispondi SOLO con il codice HTML completo, nient'altro."
         )
 
         try:
-            html = self.call_claude(prompt, model="claude-sonnet-4-6", max_tokens=4000)
+            html = self.call_claude(prompt, model="claude-sonnet-4-6", max_tokens=8000)
         except Exception as e:
             logger.warning("[CMO] generate_landing_page_html error: %s", e)
             return {"error": str(e)}
@@ -475,9 +497,9 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] send_report_to_topic_id: %s", e)
 
-    # ============================================================
+    #
     # BOZZA VISIVA — 1200x675, gradient, 3 card sections
-    # ============================================================
+    #
 
     def generate_bozza_visiva(self, project_name, tagline, thread_id=None, project_id=None):
         """Genera bozza visiva PNG 1200x675 con gradient, 3 card, invia via Telegram."""
@@ -665,9 +687,9 @@ class CMO(BaseChief):
         except Exception as e:
             logger.warning("[CMO] post_task_learning bozza: %s", e)
 
-    # ============================================================
+    #
     # BRIEF TECNICO PER CTO
-    # ============================================================
+    #
 
     def publish_landing_brief_for_cto(self, project_id, palette, fonts, sections_copy, style_notes="", bozza_path=""):
         """Pubblica evento landing_brief_ready per il CTO via agent_events."""
@@ -693,9 +715,9 @@ class CMO(BaseChief):
             logger.warning("[CMO] publish_landing_brief: %s", e)
             return {"error": str(e)}
 
-    # ============================================================
+    #
     # TELEGRAM HELPERS
-    # ============================================================
+    #
 
     def _send_report_to_topic(self, text):
         """Invia report al Forum Topic #marketing."""

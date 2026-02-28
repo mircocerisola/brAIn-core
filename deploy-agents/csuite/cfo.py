@@ -167,7 +167,7 @@ class CFO(BaseChief):
         }
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
-        """CFO: costi API, breakdown per agente/modello/progetto, anomalie — giorno precedente."""
+        """Costi API, breakdown per agente/modello/progetto, anomalie — giorno precedente."""
         sections = []
 
         # Usa get_costs_breakdown per dati completi (giorno solare precedente)

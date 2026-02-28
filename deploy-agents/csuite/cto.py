@@ -105,10 +105,10 @@ class CTO(BaseChief):
             pass
         return anomalies
 
-    # ============================================================
+    #
     # PATTERN DETECTION: "Esegui con --dangerously-skip-permissions"
     # -> CODEACTION card automatica, mai prompt nel messaggio
-    # ============================================================
+    #
 
     def answer_question(self, question, user_context=None,
                         project_context=None, topic_scope_id=None,
@@ -128,7 +128,7 @@ class CTO(BaseChief):
             recent_messages=recent_messages,
         )
 
-    # ---- SAVE + CODEACTION CARD ----
+    # SAVE + CODEACTION CARD
 
     def _save_and_send_card(self, prompt_text):
         """Salva in code_tasks (con dedup) e invia CODEACTION card. Return marker per skip."""
@@ -260,9 +260,9 @@ class CTO(BaseChief):
         except Exception as e:
             logger.warning("[CTO] send_codeaction_card error: %s", e)
 
-    # ============================================================
+    #
     # MESSAGGIO AGGIORNAMENTO — formato fisso 4 righe
-    # ============================================================
+    #
 
     @staticmethod
     def build_update_message(elapsed, output_log):
@@ -278,9 +278,9 @@ class CTO(BaseChief):
             last_line
         )
 
-    # ============================================================
+    #
     # ESECUZIONE VIA CLOUD RUN JOB — trigger + monitor da DB
-    # ============================================================
+    #
 
     def _has_running_task(self):
         """Controlla se esiste un task con status running/ready."""
@@ -510,7 +510,7 @@ class CTO(BaseChief):
                 "Task: " + titolo + "\n"
                 "Il job terminera' il processo."))
 
-    # ---- CLOUD RUN JOB TRIGGER ----
+    # CLOUD RUN JOB TRIGGER
 
     def _trigger_cloud_run_job(self, task_id):
         """Triggera il Cloud Run Job brain-code-executor con CODE_TASK_ID."""
@@ -555,7 +555,7 @@ class CTO(BaseChief):
             logger.warning("[CTO] trigger job error: %s", e)
             return False
 
-    # ---- TELEGRAM HELPER ----
+    # TELEGRAM HELPER
 
     def _send_telegram(self, chat_id, thread_id, text, reply_markup=None):
         """Helper per inviare messaggio Telegram."""
@@ -574,9 +574,9 @@ class CTO(BaseChief):
         except Exception as e:
             logger.warning("[CTO] telegram send error: %s", e)
 
-    # ============================================================
+    #
     # FIX 3: CONTESTO LIMITATO AL PROGETTO
-    # ============================================================
+    #
 
     def project_context_builder(self, project_id):
         """Costruisce contesto compatto (max 20 righe) per prompt Claude Code su progetto specifico."""
@@ -627,9 +627,9 @@ class CTO(BaseChief):
                 lines.append("  [" + t.get("status", "?") + "] " + t.get("title", "?")[:50])
         return {"context_text": "\n".join(lines), "raw": ctx}
 
-    # ============================================================
+    #
     # FIX 4: CARD ANTEPRIMA CON BOTTONE ANNULLA
-    # ============================================================
+    #
 
     def send_preview_card(self, task_id, project_id=None):
         """Invia card anteprima con [Avvia] e [Annulla] prima di eseguire Claude Code."""
@@ -713,9 +713,9 @@ class CTO(BaseChief):
         logger.info("[CTO] Task #%d annullato da Mirco, COO notificato", task_id)
         return {"status": "cancelled", "task_id": task_id}
 
-    # ============================================================
+    #
     # GENERA PROMPT TECNICI PER ALTRI CHIEF
-    # ============================================================
+    #
 
     def build_technical_prompt(self, task_description, context=""):
         """Trasforma una richiesta funzionale in prompt tecnico completo per Claude Code."""

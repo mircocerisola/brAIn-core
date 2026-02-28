@@ -117,11 +117,11 @@ class CSO(BaseChief):
             recent_messages=recent_messages,
             query=query,
         )
-        return base + "\n\n=== RESPONSABILITA' SMOKE TEST ===\n" + _SMOKE_TEST_INSTRUCTIONS
+        return base + "\n\nRESPONSABILITA SMOKE TEST\n" + _SMOKE_TEST_INSTRUCTIONS
 
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
-        """CSO: problemi scansionati, soluzioni generate, smoke test avviati — giorno precedente."""
+        """Problemi scansionati, soluzioni generate, smoke test avviati — giorno precedente."""
         sections = []
 
         # 1. Nuovi problemi (giorno precedente)
@@ -197,9 +197,9 @@ class CSO(BaseChief):
             pass
         return anomalies
 
-    # ============================================================
+    #
     # REAL PROSPECT FINDING
-    # ============================================================
+    #
 
     def find_real_prospects(self, target, n=50):
         """DEPRECATED v5.28: usare plan_smoke_test + delegate_execution_to_coo.
@@ -315,9 +315,9 @@ class CSO(BaseChief):
             "telefono": telefono,
         }
 
-    # ============================================================
+    #
     # START SMOKE TEST
-    # ============================================================
+    #
 
     def start_smoke_test(self, project_id):
         """DEPRECATED v5.28: usare plan_smoke_test + delegate_execution_to_coo.
@@ -418,9 +418,9 @@ class CSO(BaseChief):
         except Exception as e:
             logger.warning("[CSO] send_smoke_card error: %s", e)
 
-    # ============================================================
+    #
     # RELAUNCH SMOKE TEST
-    # ============================================================
+    #
 
     def send_smoke_relaunch(self, project_id: int, project_name: str = "RestaAI") -> Dict:
         """Aggiorna pipeline_step a smoke_test_designing e manda messaggio in #strategy."""
@@ -464,9 +464,9 @@ class CSO(BaseChief):
             logger.warning("[CSO] send_smoke_relaunch message error: %s", e)
             return {"status": "ok", "message_sent": False}
 
-    # ============================================================
+    #
     # STRATEGY-ONLY: pianifica senza eseguire
-    # ============================================================
+    #
 
     def plan_smoke_test(self, project_id, thread_id=None):
         """Genera piano smoke test JSON. Zero execution — solo strategia.
