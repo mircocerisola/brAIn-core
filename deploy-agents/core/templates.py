@@ -25,10 +25,11 @@ def format_date_rome():
 
 # ── SMOKE TEST CARD ─────────────────────────────────────────────────────────
 SMOKE_TEST_CARD_TEMPLATE = (
-    "\U0001f52c SMOKE TEST \u2014 {brand_name}\n\n"
-    "\U0001f4cb {obiettivo_1_riga}\n"
-    "\U0001f465 {n_prospect} prospect | \u23f1\ufe0f {durata} giorni | \U0001f4b6 {budget}\n"
-    "\U0001f3af KPI: {kpi_successo}\n"
+    "\U0001f3af CSO\n"
+    "Smoke Test {brand_name}\n\n"
+    "{obiettivo_1_riga}\n"
+    "{n_prospect} prospect | {durata} giorni | {budget}\n"
+    "KPI: {kpi_successo}\n"
     "{blockers_line}"
 )
 
@@ -75,38 +76,43 @@ def format_smoke_test_card(brand_name, obiettivo, n_prospect, durata,
 
 # ── CODEACTION CARD ─────────────────────────────────────────────────────────
 CODEACTION_CARD_TEMPLATE = (
-    "\u26a1 CODEACTION \u2014 CTO\n\n"
-    "\U0001f4cb {title}\n"
-    "\U0001f4c1 File: {main_file}\n"
-    "\u23f1\ufe0f Stima: {time_minutes} min"
+    "\U0001f527 CTO\n"
+    "Codeaction\n\n"
+    "Task: {title}\n"
+    "File: {main_file}\n"
+    "Stima: {time_minutes} min"
 )
 
 
 # ── PROMPT EXECUTION STATUS ─────────────────────────────────────────────────
 PROMPT_RUNNING_TEMPLATE = (
-    "\u2699\ufe0f Prompt in esecuzione\n\n"
-    "\U0001f504 Avviato alle {ora}\n"
-    "\U0001f4cb Task: {titolo}\n"
-    "\u23f3 Aggiornamento ogni 5 minuti"
+    "\U0001f527 CTO\n"
+    "Prompt in esecuzione\n\n"
+    "Avviato alle {ora}\n"
+    "Task: {titolo}\n"
+    "Aggiornamento ogni 5 minuti"
 )
 
 PROMPT_PROGRESS_TEMPLATE = (
-    "\u23f3 Aggiornamento \u2014 {elapsed} min\n\n"
-    "\U0001f504 Prompt ancora in esecuzione\n"
-    "\U0001f4cb Task: {titolo}\n"
-    "\U0001f550 Avviato alle {ora_avvio}"
+    "\U0001f527 CTO\n"
+    "Aggiornamento {elapsed} min\n\n"
+    "Prompt ancora in esecuzione\n"
+    "Task: {titolo}\n"
+    "Avviato alle {ora_avvio}"
 )
 
 PROMPT_DONE_TEMPLATE = (
-    "\u2705 Prompt completato\n\n"
-    "\U0001f4cb Task: {titolo}\n"
-    "\u23f1\ufe0f Durata: {durata_minuti} min\n"
+    "\U0001f527 CTO\n"
+    "Prompt completato\n\n"
+    "Task: {titolo}\n"
+    "Durata: {durata_minuti} min\n"
     "{output_section}"
 )
 
 PROMPT_ERROR_TEMPLATE = (
-    "\u274c Prompt fallito\n\n"
-    "\U0001f4cb Task: {titolo}\n"
-    "\u23f1\ufe0f Durata: {durata_minuti} min\n"
-    "\u26a0\ufe0f Errore: {errore}"
+    "\U0001f527 CTO\n"
+    "Prompt fallito\n\n"
+    "Task: {titolo}\n"
+    "Durata: {durata_minuti} min\n"
+    "Errore: {errore}"
 )

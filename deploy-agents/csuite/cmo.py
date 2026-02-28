@@ -117,11 +117,11 @@ class CMO(BaseChief):
             "Data: " + today_str + "\n"
             "Dati disponibili:\n" + ctx + "\n\n"
             "FORMATO OBBLIGATORIO (Telegram, NO Markdown):\n"
-            "- Prima riga: emoji + CMO + ' · ' + data\n"
-            "- Separa le sezioni con una riga vuota, NIENTE righe orizzontali o trattini\n"
-            "- Sezioni: emoji + TITOLO MAIUSCOLO\n"
-            "- Dati concreti su righe separate con numeri reali\n"
-            "- VIETATO: ** grassetto **, ## titoli, ─── separatori, ---- trattini\n"
+            "- Prima riga ESATTA: \U0001f3a8 CMO\n"
+            "- Seconda riga: titolo del report (es: Report Marketing)\n"
+            "- Terza riga: vuota\n"
+            "- Dalla quarta in poi: contenuto con dati concreti\n"
+            "- VIETATO: ** grassetto **, ## titoli, --- trattini, ___ separatori\n"
             "- Se c'e' uno smoke test attivo, e' la sezione PRINCIPALE.\n"
             "- Mostra SOLO sezioni con dati reali. Zero fuffa."
         )
@@ -149,9 +149,6 @@ class CMO(BaseChief):
 
         return text
 
-
-    def _daily_report_emoji(self) -> str:
-        return "\U0001f4e2"
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
         """CMO: prospect nuovi, smoke test events, brand activity — giorno precedente."""
@@ -377,7 +374,7 @@ class CMO(BaseChief):
                     data={
                         "chat_id": group_id,
                         "message_thread_id": topic_id,
-                        "caption": "\U0001f464 CMO \u2014 Bozza landing " + brand,
+                        "caption": "\U0001f3a8 CMO\nBozza landing " + brand,
                     },
                     files={"photo": f},
                     timeout=15,

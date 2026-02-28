@@ -114,9 +114,6 @@ class CSO(BaseChief):
         return base + "\n\n=== RESPONSABILITA' SMOKE TEST ===\n" + _SMOKE_TEST_INSTRUCTIONS
 
 
-    def _daily_report_emoji(self) -> str:
-        return "\U0001f30d"
-
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
         """CSO: problemi scansionati, soluzioni generate, smoke test avviati — giorno precedente."""
         sections = []
@@ -440,10 +437,11 @@ class CSO(BaseChief):
             group_id = int(group_r.data[0]["value"])
 
             text = (
-                "\U0001f680 RILANCIO SMOKE TEST\n\n"
-                + "Progetto: " + project_name + "\n"
-                + "Pipeline: smoke_test_designing\n"
-                + "Azione: avvio processo completo di validazione mercato"
+                "\U0001f3af CSO\n"
+                "Rilancio Smoke Test\n\n"
+                "Progetto: " + project_name + "\n"
+                "Pipeline: smoke_test_designing\n"
+                "Azione: avvio processo completo di validazione mercato"
             )
             _requests.post(
                 "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage",

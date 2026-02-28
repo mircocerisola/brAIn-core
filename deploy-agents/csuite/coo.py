@@ -76,9 +76,6 @@ class COO(BaseChief):
         return ctx
 
 
-    def _daily_report_emoji(self) -> str:
-        return "\u2699\ufe0f"
-
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
         """COO: azioni queue, log agenti, task completati — giorno precedente."""
         sections = []
@@ -268,10 +265,11 @@ class COO(BaseChief):
         header_date = str(ieri_dt.day) + " " + mese
 
         lines = [
-            "\U0001f3d7 " + brand + " \u2014 " + header_date,
+            "\u2699\ufe0f COO",
+            "Report Cantiere " + brand + " " + header_date,
             "",
-            "\U0001f4cd Step: " + step,
-            "\U0001f4ca " + self._progress_bar(len(done_tasks), len(tasks)),
+            "Step: " + step,
+            self._progress_bar(len(done_tasks), len(tasks)),
         ]
 
         if done_ieri:
@@ -410,7 +408,8 @@ class COO(BaseChief):
             return {"project_id": project_id, "reminders": 0}
 
         text = (
-            "\u23f0 REMINDER " + brand + "\n\n"
+            "\u2699\ufe0f COO\n"
+            "Reminder " + brand + "\n\n"
             + self._progress_bar(len(done), len(tasks)) + "\n"
             + "\n".join(reminders)
         )
@@ -915,12 +914,20 @@ class COO(BaseChief):
 
         # 4. Conferma o errore nel topic
         if db_ok and tg_ok:
-            confirm_text = "\U0001f464 COO \u2014 Cantiere rinominato in " + nuovo_nome + "."
+            confirm_text = (
+                "\u2699\ufe0f COO\n"
+                "Cantiere rinominato\n\n"
+                "Nuovo nome: " + nuovo_nome
+            )
             if topic_id:
                 self._send_to_topic(topic_id, confirm_text)
             return {"status": "ok", "project_id": project_id, "nuovo_nome": nuovo_nome, "db": True, "telegram": True}
         elif db_ok and not tg_ok:
-            err_text = "\u26a0\ufe0f COO \u2014 Nome aggiornato in DB ma rinomina topic Telegram fallita."
+            err_text = (
+                "\u2699\ufe0f COO\n"
+                "Rinomina parziale\n\n"
+                "Nome aggiornato in DB ma rinomina topic Telegram fallita."
+            )
             if topic_id:
                 self._send_to_topic(topic_id, err_text)
             return {"status": "partial", "project_id": project_id, "db": True, "telegram": False}

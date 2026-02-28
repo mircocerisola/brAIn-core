@@ -214,9 +214,10 @@ def coach_chiefs() -> Dict[str, Any]:
         status_lines.append(f"{icon} {chief_id.upper()}{detail}")
 
     report = (
-        f"\U0001f393 Coaching settimanale Chief\n\n"
+        "\U0001f331 CPeO\n"
+        "Coaching settimanale Chief\n\n"
         + "\n".join(status_lines)
-        + f"\n\nLearning aggiunti: {learning_added}"
+        + "\n\nLearning aggiunti: " + str(learning_added)
     )
 
     _send_people(report)

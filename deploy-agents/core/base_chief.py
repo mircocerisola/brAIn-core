@@ -19,6 +19,21 @@ from core.templates import now_rome
 # SANDBOX PERIMETERS — hardcoded, non modificabili da prompt
 # ============================================================
 
+# ============================================================
+# ICONE CHIEF — fisse, usate in ogni messaggio Telegram
+# ============================================================
+
+CHIEF_ICONS: Dict[str, str] = {
+    "cto": "\U0001f527",   # 🔧
+    "cfo": "\U0001f4ca",   # 📊
+    "cso": "\U0001f3af",   # 🎯
+    "cmo": "\U0001f3a8",   # 🎨
+    "coo": "\u2699\ufe0f", # ⚙️
+    "clo": "\u2696\ufe0f", # ⚖️
+    "cpeo": "\U0001f331",  # 🌱
+}
+
+
 SANDBOX_PERIMETERS: Dict[str, Dict[str, Any]] = {
     "cso": {
         "file_allowed": [],
@@ -494,7 +509,6 @@ class BaseChief(BaseAgent):
         Ritorna la risposta del Chief destinazione, o None se la domanda è propria.
         """
         chief_id = self.chief_id or self.name.lower()
-        sep = "\u2501" * 15
 
         # Fast keyword pre-check: se match univoco a un altro chief → skip Claude
         question_lower = question.lower()
@@ -608,7 +622,6 @@ class BaseChief(BaseAgent):
         """
         chief_id = self.chief_id or self.name.lower()
         perimeter = SANDBOX_PERIMETERS.get(chief_id, {})
-        sep = "\u2501" * 15
 
         # Analisi sicurezza con Claude Haiku
         analysis_prompt = (
@@ -779,9 +792,17 @@ class BaseChief(BaseAgent):
         mese = self._MESI_IT[dt.month]
         return f"{giorno} {dt.day} {mese} {dt.year}"
 
+    def _chief_icon(self) -> str:
+        """Ritorna icona fissa del Chief da CHIEF_ICONS."""
+        return CHIEF_ICONS.get(self.chief_id, "\U0001f4ca")
+
+    def _msg_header(self, title: str) -> str:
+        """Header uniforme: icona NOME\\nTitolo\\n\\n"""
+        return self._chief_icon() + " " + self.name + "\n" + title + "\n\n"
+
     def _daily_report_emoji(self) -> str:
-        """Override nelle sottoclassi per emoji personalizzata."""
-        return "📊"
+        """Icona fissa da CHIEF_ICONS."""
+        return CHIEF_ICONS.get(self.chief_id, "\U0001f4ca")
 
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> List[str]:
         """
@@ -803,7 +824,6 @@ class BaseChief(BaseAgent):
         ieri_dt = oggi_start - timedelta(days=1)
         ieri_inizio = ieri_dt.isoformat()
         ieri_fine = oggi_start.isoformat()
-        sep = "\u2500" * 15
         budget_giornaliero_eur = 33.0  # €1000/mese ÷ 30
 
         # Costi API giorno precedente (comuni a tutti i Chief)
@@ -832,7 +852,8 @@ class BaseChief(BaseAgent):
         budget_pct = round(cost_ieri_eur / budget_giornaliero_eur * 100) if budget_giornaliero_eur > 0 else 0
 
         lines = [
-            f"{self._daily_report_emoji()} {self.name} \u2014 {header}",
+            self._chief_icon() + " " + self.name,
+            "Report Giornaliero " + header,
             "",
         ]
         for section in sections:
@@ -923,17 +944,18 @@ class BaseChief(BaseAgent):
         ctx = "\n\n".join(ctx_parts) if ctx_parts else "Nessun dato significativo disponibile."
 
         today_str = now_rome().strftime("%d %b").lstrip("0")
+        icon = self._chief_icon()
         prompt = (
-            f"Sei il {self.name} di brAIn. Genera un report di stato breve (max 10 righe, italiano).\n"
-            f"Dominio: {self.domain}\n"
-            f"Data: {today_str}\n"
-            f"Dati disponibili:\n{ctx}\n\n"
+            "Sei il " + self.name + " di brAIn. Genera un report di stato breve (max 10 righe, italiano).\n"
+            "Dominio: " + self.domain + "\n"
+            "Data: " + today_str + "\n"
+            "Dati disponibili:\n" + ctx + "\n\n"
             "FORMATO OBBLIGATORIO (Telegram, NO Markdown):\n"
-            f"- Prima riga: emoji + {self.name} + ' · ' + data (es: 📊 CFO · 26 feb)\n"
-            "- Separa le sezioni con una riga vuota, NIENTE righe orizzontali o trattini\n"
-            "- Sezioni: emoji + TITOLO MAIUSCOLO (es: 💰 COSTI)\n"
-            "- Dati concreti su righe separate con numeri reali\n"
-            "- VIETATO: ** grassetto **, ## titoli, ---- trattini, ─── separatori, parole inglesi (tranne termini tecnici)\n"
+            "- Prima riga ESATTA: " + icon + " " + self.name + "\n"
+            "- Seconda riga: titolo del report (es: Report di Stato)\n"
+            "- Terza riga: vuota\n"
+            "- Dalla quarta in poi: contenuto con dati concreti\n"
+            "- VIETATO: ** grassetto **, ## titoli, ---- trattini, ___ separatori, parole inglesi (tranne termini tecnici)\n"
             "- Tutto in italiano. Zero fuffa. Vai al punto.\n"
             "Se non ci sono novita, comunica lo stato attuale del dominio."
         )
@@ -993,8 +1015,9 @@ class BaseChief(BaseAgent):
             except Exception as e:
                 logger.warning(f"[{self.name}] Save briefing error: {e}")
 
+            icon = self._chief_icon()
             self.notify_mirco(
-                f"\U0001f4ca *{self.name} Briefing Settimanale*\n\n{briefing_text[:800]}",
+                icon + " " + self.name + "\nBriefing Settimanale\n\n" + briefing_text[:800],
                 level="info"
             )
             return {"status": "ok", "chief": self.name, "briefing": briefing_text[:500]}
@@ -1121,8 +1144,7 @@ def send_system_health_check() -> Dict[str, Any]:
     Genera e invia un health check del sistema brAIn al topic #technology.
     Controlla: DB, scheduler jobs, progetti attivi, ultimi errori.
     """
-    sep = "\u2501" * 15
-    now_str = now_rome().strftime("%d/%m %H:%M UTC")
+    now_str = now_rome().strftime("%d/%m %H:%M")
 
     checks: Dict[str, str] = {}
     details: List[str] = []
@@ -1186,10 +1208,11 @@ def send_system_health_check() -> Dict[str, Any]:
     detail_text = ("\n" + "\n".join(details)) if details else ""
 
     msg = (
-        f"\U0001f50d Health Check brAIn\n\n"
-        f"{checks_lines}"
-        f"{detail_text}\n\n"
-        f"{now_str}"
+        "\U0001f527 CTO\n"
+        "Health Check brAIn\n\n"
+        + checks_lines
+        + detail_text + "\n\n"
+        + now_str
     )
 
     # Invia a #technology (chief_topic_cto)
@@ -1206,7 +1229,6 @@ def send_system_health_check() -> Dict[str, Any]:
                     "chat_id": group_id,
                     "message_thread_id": tech_topic_id,
                     "text": msg[:4000],
-                    "parse_mode": "Markdown",
                 },
                 timeout=15,
             )

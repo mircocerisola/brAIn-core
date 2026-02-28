@@ -49,9 +49,6 @@ class CLO(BaseChief):
         return ctx
 
 
-    def _daily_report_emoji(self) -> str:
-        return "\u2696\ufe0f"
-
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
         """CLO: ethics violations, legal reviews, compliance log — giorno precedente."""
         sections = []

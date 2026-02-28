@@ -264,7 +264,8 @@ class CTO(BaseChief):
         if len(last_line) > 200:
             last_line = last_line[:197] + "..."
         return (
-            "\u23f3 Aggiornamento \u2014 " + str(elapsed) + " min\n\n"
+            "\U0001f527 CTO\n"
+            "Aggiornamento " + str(elapsed) + " min\n\n"
             + last_line
         )
 
@@ -292,7 +293,7 @@ class CTO(BaseChief):
         except Exception as e:
             logger.warning("[CTO] update status ready: %s", e)
             self._send_telegram(chat_id, thread_id,
-                                "\u274c Errore: impossibile preparare task #" + str(task_id))
+                                "\U0001f527 CTO\nErrore\n\nImpossibile preparare task #" + str(task_id))
             return
 
         # 3. Trigger Cloud Run Job con CODE_TASK_ID
@@ -302,16 +303,18 @@ class CTO(BaseChief):
         ora = format_time_rome()
         if job_ok:
             self._send_telegram(chat_id, thread_id,
-                "\u2699\ufe0f Claude Code avviato in cloud\n\n"
-                "\U0001f4cb Task: " + titolo + "\n"
-                "\U0001f504 Avviato alle " + ora + "\n"
-                "\u2601\ufe0f Esecuzione: Cloud Run Job\n"
-                "\u23f3 Aggiornamento ogni 5 minuti")
+                "\U0001f527 CTO\n"
+                "Claude Code avviato in cloud\n\n"
+                "Task: " + titolo + "\n"
+                "Avviato alle " + ora + "\n"
+                "Esecuzione: Cloud Run Job\n"
+                "Aggiornamento ogni 5 minuti")
         else:
             self._send_telegram(chat_id, thread_id,
-                "\u26a0\ufe0f Task #" + str(task_id) + " in coda (ready)\n\n"
-                "\U0001f4cb " + titolo + "\n"
-                "Job trigger fallito \u2014 il task rimane in stato 'ready'.\n"
+                "\U0001f527 CTO\n"
+                "Task in coda\n\n"
+                "Task #" + str(task_id) + ": " + titolo + "\n"
+                "Job trigger fallito, il task rimane in stato ready.\n"
                 "Verra' eseguito al prossimo run del job.")
 
         # 5. Monitor loop in background — legge output_log da DB
@@ -349,8 +352,9 @@ class CTO(BaseChief):
                     label = labels.get(status, "Completato")
 
                     completion_text = (
-                        icon + " " + label + "\n\n"
-                        + "\U0001f4cb " + _ttl + " \u00b7 " + str(_elapsed) + " min"
+                        "\U0001f527 CTO\n"
+                        + label + "\n\n"
+                        + "Task: " + _ttl + " " + str(_elapsed) + " min"
                     )
                     completion_markup = {"inline_keyboard": [[
                         {"text": "\U0001f4c4 Dettaglio", "callback_data": "code_detail:" + str(_tid)},
@@ -379,7 +383,8 @@ class CTO(BaseChief):
                 "status": "interrupt_requested",
             }).eq("id", task_id).execute()
         except Exception as e:
-            self._send_telegram(chat_id, thread_id, "Errore interrupt: " + str(e))
+            self._send_telegram(chat_id, thread_id,
+                                "\U0001f527 CTO\nErrore interrupt\n\n" + str(e))
             return
 
         logger.info("[CTO] interrupt_task #%d -> interrupt_requested", task_id)
@@ -393,8 +398,9 @@ class CTO(BaseChief):
             pass
 
         self._send_telegram(chat_id, thread_id,
-            "\U0001f6d1 Interruzione richiesta\n\n"
-            "\U0001f4cb " + titolo + "\n"
+            "\U0001f527 CTO\n"
+            "Interruzione richiesta\n\n"
+            "Task: " + titolo + "\n"
             "Il job terminera' il processo.")
 
     # ---- CLOUD RUN JOB TRIGGER ----
@@ -536,10 +542,11 @@ class CTO(BaseChief):
         meta = self._extract_prompt_meta(prompt) if prompt else {"main_file": "da determinare", "time_minutes": 5}
 
         card_text = (
-            "\u2699\ufe0f CTO \u2014 Prossima azione\n\n"
-            "\U0001f4cb Task: " + title + "\n"
-            "\U0001f3af File coinvolti: " + meta.get("main_file", "da determinare") + "\n"
-            "\u23f1\ufe0f Stima: " + str(meta.get("time_minutes", 5)) + " min"
+            "\U0001f527 CTO\n"
+            "Prossima azione\n\n"
+            "Task: " + title + "\n"
+            "File coinvolti: " + meta.get("main_file", "da determinare") + "\n"
+            "Stima: " + str(meta.get("time_minutes", 5)) + " min"
         )
         markup = {"inline_keyboard": [[
             {"text": "\u25b6\ufe0f Avvia", "callback_data": "code_approve:" + str(task_id)},

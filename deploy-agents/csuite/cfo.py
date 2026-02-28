@@ -152,9 +152,6 @@ class CFO(BaseChief):
             "hours": hours,
         }
 
-    def _daily_report_emoji(self) -> str:
-        return "\U0001f4b6"
-
     def _get_daily_report_sections(self, ieri_inizio: str, ieri_fine: str) -> list:
         """CFO: costi API, breakdown per agente/modello/progetto, anomalie — giorno precedente."""
         sections = []

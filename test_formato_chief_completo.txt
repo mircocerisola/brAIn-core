@@ -1,0 +1,59 @@
+=== TEMPLATES ===
+  SMOKE_TEST_CARD: PASS
+  CODEACTION_CARD: PASS
+  PROMPT_RUNNING: PASS
+  PROMPT_PROGRESS: PASS
+  PROMPT_DONE: PASS
+  PROMPT_ERROR: PASS
+
+=== CTO ===
+  build_update_message: PASS
+  execute_approved_task_ok: PASS
+  interrupt_task: PASS
+  send_preview_card: PASS
+  error_message: PASS
+  completion_message: PASS
+
+=== CFO ===
+  daily_report_header: PASS
+  brief_report: PASS
+  weekly_briefing: PASS
+
+=== CSO ===
+  smoke_relaunch: PASS
+  daily_report: PASS
+  smoke_card_template: PASS
+
+=== CMO ===
+  daily_report: PASS
+  bozza_photo_caption: PASS
+  brief_report: PASS
+
+=== COO ===
+  project_daily_report: PASS
+  accelerator_reminder: PASS
+  rename_confirm: PASS
+  rename_partial: PASS
+
+=== CLO ===
+  daily_report: PASS
+  weekly_briefing: PASS
+  brief_report: PASS
+
+=== CPeO ===
+  coaching_report: PASS
+  daily_report: PASS
+  weekly_briefing: PASS
+
+=== SOURCE CODE SCAN ===
+  cto.py: PASS
+  cfo.py: PASS
+  cso.py: PASS
+  cmo.py: PASS
+  coo.py: PASS
+  clo.py: PASS
+  cpeo.py: PASS
+  base_chief.py: PASS
+  templates.py: PASS
+
+=== TOTALE: 40 PASS, 0 FAIL ===
